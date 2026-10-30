@@ -54,7 +54,7 @@ func describe(_ error: Error) -> String {
             return "Couldn't reach the server. Check that Tailscale is on and the address and port are right." + code
         case .serverCertificateUntrusted, .secureConnectionFailed, .serverCertificateHasUnknownRoot,
              .serverCertificateHasBadDate, .serverCertificateNotYetValid:
-            return "The server's certificate isn't trusted. Turn on \"Accept self-signed certificate\" in Settings." + code
+            return "The server's certificate wasn't accepted. For TrueNAS, check that \"Accept self-signed certificate\" is on and the address matches the one you use in Safari." + code
         default:
             return urlError.localizedDescription + code
         }

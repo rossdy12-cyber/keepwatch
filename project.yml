@@ -50,8 +50,9 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        # Sonarr, Radarr, Lidarr and NZBGet are reached over Tailscale on plain http.
+        # Sonarr, Radarr, Lidarr and NZBGet are reached over Tailscale on plain http, and TrueNAS uses a
+        # self-signed certificate. Don't add NSAllowsLocalNetworking or the other NSAllows* keys here: iOS
+        # ignores NSAllowsArbitraryLoads when any of them is present, which blocks both.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-          NSAllowsLocalNetworking: true
         NSLocalNetworkUsageDescription: Keepwatch connects to your own TrueNAS server and media apps.
