@@ -1,0 +1,53 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Keepwatch.xcodeproj \
+            -target Keepwatch \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet \
+            build
+
+      - name: Package Payload/Keepwatch.app into Keepwatch.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Keepwatch.app out/Payload/
+          cd out
+          zip -qry Keepwatch.ipa Payload
+          ls -lh Keepwatch.ipa
+
+      - name: Upload the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Keepwatch-ipa
+          path: out/Keepwatch.ipa
+          retention-days: 30
