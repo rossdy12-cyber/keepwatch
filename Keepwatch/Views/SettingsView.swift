@@ -167,7 +167,8 @@ struct ServiceSection: View {
                 let version = try await NZBGetClient(config: config).version()
                 message = "Connected: NZBGet \(version)"
             case .sonarr, .radarr, .lidarr:
-                message = "Connected: " + (try await ArrClient(service: service, config: config).testConnection())
+                let version = try await ArrClient(service: service, config: config).testConnection()
+                message = "Connected: \(version)"
             }
             test = .success(message)
         } catch {

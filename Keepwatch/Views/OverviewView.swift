@@ -88,14 +88,22 @@ struct OverviewView: View {
         let live = store.live
         let memoryTotal = store.system?.memoryTotal
         let memoryUsed = live.memoryServices
-        let memoryFraction = (memoryUsed != nil && (memoryTotal ?? 0) > 0) ? memoryUsed! / memoryTotal! : nil
+        var memoryFraction: Double?
+        if let memoryUsed, let memoryTotal, memoryTotal > 0 {
+            memoryFraction = memoryUsed / memoryTotal
+        }
+        var cpuCaption: [String] = []
+        if let cores = store.system?.cores { cpuCaption.append("\(cores) threads") }
+        if live.cpuTemperature != nil { cpuCaption.append(Format.temperature(live.cpuTemperature)) }
+        let load = store.system?.loadAverage.prefix(3).map { String(format: "%.2f", $0) } ?? []
+        let loadText = load.isEmpty ? "—" : load.joined(separator: " ")
+        let cpuFraction: Double? = live.cpuUsage.map { $0 / 100 }
 
         return LazyVGrid(columns: columns, spacing: 12) {
             StatTile(title: "CPU", value: Format.percent(live.cpuUsage),
-                     caption: [store.system?.cores.map { "\($0) threads" }, live.cpuTemperature.map { _ in Format.temperature(live.cpuTemperature) }]
-                        .compactMap { $0 }.joined(separator: " · "),
-                     symbol: "cpu", color: Theme.level((live.cpuUsage ?? 0) / 100),
-                     fraction: live.cpuUsage.map { $0 / 100 })
+                     caption: cpuCaption.joined(separator: " · "),
+                     symbol: "cpu", color: Theme.level(cpuFraction ?? 0),
+                     fraction: cpuFraction)
             StatTile(title: "Memory", value: Format.bytes(memoryUsed),
                      caption: "of \(Format.bytes(memoryTotal)) · ZFS cache \(Format.bytes(live.memoryCache))",
                      symbol: "memorychip", color: Theme.level(memoryFraction ?? 0), fraction: memoryFraction)
@@ -103,7 +111,7 @@ struct OverviewView: View {
                      caption: "↑ " + Format.bitRate(live.sendRate),
                      symbol: "network", color: Theme.download)
             StatTile(title: "CPU temp", value: Format.temperature(live.cpuTemperature),
-                     caption: "Load " + (store.system?.loadAverage.prefix(3).map { String(format: "%.2f", $0) }.joined(separator: " ") ?? "—"),
+                     caption: "Load \(loadText)",
                      symbol: "thermometer.medium", color: Theme.temperatureColor(live.cpuTemperature))
         }
     }
@@ -127,7 +135,7 @@ struct OverviewView: View {
                     AxisMarks(values: [0, 50, 100]) { value in
                         AxisGridLine().foregroundStyle(Color.white.opacity(0.08))
                         AxisValueLabel {
-                            if let number = value.as(Int.self) { Text("\(number)%") }
+                            if let number = value.as(Double.self) { Text("\(Int(number))%") }
                         }
                     }
                 }

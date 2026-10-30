@@ -193,6 +193,10 @@ final class MediaStore: ObservableObject {
         )
     }
 
+    nonisolated private static func addedDate(_ movie: JSONValue) -> Date {
+        movie["movieFile"]["dateAdded"].date ?? movie["added"].date ?? .distantPast
+    }
+
     nonisolated private static func loadRadarr(_ client: ArrClient) async throws -> ServiceSnapshot {
         let query = window()
         async let calendar = client.get("/calendar", query)
@@ -222,9 +226,9 @@ final class MediaStore: ObservableObject {
             .map { movieItem($0, client: client, date: $0["digitalRelease"].date ?? $0["inCinemas"].date, idPrefix: "radarr-missing") }
         snapshot.recent = movies
             .filter { $0["hasFile"].bool == true }
-            .sorted { ($0["movieFile"]["dateAdded"].date ?? $0["added"].date ?? .distantPast) > ($1["movieFile"]["dateAdded"].date ?? $1["added"].date ?? .distantPast) }
+            .sorted { addedDate($0) > addedDate($1) }
             .prefix(10)
-            .map { movieItem($0, client: client, date: $0["movieFile"]["dateAdded"].date ?? $0["added"].date, idPrefix: "radarr-recent") }
+            .map { movieItem($0, client: client, date: addedDate($0), idPrefix: "radarr-recent") }
         return snapshot
     }
 

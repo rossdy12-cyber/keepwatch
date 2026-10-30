@@ -121,7 +121,7 @@ final class TrueNASStore: ObservableObject {
             async let infoResult = attempt { try await client.call("system.info") }
             async let poolResult = attempt { try await client.call("pool.query") }
             async let diskResult = attempt { try await client.call("disk.query") }
-            async let tempResult = attempt { try await client.call("disk.temperatures", [[]]) }
+            async let tempResult = attempt { try await client.call("disk.temperatures", [[String]()]) }
             async let smartResult = attempt { try await client.call("smart.test.results") }
             async let alertResult = attempt { try await client.call("alert.list") }
             async let appResult = attempt { try await client.call("app.query") }

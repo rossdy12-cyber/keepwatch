@@ -214,14 +214,14 @@ final class TrueNASClient {
         case "alert.list": return try await rest("GET", "/alert/list")
         case "app.query": return try await rest("GET", "/app")
         case "chart.release.query": return try await rest("GET", "/chart/release")
-        case "disk.temperatures": return try await rest("POST", "/disk/temperatures", body: ["names": []])
+        case "disk.temperatures": return try await rest("POST", "/disk/temperatures", body: ["names": [String]()])
         case "smart.test.results": return try await rest("GET", "/smart/test/results")
         case "filesystem.listdir": return try await rest("POST", "/filesystem/listdir", body: ["path": first()])
         case "filesystem.stat": return try await rest("POST", "/filesystem/stat", body: first())
         case "core.download":
             let body: [String: Any] = [
                 "method": params.count > 0 ? params[0] : "",
-                "args": params.count > 1 ? params[1] : [],
+                "args": params.count > 1 ? params[1] : [Any](),
                 "filename": params.count > 2 ? params[2] : "download"
             ]
             return try await rest("POST", "/core/download", body: body)

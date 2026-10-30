@@ -160,6 +160,14 @@ struct FolderView: View {
 struct FileRow: View {
     let entry: FileEntry
 
+    private var details: String {
+        var parts: [String] = []
+        if !entry.isDirectory { parts.append(Format.bytes(entry.size)) }
+        if let modified = entry.modified { parts.append(Format.dateTime(modified)) }
+        if entry.isSymlink { parts.append("link") }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: entry.symbol)
@@ -169,11 +177,8 @@ struct FileRow: View {
                 Text(entry.name)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                let details = [entry.isDirectory ? nil : Format.bytes(entry.size),
-                               entry.modified.map { Format.dateTime($0) },
-                               entry.isSymlink ? "link" : nil].compactMap { $0 }
                 if !details.isEmpty {
-                    Text(details.joined(separator: " · "))
+                    Text(details)
                         .font(.caption)
                         .foregroundStyle(Theme.secondaryText)
                 }
