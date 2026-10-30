@@ -46,11 +46,35 @@ struct ServiceConfig: Codable, Equatable {
     var username: String = ""
     var password: String = ""
     var acceptSelfSigned: Bool = true
+    /// The user confirmed that a domain-name TrueNAS address reaches TrueNAS directly, not through a proxy.
+    var trustsDirectDomain: Bool = false
+
+    init() {}
+
+    // Settings saved by older versions lack newer keys, so every field falls back to its default.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        address = try container.decodeIfPresent(String.self, forKey: .address) ?? ""
+        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
+        username = try container.decodeIfPresent(String.self, forKey: .username) ?? ""
+        password = try container.decodeIfPresent(String.self, forKey: .password) ?? ""
+        acceptSelfSigned = try container.decodeIfPresent(Bool.self, forKey: .acceptSelfSigned) ?? true
+        trustsDirectDomain = try container.decodeIfPresent(Bool.self, forKey: .trustsDirectDomain) ?? false
+    }
 
     var baseURL: String { ServerAddress.normalize(address) }
 
     var isConfigured: Bool {
         !baseURL.isEmpty && (!apiKey.isEmpty || !username.isEmpty || !password.isEmpty)
+    }
+
+    /// True for addresses that can't be a public proxy: IP addresses, Tailscale (`*.ts.net`) and local names.
+    var isPrivateHost: Bool {
+        guard let host = URL(string: baseURL)?.host?.lowercased() else { return false }
+        if host.contains(":") { return true }  // IPv6 literal
+        if host.split(separator: ".").count == 4, host.split(separator: ".").allSatisfy({ UInt8($0) != nil }) { return true }
+        if !host.contains(".") { return true }
+        return [".ts.net", ".local", ".lan", ".home.arpa", ".internal", ".localdomain"].contains { host.hasSuffix($0) }
     }
 }
 

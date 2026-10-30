@@ -4,6 +4,8 @@ enum APIError: LocalizedError {
     case notConfigured(String)
     case invalidURL
     case insecureTrueNAS
+    case proxiedTrueNAS
+    case cloudflareTrueNAS
     case http(Int)
     case server(String)
     case unauthorized(String)
@@ -18,6 +20,10 @@ enum APIError: LocalizedError {
             return "That address doesn't look right. It should look like http://100.x.x.x:30027"
         case .insecureTrueNAS:
             return "Use https:// for TrueNAS. TrueNAS switches off an API key as soon as it is sent over plain http."
+        case .proxiedTrueNAS:
+            return "Use your NAS's Tailscale IP (https://100.x.x.x) for TrueNAS. A domain name usually goes through Cloudflare or a proxy, which passes the key on over plain http, and TrueNAS then switches the key off. The key wasn't sent."
+        case .cloudflareTrueNAS:
+            return "That address goes through Cloudflare, which passes the key on to TrueNAS over plain http, and TrueNAS would switch the key off. The key wasn't sent. Use your NAS's Tailscale IP (https://100.x.x.x) instead."
         case .http(let code):
             return "The server answered with an error (HTTP \(code))."
         case .server(let message):

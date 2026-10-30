@@ -27,6 +27,7 @@ final class TrueNASClient {
         let base = config.baseURL
         guard !base.isEmpty, URL(string: base)?.host != nil else { throw APIError.invalidURL }
         guard base.lowercased().hasPrefix("https://") else { throw APIError.insecureTrueNAS }
+        guard config.isPrivateHost || config.trustsDirectDomain else { throw APIError.proxiedTrueNAS }
         guard !config.apiKey.isEmpty else { throw APIError.notConfigured("TrueNAS") }
         self.base = base
         self.apiKey = config.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -38,6 +39,7 @@ final class TrueNASClient {
 
     func connect() async throws {
         if mode != nil { return }
+        try await refuseCloudflare()
 
         var socketError: Error?
         do {
@@ -69,6 +71,21 @@ final class TrueNASClient {
         }
 
         serverVersion = try? await call("system.version").string
+    }
+
+    /// Makes one request without the key first. If Cloudflare answers, the key would reach TrueNAS over
+    /// plain http and TrueNAS would revoke it, so it is never sent.
+    private func refuseCloudflare() async throws {
+        guard let url = URL(string: base + "/") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 10
+        guard let (_, response) = try? await httpSession.data(for: request),
+              let http = response as? HTTPURLResponse else { return }
+        let server = (http.value(forHTTPHeaderField: "Server") ?? "").lowercased()
+        if server.contains("cloudflare") || http.value(forHTTPHeaderField: "CF-RAY") != nil {
+            throw APIError.cloudflareTrueNAS
+        }
     }
 
     func close() {

@@ -103,7 +103,7 @@ Keepwatch needs a key for each service. Create them yourself, and paste them onl
 3. Click **Add**, give it a name like `keepwatch`, and save.
 4. **Copy the key now:** TrueNAS only shows it once. You can always delete it and make a new one.
 
-> **Important:** use **`https://`** for TrueNAS in Keepwatch (for example `https://100.x.x.x`). TrueNAS automatically switches off an API key if it is ever sent over plain `http://`. Keepwatch refuses to send it over http for that reason. TrueNAS uses its own "self-signed" certificate, so leave **Accept self-signed certificate** on.
+> **Important:** for TrueNAS, use **`https://` plus your NAS's Tailscale IP** (for example `https://100.x.x.x`). Don't use a public web address that goes through Cloudflare (such as your own `.co.uk` domain). TrueNAS automatically switches off an API key that reaches it over plain `http://`, and Cloudflare passes requests on to the NAS over http behind the scenes, even when the address starts with https. Keepwatch checks for this and won't send the key to an http address, a Cloudflare address, or a domain name (unless you confirm that the domain reaches TrueNAS directly). TrueNAS uses its own "self-signed" certificate, so leave **Accept self-signed certificate** on.
 
 ### Sonarr, Radarr and Lidarr API keys
 
@@ -160,7 +160,7 @@ When the code changes, upload the new files to GitHub (Step 1). That starts a ne
 | "Couldn't reach the server" | Check that Tailscale is on, on the iPhone. Open the same address in Safari on the phone: if Safari can't open it either, the address or port is wrong. |
 | "Use https:// for TrueNAS" | Change the TrueNAS address to start with `https://`. |
 | "The server's certificate isn't trusted" | Turn on **Accept self-signed certificate** under TrueNAS in Settings. |
-| TrueNAS key "refused" | The key may have been revoked (for example, if it was ever used over http). Create a new one (Step 6). |
+| TrueNAS key "refused", or a TrueNAS alert says the key was revoked for "insecure transport" | The key reached TrueNAS over http (often via Cloudflare) and was switched off. Delete it in Credentials → API Keys, create a new one (Step 6), and use `https://<Tailscale IP>` as the address. |
 | "That address is Radarr, not Sonarr" | The ports are swapped. Check each app's port in TrueNAS → Apps. |
 | Temperatures or SMART show "—" | Some TrueNAS versions or virtual disks don't report them. A NAS running as a virtual machine often can't see its disks' temperatures. |
 | Keepwatch won't open after a week | Re-sign it with Sideloadly ("Every 7 days" above). |

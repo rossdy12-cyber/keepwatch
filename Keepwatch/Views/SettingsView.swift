@@ -75,6 +75,16 @@ struct ServiceSection: View {
             }
             if service == .truenas {
                 Toggle("Accept self-signed certificate", isOn: binding(\.acceptSelfSigned))
+                if !settings[service].baseURL.isEmpty && !settings[service].isPrivateHost {
+                    Toggle(isOn: binding(\.trustsDirectDomain)) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("This domain reaches TrueNAS directly")
+                            Text("Only turn this on if it doesn't go through Cloudflare or a proxy. Otherwise TrueNAS will switch your key off.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.warning)
+                        }
+                    }
+                }
             }
             Button {
                 Task { await runTest() }
@@ -109,7 +119,7 @@ struct ServiceSection: View {
     private var footer: String {
         switch service {
         case .truenas:
-            return "Use https:// and your NAS's Tailscale IP. TrueNAS switches off an API key that is sent over plain http. Create a key in \(service.keyHelp)."
+            return "Use https:// and your NAS's Tailscale IP, not your public (Cloudflare) web address. TrueNAS switches off an API key that reaches it over plain http, which Cloudflare does behind the scenes. Create a key in \(service.keyHelp)."
         case .nzbget:
             return "Find the username and password in \(service.keyHelp)."
         default:
