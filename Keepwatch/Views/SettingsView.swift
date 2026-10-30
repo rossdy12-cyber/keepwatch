@@ -24,6 +24,8 @@ struct SettingsView: View {
                     ServiceSection(service: service)
                 }
 
+                HiddenFoldersSection()
+
                 Section {
                     LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
                 } footer: {
@@ -184,5 +186,39 @@ struct ServiceSection: View {
         } catch {
             test = .failure(describe(error))
         }
+    }
+}
+
+/// Lists what was hidden in the Files tab, so it can be shown again.
+struct HiddenFoldersSection: View {
+    @AppStorage(HiddenPaths.storageKey) private var hiddenText = ""
+
+    var body: some View {
+        let paths = HiddenPaths.decode(hiddenText)
+        Section {
+            if paths.isEmpty {
+                Text("Nothing hidden. In Files, swipe left on a folder (or press and hold it) to hide it.")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            ForEach(paths, id: \.self) { path in
+                HStack {
+                    Text(path)
+                        .font(.subheadline)
+                        .lineLimit(2)
+                        .truncationMode(.head)
+                    Spacer()
+                    Button("Show") {
+                        hiddenText = HiddenPaths.toggled(path, in: hiddenText)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        } header: {
+            Label("Hidden in Files", systemImage: "eye.slash")
+        } footer: {
+            Text("Hiding only affects this app. Nothing on the NAS is changed.")
+        }
+        .listRowBackground(Theme.surface)
     }
 }

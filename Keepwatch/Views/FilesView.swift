@@ -84,9 +84,13 @@ struct FolderView: View {
     @State private var loading = true
     @State private var sort: FileSort = .name
     @State private var showHidden = false
+    @AppStorage(HiddenPaths.storageKey) private var hiddenText = ""
+
+    private var hidden: Set<String> { Set(HiddenPaths.decode(hiddenText)) }
 
     private var visible: [FileEntry] {
-        let filtered = showHidden ? entries : entries.filter { !$0.name.hasPrefix(".") }
+        let hidden = hidden
+        let filtered = showHidden ? entries : entries.filter { !$0.name.hasPrefix(".") && !hidden.contains($0.path) }
         return filtered.sorted { a, b in
             if a.isDirectory != b.isDirectory { return a.isDirectory }
             switch sort {
@@ -115,10 +119,18 @@ struct FolderView: View {
                     .listRowBackground(Theme.surface)
             }
             ForEach(visible) { entry in
+                let isHidden = hidden.contains(entry.path)
                 NavigationLink(value: entry) {
                     FileRow(entry: entry)
+                        .opacity(isHidden ? 0.45 : 1)
                 }
                 .listRowBackground(Theme.surface)
+                .swipeActions(edge: .trailing) {
+                    hideButton(entry, isHidden: isHidden)
+                }
+                .contextMenu {
+                    hideButton(entry, isHidden: isHidden)
+                }
             }
         }
         .scrollContentBackground(.hidden)
@@ -131,7 +143,7 @@ struct FolderView: View {
                     Picker("Sort by", selection: $sort) {
                         ForEach(FileSort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
-                    Toggle("Show hidden files", isOn: $showHidden)
+                    Toggle("Show hidden items", isOn: $showHidden)
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease.circle")
                 }
@@ -140,6 +152,15 @@ struct FolderView: View {
         .refreshable { await load() }
         .task { await load() }
         .keepwatchChrome()
+    }
+
+    private func hideButton(_ entry: FileEntry, isHidden: Bool) -> some View {
+        Button {
+            hiddenText = HiddenPaths.toggled(entry.path, in: hiddenText)
+        } label: {
+            Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash")
+        }
+        .tint(Theme.secondaryText)
     }
 
     private func load() async {
@@ -154,6 +175,26 @@ struct FolderView: View {
             if isCancellation(error) { return }
             self.error = describe(error)
         }
+    }
+}
+
+/// Folders and files the user has hidden from the file browser. Only Keepwatch hides them; nothing on
+/// the NAS changes.
+enum HiddenPaths {
+    static let storageKey = "hiddenPaths"
+
+    static func decode(_ text: String) -> [String] {
+        text.split(separator: "\n").map(String.init)
+    }
+
+    static func toggled(_ path: String, in text: String) -> String {
+        var paths = decode(text)
+        if let index = paths.firstIndex(of: path) {
+            paths.remove(at: index)
+        } else {
+            paths.append(path)
+        }
+        return paths.sorted().joined(separator: "\n")
     }
 }
 
