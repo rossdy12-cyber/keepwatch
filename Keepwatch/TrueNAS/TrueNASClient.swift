@@ -88,7 +88,7 @@ final class TrueNASClient {
         }
     }
 
-    func close() {
+    func close(error: Error? = nil) {
         let (oldTask, waiting) = locked { () -> (URLSessionWebSocketTask?, [CheckedContinuation<JSONValue, Error>]) in
             let old = task
             let waiting = Array(pending.values)
@@ -99,7 +99,7 @@ final class TrueNASClient {
             return (old, waiting)
         }
         oldTask?.cancel(with: .goingAway, reason: nil)
-        waiting.forEach { $0.resume(throwing: URLError(.networkConnectionLost)) }
+        waiting.forEach { $0.resume(throwing: error ?? URLError(.networkConnectionLost)) }
     }
 
     /// Asks TrueNAS to push live CPU, memory and network stats about once a second.
@@ -156,8 +156,14 @@ final class TrueNASClient {
         socket.receive { [weak self] result in
             guard let self else { return }
             switch result {
-            case .failure:
-                if self.locked({ self.task === socket }) { self.close() }
+            case .failure(let error):
+                guard self.locked({ self.task === socket }) else { return }
+                // Pass on the real reason (certificate, refused upgrade, …) instead of a generic "connection lost".
+                if let http = socket.response as? HTTPURLResponse, http.statusCode != 101 {
+                    self.close(error: APIError.server("TrueNAS refused the live connection (HTTP \(http.statusCode)). Check the address and port."))
+                } else {
+                    self.close(error: error)
+                }
             case .success(let message):
                 var data: Data?
                 switch message {

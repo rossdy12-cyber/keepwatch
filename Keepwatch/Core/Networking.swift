@@ -47,14 +47,16 @@ func isCancellation(_ error: Error) -> Bool {
 /// A friendlier message for network errors that people see on screen.
 func describe(_ error: Error) -> String {
     if let urlError = error as? URLError {
+        // The code helps tell apart "nothing answered" (-1004), "timed out" (-1001) and certificate problems (-12xx).
+        let code = " (error \(urlError.code.rawValue))"
         switch urlError.code {
         case .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost, .timedOut, .networkConnectionLost:
-            return "Couldn't reach the server. Check that Tailscale is on and the address is right."
+            return "Couldn't reach the server. Check that Tailscale is on and the address and port are right." + code
         case .serverCertificateUntrusted, .secureConnectionFailed, .serverCertificateHasUnknownRoot,
              .serverCertificateHasBadDate, .serverCertificateNotYetValid:
-            return "The server's certificate isn't trusted. Turn on \"Accept self-signed certificate\" in Settings."
+            return "The server's certificate isn't trusted. Turn on \"Accept self-signed certificate\" in Settings." + code
         default:
-            break
+            return urlError.localizedDescription + code
         }
     }
     return error.localizedDescription
