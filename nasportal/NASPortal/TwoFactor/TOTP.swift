@@ -11,8 +11,8 @@ struct OTPAccount: Codable, Identifiable, Equatable {
     var name: String
     /// Base32, as shown by TrueNAS / Authelia when setting up 2FA.
     var secret: String
-    /// Comma-separated host names this code is for. A name also covers its subdomains unless a more specific
-    /// account matches: "nas-server.co.uk" covers TrueNAS, "auth.nas-server.co.uk" covers Authelia.
+    /// Comma-separated host names this code is for, matched exactly: "nas-server.co.uk" is TrueNAS only and
+    /// "auth.nas-server.co.uk" is Authelia only. "*.example.com" opts in to every subdomain.
     var sites: String
     var digits: Int = 6
     var period: Int = 30
@@ -34,9 +34,17 @@ struct OTPAccount: Codable, Identifiable, Equatable {
     }
 
     /// How well this account matches a host: the length of the matching site name, or nil.
+    /// Exact names only, so a TrueNAS code is never typed into another sign-in page on the same domain
+    /// (Authelia submits as soon as the boxes are full, and wrong codes count towards its lock-out).
     func matchStrength(host: String) -> Int? {
         let host = host.lowercased()
-        return siteList.filter { host == $0 || host.hasSuffix("." + $0) }.map(\.count).max()
+        return siteList.compactMap { site -> Int? in
+            if site.hasPrefix("*.") {
+                let domain = String(site.dropFirst(2))
+                return host.hasSuffix("." + domain) ? domain.count : nil
+            }
+            return host == site ? site.count + 1 : nil
+        }.max()
     }
 
     /// Reads an `otpauth://totp/Issuer:name?secret=…&issuer=…` link (what the QR code contains).

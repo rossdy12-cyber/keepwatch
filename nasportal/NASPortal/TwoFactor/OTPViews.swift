@@ -103,7 +103,7 @@ struct OTPEditor: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } footer: {
-                    Text("Sites: the addresses whose sign-in page needs this code, comma-separated. TrueNAS: nas-server.co.uk, 100.85.127.42. Authelia: auth.nas-server.co.uk.")
+                    Text("Sites: the exact addresses whose sign-in page needs this code, comma-separated. TrueNAS: nas-server.co.uk, 100.85.127.42. Authelia: auth.nas-server.co.uk. Each code only fills on the addresses listed here.")
                 }
                 if let code = account.code() {
                     Section("Current code") {
@@ -171,8 +171,13 @@ struct OTPEditor: View {
             return
         }
         if account.sites.isEmpty {
-            let lower = trimmed.lowercased()
-            account.sites = lower.contains("authelia") ? "auth.nas-server.co.uk" : "nas-server.co.uk, 100.85.127.42"
+            // Only fill in the site when the QR code says whose it is; otherwise leave it for you to type.
+            let lower = (trimmed + " " + account.name).lowercased()
+            if lower.contains("authelia") {
+                account.sites = "auth.nas-server.co.uk"
+            } else if lower.contains("truenas") || lower.contains("ixsystems") {
+                account.sites = "nas-server.co.uk, 100.85.127.42"
+            }
         }
     }
 }
