@@ -6,6 +6,9 @@ on:
     paths-ignore:
       - "jarvis/**"
       - ".github/workflows/build-jarvis-ipa.yml"
+      - "nasportal/**"
+      - "frigate-ntfy/**"
+      - ".github/workflows/build-nasportal-ipa.yml"
   workflow_dispatch:
 
 jobs:
