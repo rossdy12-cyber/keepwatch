@@ -8,6 +8,8 @@ struct ChatView: View {
     @EnvironmentObject private var chat: ChatStore
     @EnvironmentObject private var speaker: Speaker
     @StateObject private var listener = SpeechRecognizer()
+    @ObservedObject private var music = MusicPlayer.shared
+    @State private var musicWasPlaying = false
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
 
@@ -48,6 +50,9 @@ struct ChatView: View {
                         .foregroundStyle(Theme.warning)
                         .padding(.horizontal)
                         .padding(.top, 6)
+                }
+                if music.hasQueue {
+                    NowPlayingBar(music: music)
                 }
                 inputBar
             }
@@ -160,17 +165,42 @@ struct ChatView: View {
     private func toggleListening() {
         if listener.isRecording {
             let heard = listener.stop()
+            // Music was paused so the microphone could hear you; carry on unless you asked to change it.
+            let command = MusicCommand.parse(heard)
+            if command == nil || command == .nowPlaying {
+                music.restoreAfterListening(wasPlaying: musicWasPlaying)
+            }
             if !heard.isEmpty { send(heard, viaVoice: true) }
         } else {
             speaker.stop()
             inputFocused = false
+            musicWasPlaying = music.isPlaying
+            if music.isPlaying { music.pause() }
             Task { await listener.start() }
         }
     }
 
     private func send(_ text: String, viaVoice: Bool) {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !chat.isSending else { return }
         draft = ""
+        // Music requests are handled on the phone, straight from Navidrome.
+        if let command = MusicCommand.parse(text) {
+            let replyID = chat.beginLocal(text)
+            let account = settings.navidrome
+            let mode = settings.config.speakMode
+            Task {
+                let reply = await MusicDJ.handle(command, account: account)
+                chat.finishLocal(replyID, reply: reply)
+                if let reply {
+                    if !command.startsMusic && (mode == .always || (mode == .afterVoice && viaVoice)) {
+                        speaker.speak(reply)
+                    }
+                } else {
+                    chat.send(text, settings: settings, onReply: replyFinished(viaVoice))
+                }
+            }
+            return
+        }
         chat.send(text, settings: settings, onReply: replyFinished(viaVoice))
     }
 
@@ -315,5 +345,53 @@ struct ReactorRing: View {
         }
         .animation(.linear(duration: active ? 2 : 12).repeatForever(autoreverses: false), value: spin)
         .onAppear { spin = true }
+    }
+}
+
+/// What's playing from Navidrome, above the message box.
+struct NowPlayingBar: View {
+    @ObservedObject var music: MusicPlayer
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Group {
+                if let image = music.artwork {
+                    Image(uiImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "music.note").foregroundStyle(Theme.accent)
+                }
+            }
+            .frame(width: 40, height: 40)
+            .background(Theme.surfaceRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(music.current?.displayTitle ?? "")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text(music.current?.artist ?? "")
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryText)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button { music.togglePlayPause() } label: {
+                Image(systemName: music.isPlaying ? "pause.fill" : "play.fill").font(.title3)
+            }
+            .accessibilityLabel(music.isPlaying ? "Pause" : "Play")
+            Button { music.next() } label: {
+                Image(systemName: "forward.fill").font(.title3)
+            }
+            .accessibilityLabel("Next song")
+            Button { music.stop() } label: {
+                Image(systemName: "xmark").font(.footnote.weight(.bold)).foregroundStyle(Theme.secondaryText)
+            }
+            .accessibilityLabel("Stop music")
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
     }
 }

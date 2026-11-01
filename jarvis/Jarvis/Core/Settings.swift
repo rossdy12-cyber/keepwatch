@@ -96,6 +96,11 @@ final class JarvisSettings: ObservableObject {
         didSet { Keychain.save(secrets, for: Self.secretsKey) }
     }
 
+    /// Navidrome sign-in for playing music, kept in the Keychain.
+    @Published var navidrome: NavidromeAccount {
+        didSet { Keychain.save(navidrome, for: "navidrome") }
+    }
+
     @Published var detection: Detection? {
         didSet {
             if let detection, let data = try? JSONEncoder().encode(detection) {
@@ -112,6 +117,7 @@ final class JarvisSettings: ObservableObject {
             ?? JarvisConfig()
         detection = defaults.data(forKey: Self.detectionKey).flatMap { try? JSONDecoder().decode(Detection.self, from: $0) }
         secrets = Keychain.load(JarvisSecrets.self, for: Self.secretsKey) ?? JarvisSecrets()
+        navidrome = Keychain.load(NavidromeAccount.self, for: "navidrome") ?? NavidromeAccount()
         TrustDelegate.shared.setTrusted(host: host(of: config.address), trusted: config.trustSelfSigned)
     }
 

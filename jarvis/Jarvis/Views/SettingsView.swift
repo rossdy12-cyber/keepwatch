@@ -6,6 +6,8 @@ struct SettingsView: View {
 
     @State private var testing = false
     @State private var testResult: (ok: Bool, message: String)?
+    @State private var testingMusic = false
+    @State private var musicResult: (ok: Bool, message: String)?
 
     var body: some View {
         NavigationStack {
@@ -78,6 +80,40 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    TextField("https://navidrome.nas-server.co.uk", text: $settings.navidrome.address)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Username", text: $settings.navidrome.username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Password", text: $settings.navidrome.password)
+                    Picker("Quality", selection: $settings.navidrome.maxBitRate) {
+                        Text("Original (lossless)").tag(Int?.none)
+                        ForEach([320, 256, 192, 128], id: \.self) { Text("\($0) kbps MP3").tag(Int?.some($0)) }
+                    }
+                    Button {
+                        Task { await testMusic() }
+                    } label: {
+                        HStack {
+                            Text("Test Navidrome")
+                            Spacer()
+                            if testingMusic { ProgressView() }
+                        }
+                    }
+                    .disabled(testingMusic || !settings.navidrome.isConfigured)
+                    if let musicResult {
+                        Label(musicResult.message, systemImage: musicResult.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                            .font(.footnote)
+                            .foregroundStyle(musicResult.ok ? Theme.good : Theme.danger)
+                    }
+                } header: {
+                    Text("Music (Navidrome)")
+                } footer: {
+                    Text("Say or type things like \u{201c}play Coldplay\u{201d}, \u{201c}play the album Rumours\u{201d}, \u{201c}play Yellow by Coldplay\u{201d}, \u{201c}play some jazz\u{201d}, \u{201c}play my gym playlist\u{201d}, \u{201c}shuffle my music\u{201d}, \u{201c}skip\u{201d}, \u{201c}pause\u{201d} or \u{201c}what's playing\u{201d}. Music keeps playing with the screen locked. The password is kept in the iPhone Keychain.")
+                }
+
+                Section {
                     Picker("Speak replies", selection: $settings.config.speakMode) {
                         ForEach(SpeakMode.allCases) { Text($0.label).tag($0) }
                     }
@@ -145,6 +181,20 @@ struct SettingsView: View {
         case .custom:
             let endpoint = settings.endpoint
             return "Chats go to POST \(endpoint.chatPath) as {\"\(endpoint.messageField)\": \"…\", \"session_id\": \"…\"}. The reply can be plain text, JSON (reply, response, answer, text, content or message), or streamed."
+        }
+    }
+
+    private func testMusic() async {
+        testingMusic = true
+        musicResult = nil
+        defer { testingMusic = false }
+        do {
+            try await NavidromeClient(account: settings.navidrome).ping()
+            musicResult = (true, "Connected to Navidrome.")
+        } catch let error as MusicError {
+            musicResult = (false, error.localizedDescription)
+        } catch {
+            musicResult = (false, describe(error))
         }
     }
 

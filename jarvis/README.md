@@ -6,6 +6,11 @@ A chat-and-voice app for the **Jarvis core** running on your TrueNAS server, rea
 - **Chat** with streaming replies, Markdown, copy, retry and stop.
 - **Voice:** tap the microphone, speak, tap again to send. Replies can be read aloud (Settings → Speak replies).
 - **Status dot** shows whether Jarvis is reachable; tap it to check again.
+- **Music from Navidrome:** "play Coldplay", "play the album Rumours", "play Yellow by Coldplay", "play some jazz",
+  "play my gym playlist", "shuffle my music", "skip", "previous", "pause", "carry on", "what's playing". These are
+  understood on the phone and played straight from Navidrome, so they work even if the Jarvis core is busy or down.
+  Music keeps playing with the screen locked, with lock-screen controls and a now-playing bar in the chat; it pauses
+  while you talk to Jarvis. Set it up in Settings → Music (Navidrome).
 - The conversation is kept on the phone; ✎ starts a new one (with a new `session_id`).
 
 ## Your Jarvis core

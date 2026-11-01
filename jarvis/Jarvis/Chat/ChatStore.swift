@@ -74,6 +74,27 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    /// Shows a request the phone answers itself (music), with a typing bubble until `finishLocal`.
+    func beginLocal(_ text: String) -> UUID {
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        turns.append(ChatTurn(role: .user, text: message))
+        let replyID = UUID()
+        turns.append(ChatTurn(id: replyID, role: .assistant, text: ""))
+        isSending = true
+        return replyID
+    }
+
+    /// Fills in the answer, or (nil) takes the request back out so it can go to the Jarvis core instead.
+    func finishLocal(_ replyID: UUID, reply: String?) {
+        isSending = false
+        if let reply {
+            update(replyID) { $0.text = reply }
+        } else if let index = turns.firstIndex(where: { $0.id == replyID }), index > 0 {
+            turns.removeSubrange((index - 1)...index)
+        }
+        save()
+    }
+
     func stop() {
         task?.cancel()
     }

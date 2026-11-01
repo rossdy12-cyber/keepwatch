@@ -54,6 +54,9 @@ targets:
         # Don't add the other NSAllows* keys: iOS ignores NSAllowsArbitraryLoads when any of them is present.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        # Keeps Navidrome music playing with the screen locked.
+        UIBackgroundModes:
+          - audio
         NSLocalNetworkUsageDescription: Jarvis connects to the Jarvis core on your own server.
         NSMicrophoneUsageDescription: Jarvis listens while you hold the microphone button so you can talk to it.
         NSSpeechRecognitionUsageDescription: Jarvis turns what you say into text to send to your Jarvis core.
