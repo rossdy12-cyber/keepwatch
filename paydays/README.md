@@ -19,6 +19,15 @@ NAS Portal, or open it in Safari and choose *Share → Add to Home Screen*.
   balance on the 1st, it starts from what the saving plan says should already be put aside.
 - **Tick off** each bill as it leaves your account.
 
+**Apple Pay → Paydays, with alerts** (Pay & settings tab)
+- An iPhone Shortcut runs every time you pay with Apple Pay. It sends the shop and amount to your private link,
+  and the notification shows what's left, e.g. *"Tesco £23.40. £94.60 left until Thursday (£31.53 a day)."*
+  The settings page has the link and step-by-step setup. Card payments without Apple Pay, online shopping and
+  transfers aren't seen: add those with **+ Spent**.
+- **Alerts through ntfy** (the same app as the camera alerts, on a different topic): when you've spent more than
+  this pay allows, when you're spending too fast for the days left (each at most once per pay period), and for
+  any single payment over an amount you choose.
+
 **Bills tab:** add each monthly payment with its amount and the day of the month it goes out.
 **Pay & settings:** your usual take-home pay, how often you're paid, one recent payday, and an optional
 monthly savings goal. On the Month tab, tap **Edit** on any payday to put in what you actually got.
@@ -30,6 +39,22 @@ monthly savings goal. On the Month tab, tap **Edit** on any payday to put in wha
 3. To use it at `https://paydays.nas-server.co.uk`, add a proxy host for it in Nginx Proxy Manager (forward to
    the NAS on port 8450) and put it behind Authelia like your other apps, because this is your financial information.
    If it's only ever used over Tailscale, you can set `APP_PASSWORD` instead.
+
+### If it's behind Authelia
+
+The Shortcut can't sign in to Authelia, so let its one link through. It's protected by the secret key in the
+link instead, and it can only add spending. In Authelia's `configuration.yml`, under `access_control.rules`,
+add this **above** your other rules for the domain:
+
+```yaml
+    - domain: paydays.nas-server.co.uk
+      resources:
+        - '^/hook/spend([?].*)?'
+      policy: bypass
+```
+
+Restart Authelia afterwards. If you think the link has leaked, tap **New link** in Paydays and paste the new one
+into the Shortcut.
 
 Your data lives in the app's `paydays-data` volume (one small SQLite file). To keep it in a dataset you
 back up, change the volume line in the YAML to a path such as `/mnt/<pool>/apps/paydays:/data`.

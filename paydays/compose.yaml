@@ -40,19 +40,25 @@ configs:
       import base64
       import hmac
       import json
+      import math
       import os
       import re
+      import secrets
       import sqlite3
       import threading
-      from datetime import date
+      import time
+      import urllib.error
+      import urllib.request
+      from datetime import date, datetime, timedelta, timezone
       from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-      from urllib.parse import urlparse
+      from urllib.parse import parse_qs, quote, urlparse
 
       DB_PATH = os.environ.get("DB_PATH", "/data/paydays.db")
       PORT = int(os.environ.get("PORT", "8450"))
       PASSWORD = os.environ.get("APP_PASSWORD", "")
 
       db_lock = threading.Lock()
+      alerts_lock = threading.Lock()  # one alert check at a time, so an alert is never sent twice
 
 
       def connect():
@@ -95,12 +101,44 @@ configs:
               );
               """
           )
+          # Columns added after the first version.
+          columns = {row["name"] for row in conn.execute("PRAGMA table_info(pays)")}
+          if "source" not in columns:
+              conn.execute("ALTER TABLE pays ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+          if "created" not in columns:
+              conn.execute("ALTER TABLE pays ADD COLUMN created REAL NOT NULL DEFAULT 0")
+          conn.commit()
           return conn
 
 
       conn = connect()
 
-      DEFAULT_SETTINGS = {"pay_amount": "0", "pay_frequency": "weekly", "pay_anchor": "", "currency": "GBP", "savings": "0"}
+      DEFAULT_SETTINGS = {
+          "pay_amount": "0", "pay_frequency": "weekly", "pay_anchor": "", "currency": "GBP", "savings": "0",
+          "hook_token": "", "ntfy_server": "https://ntfy.sh", "ntfy_topic": "", "ntfy_token": "",
+          "alert_over": "1", "alert_pace": "1", "alert_big": "0", "public_url": "", "alerts_sent": "{}",
+      }
+
+
+      def read_settings():
+          """Every setting as a string. Call with db_lock held."""
+          settings = dict(DEFAULT_SETTINGS)
+          settings.update({row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings")})
+          return settings
+
+
+      def write_setting(key, value):
+          """Call with db_lock held, inside a transaction."""
+          conn.execute(
+              "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+              (key, str(value)),
+          )
+
+
+      # The private key in the Apple Pay Shortcut's link. Made once, kept in the database.
+      with db_lock, conn:
+          if not read_settings()["hook_token"]:
+              write_setting("hook_token", secrets.token_urlsafe(24))
       DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
       MONTH_RE = re.compile(r"^\d{4}-\d{2}\Z")
 
@@ -146,8 +184,7 @@ configs:
 
       def everything():
           with db_lock:
-              settings = dict(DEFAULT_SETTINGS)
-              settings.update({row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings")})
+              settings = read_settings()
               return {
                   "bills": [dict(r) for r in conn.execute("SELECT * FROM bills ORDER BY day, name")],
                   "pays": [dict(r) for r in conn.execute("SELECT * FROM pays ORDER BY date")],
@@ -159,6 +196,13 @@ configs:
                       "pay_anchor": settings["pay_anchor"],
                       "currency": settings["currency"],
                       "savings": int(settings["savings"] or 0),
+                      "hook_token": settings["hook_token"],
+                      "ntfy_server": settings["ntfy_server"],
+                      "ntfy_topic": settings["ntfy_topic"],
+                      "ntfy_token_set": bool(settings["ntfy_token"]),
+                      "alert_over": settings["alert_over"] == "1",
+                      "alert_pace": settings["alert_pace"] == "1",
+                      "alert_big": int(settings["alert_big"] or 0),
                   },
               }
 
@@ -168,6 +212,7 @@ configs:
           if method == "GET" and parts == ["data"]:
               return everything()
 
+          after_commit = []
           with db_lock, conn:
               if parts == ["bills"] and method == "POST":
                   day = int(body.get("day") or 0)
@@ -210,9 +255,10 @@ configs:
                   if amount == 0:
                       raise BadRequest("Enter how much you spent")
                   conn.execute(
-                      "INSERT INTO pays (date, amount, kind, note) VALUES (?, ?, 'spend', ?)",
-                      (as_date(body.get("date")), amount, as_text(body.get("note"), 60)),
+                      "INSERT INTO pays (date, amount, kind, note, source, created) VALUES (?, ?, 'spend', ?, 'manual', ?)",
+                      (as_date(body.get("date")), amount, as_text(body.get("note"), 60), time.time()),
                   )
+                  after_commit.append(lambda: check_alerts(amount, as_text(body.get("note"), 60) or "Spending"))
               elif len(parts) == 2 and parts[0] == "spend" and method == "DELETE":
                   conn.execute("DELETE FROM pays WHERE id = ? AND kind = 'spend'", (int(parts[1]),))
               elif parts == ["paid"] and method == "PUT":
@@ -236,13 +282,282 @@ configs:
                   values = {"pay_amount": str(as_pence(body.get("pay_amount"))), "pay_frequency": frequency, "pay_anchor": anchor,
                             "savings": str(as_pence(body.get("savings") or 0))}
                   for key, value in values.items():
-                      conn.execute(
-                          "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                          (key, value),
-                      )
+                      write_setting(key, value)
+              elif parts == ["alerts"] and method == "PUT":
+                  server = str(body.get("ntfy_server") or "https://ntfy.sh").strip().rstrip("/")
+                  if not server.lower().startswith(("https://", "http://")):
+                      raise BadRequest("The ntfy server should start with https://")
+                  topic = as_text(body.get("ntfy_topic"), 120)
+                  if topic and not re.match(r"^[A-Za-z0-9_-]+\Z", topic):
+                      raise BadRequest("The ntfy topic can only use letters, numbers, - and _")
+                  write_setting("ntfy_server", server)
+                  write_setting("ntfy_topic", topic)
+                  if body.get("ntfy_token") is not None:
+                      write_setting("ntfy_token", as_text(body.get("ntfy_token"), 200))
+                  write_setting("alert_over", "1" if body.get("alert_over") else "0")
+                  write_setting("alert_pace", "1" if body.get("alert_pace") else "0")
+                  write_setting("alert_big", as_pence(body.get("alert_big") or 0))
+                  if body.get("public_url"):
+                      write_setting("public_url", as_text(body.get("public_url"), 200))
+              elif parts == ["alerts", "test"] and method == "POST":
+                  after_commit.append(lambda: send_test_alert())
+              elif parts == ["hook-token"] and method == "POST":
+                  write_setting("hook_token", secrets.token_urlsafe(24))
               else:
                   return None
+          for action in after_commit:
+              action()
           return everything()
+
+
+      # ---------- What's left until payday, worked out on the server ----------
+      # This mirrors the page's JavaScript (paydaysBetween, billsBetween, savingPlan, payBreakdown) so the Apple Pay
+      # Shortcut and the alerts see the same numbers as the Month tab.
+
+      PAYS_PER_YEAR = {"weekly": 365.25 / 7, "fortnightly": 365.25 / 14, "fourweekly": 365.25 / 28, "monthly": 12}
+      STEP_DAYS = {"weekly": 7, "fortnightly": 14, "fourweekly": 28}
+
+
+      def uk_today():
+          """Today's date in the UK (the container may not have time zone data)."""
+          now = datetime.now(timezone.utc)
+          def last_sunday(year, month):
+              d = date(year, month, 31)
+              return d - timedelta(days=(d.weekday() + 1) % 7)
+          start = datetime.combine(last_sunday(now.year, 3), datetime.min.time(), timezone.utc) + timedelta(hours=1)
+          end = datetime.combine(last_sunday(now.year, 10), datetime.min.time(), timezone.utc) + timedelta(hours=1)
+          return (now + timedelta(hours=1 if start <= now < end else 0)).date()
+
+
+      def days_in(year, month):
+          return (date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)).day
+
+
+      def paydays_between(settings, start, end):
+          if not settings["pay_anchor"]:
+              return []
+          anchor = date.fromisoformat(settings["pay_anchor"])
+          if settings["pay_frequency"] == "monthly":
+              out, year, month = [], start.year, start.month
+              for _ in range(24):
+                  d = date(year, month, min(anchor.day, days_in(year, month)))
+                  if d > end:
+                      break
+                  if d >= start:
+                      out.append(d)
+                  month += 1
+                  if month > 12:
+                      month, year = 1, year + 1
+              return out
+          step = STEP_DAYS.get(settings["pay_frequency"], 7)
+          k = math.ceil((start - anchor).days / step)
+          out, d = [], anchor + timedelta(days=k * step)
+          while d <= end:
+              out.append(d)
+              d += timedelta(days=step)
+          return out
+
+
+      def bills_between(bills, start, end):
+          out, year, month = [], start.year, start.month
+          for _ in range(24):
+              if date(year, month, 1) > end:
+                  break
+              for bill in bills:
+                  if not bill["active"]:
+                      continue
+                  d = date(year, month, min(bill["day"], days_in(year, month)))
+                  if start <= d <= end:
+                      out.append((d, bill))
+              month += 1
+              if month > 12:
+                  month, year = 1, year + 1
+          out.sort(key=lambda item: (item[0], item[1]["name"]))
+          return out
+
+
+      def set_aside_for(settings, bills, payday):
+          """What the saving plan puts aside from one payday (bills plus savings)."""
+          occurrences = bills_between(bills, payday - timedelta(days=150), payday + timedelta(days=120))
+          pays = paydays_between(settings, payday - timedelta(days=190), payday + timedelta(days=120))
+          total = 0
+          for i, (due, bill) in enumerate(occurrences):
+              if due <= payday:
+                  continue
+              window = []
+              for j in range(i - 1, -1, -1):
+                  prev_due, prev = occurrences[j]
+                  if prev_due >= due or prev["amount"] * 2 < bill["amount"]:
+                      continue
+                  window = [t for t in pays if prev_due <= t < due]
+                  if window:
+                      break
+              if payday not in window:
+                  continue
+              share, extra = divmod(bill["amount"], len(window))
+              total += share + (1 if window.index(payday) < extra else 0)
+          per_year = PAYS_PER_YEAR.get(settings["pay_frequency"], 0)
+          savings = int(settings["savings"] or 0)
+          if per_year and savings:
+              total += math.ceil(savings * 12 / per_year)
+          return total
+
+
+      def period_status():
+          """This pay period's budget: allowance, spent, left, days left. None until pay is set up."""
+          with db_lock:
+              settings = read_settings()
+              bills = [dict(r) for r in conn.execute("SELECT * FROM bills")]
+              if not settings["pay_anchor"] or not int(settings["pay_amount"] or 0):
+                  return None
+              today = uk_today()
+              recent = paydays_between(settings, today - timedelta(days=40), today)
+              upcoming = paydays_between(settings, today + timedelta(days=1), today + timedelta(days=40))
+              if not recent or not upcoming:
+                  return None
+              start, next_pay = recent[-1], upcoming[0]
+              end = next_pay - timedelta(days=1)
+              actual = conn.execute("SELECT amount FROM pays WHERE kind = 'pay' AND date = ?", (start.isoformat(),)).fetchone()
+              spent = conn.execute(
+                  "SELECT COALESCE(SUM(amount), 0) FROM pays WHERE kind = 'spend' AND date BETWEEN ? AND ?",
+                  (start.isoformat(), end.isoformat()),
+              ).fetchone()[0]
+          pay = actual["amount"] if actual else int(settings["pay_amount"])
+          allowance = max(0, pay - set_aside_for(settings, bills, start))
+          left = allowance - spent
+          days_left = (end - today).days + 1
+          return {
+              "start": start, "end": end, "next": next_pay, "today": today, "allowance": allowance, "spent": spent,
+              "left": left, "days_left": days_left, "per_day": left // days_left if left > 0 else 0,
+              "period_days": (end - start).days + 1,
+          }
+
+
+      def money(pence):
+          sign = "-" if pence < 0 else ""
+          return "%s\u00a3%s" % (sign, format(abs(pence) / 100, ",.2f"))
+
+
+      def status_line(status):
+          if status is None:
+              return "Set up your pay in Paydays to see what's left."
+          weekday = status["next"].strftime("%A")
+          if status["left"] < 0:
+              return "Over by %s until %s." % (money(-status["left"]), weekday)
+          return "%s left until %s (%s a day)." % (money(status["left"]), weekday, money(status["per_day"]))
+
+
+      def send_ntfy(title, message, tags="moneybag", priority="default"):
+          with db_lock:
+              settings = read_settings()
+          if not settings["ntfy_topic"]:
+              return False
+          url = settings["ntfy_server"].rstrip("/") + "/" + quote(settings["ntfy_topic"])
+          # RFC 2047 so "\u00a3" and emoji survive in the title (ntfy decodes it).
+          encoded_title = "=?UTF-8?B?" + base64.b64encode(title.encode("utf-8")).decode("ascii") + "?="
+          headers = {"Title": encoded_title, "Tags": tags, "Priority": priority}
+          if settings["public_url"]:
+              headers["Click"] = settings["public_url"]
+          if settings["ntfy_token"]:
+              headers["Authorization"] = "Bearer " + settings["ntfy_token"]
+          request = urllib.request.Request(url, data=message.encode("utf-8"), method="POST", headers=headers)
+          try:
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  response.read()
+              return True
+          except (urllib.error.URLError, OSError) as error:
+              print("ntfy alert failed: %s" % error, flush=True)
+              return False
+
+
+      def check_alerts(amount, merchant):
+          """After each payment: warn once per pay period about going over or spending too fast, and about big payments."""
+          with alerts_lock:
+              _check_alerts(amount, merchant)
+
+
+      def _check_alerts(amount, merchant):
+          status = period_status()
+          with db_lock:
+              settings = read_settings()
+          if status is None or not settings["ntfy_topic"]:
+              return
+          period = status["start"].isoformat()
+          try:
+              sent = json.loads(settings["alerts_sent"] or "{}")
+          except ValueError:
+              sent = {}
+          sent = {key: value for key, value in sent.items() if key >= (status["today"] - timedelta(days=60)).isoformat()}
+          already = set(sent.get(period, []))
+          alerts = []
+          big = int(settings["alert_big"] or 0)
+          if big and amount >= big:
+              alerts.append(("big", "Big payment: %s" % money(amount), "%s %s. %s" % (merchant, money(amount), status_line(status)), "warning", "default"))
+          if settings["alert_over"] == "1" and status["left"] < 0 and "over" not in already:
+              alerts.append(("over", "Over budget until payday",
+                             "You've spent %s of %s from this pay. %s" % (money(status["spent"]), money(status["allowance"]), status_line(status)),
+                             "rotating_light", "high"))
+          elapsed = (status["today"] - status["start"]).days + 1
+          expected = status["allowance"] * elapsed / max(1, status["period_days"])
+          if (settings["alert_pace"] == "1" and status["left"] >= 0 and "pace" not in already and status["allowance"]
+                  and status["spent"] > expected + status["allowance"] * 0.15 and status["spent"] >= status["allowance"] * 0.4):
+              alerts.append(("pace", "Spending fast this week",
+                             "%d%% gone with %d of %d days to go. %s" % (round(status["spent"] * 100 / status["allowance"]),
+                                                                       status["days_left"], status["period_days"], status_line(status)),
+                             "warning", "high"))
+          for key, title, message, tags, priority in alerts:
+              if send_ntfy(title, message, tags, priority) and key != "big":
+                  already.add(key)
+          sent[period] = sorted(already)
+          with db_lock, conn:
+              write_setting("alerts_sent", json.dumps(sent))
+
+
+      def send_test_alert():
+          status = period_status()
+          send_ntfy("Paydays alerts are on", "This is a test. " + status_line(status), "white_check_mark")
+
+
+      def parse_amount(value):
+          """Shortcuts may send 23.4, "23.40", "\u00a323.40" or "23,40". Returns pence."""
+          if isinstance(value, (int, float)):
+              pence = round(float(value) * 100)
+          else:
+              text = re.sub(r"[^0-9.,\-]", "", str(value or ""))
+              if text.count(",") == 1 and "." not in text and len(text.split(",")[1]) == 2:
+                  text = text.replace(",", ".")
+              text = text.replace(",", "")
+              try:
+                  pence = round(float(text) * 100)
+              except ValueError:
+                  return 0
+          return abs(pence)
+
+
+      def handle_hook(body):
+          """An Apple Pay payment from the iPhone Shortcut. Returns the line shown in the notification."""
+          amount = parse_amount(body.get("amount"))
+          merchant = as_text(body.get("merchant"), 60) or "Apple Pay"
+          if amount <= 0:
+              return "Couldn't read the amount from Apple Pay. Add it in Paydays with + Spent."
+          today = uk_today().isoformat()
+          with db_lock, conn:
+              duplicate = conn.execute(
+                  "SELECT 1 FROM pays WHERE kind = 'spend' AND amount = ? AND note = ? AND created > ?",
+                  (amount, merchant, time.time() - 120),
+              ).fetchone()
+              if not duplicate:
+                  conn.execute(
+                      "INSERT INTO pays (date, amount, kind, note, source, created) VALUES (?, ?, 'spend', ?, 'applepay', ?)",
+                      (today, amount, merchant, time.time()),
+                  )
+          status = period_status()
+          if not duplicate:
+              threading.Thread(target=check_alerts, args=(amount, merchant), daemon=True).start()
+          line = "%s %s. %s" % (merchant, money(amount), status_line(status))
+          if status and status["left"] < 0:
+              line = "\u26a0\ufe0f " + line
+          return line
 
 
       class Handler(BaseHTTPRequestHandler):
@@ -276,6 +591,9 @@ configs:
               self.wfile.write(data)
 
           def route(self, method):
+              parsed = urlparse(self.path)
+              if parsed.path == "/hook/spend":
+                  return self.hook(method, parsed)
               if not self.authorised():
                   self.send_response(401)
                   self.send_header("WWW-Authenticate", 'Basic realm="Paydays"')
@@ -314,6 +632,32 @@ configs:
               if result is None:
                   return self.send(404, {"error": "Not found"})
               self.send(200, result)
+
+          def hook(self, method, parsed):
+              """The Apple Pay Shortcut's link: /hook/spend?token=... Works without the page password, so the
+              Shortcut can reach it; the token is what protects it. Answers with plain text for the notification."""
+              if method != "POST":
+                  return self.send(405, b"Use POST", "text/plain; charset=utf-8")
+              length = int(self.headers.get("Content-Length") or 0)
+              if length > 10_000:
+                  return self.send(413, b"Too much data", "text/plain; charset=utf-8")
+              raw = self.rfile.read(length) or b"{}"
+              try:
+                  body = json.loads(raw)
+              except ValueError:
+                  body = {key: values[0] for key, values in parse_qs(raw.decode("utf-8", "replace")).items()}
+              if not isinstance(body, dict):
+                  body = {}
+              token = (parse_qs(parsed.query).get("token") or [""])[0] or str(body.get("token") or "")
+              with db_lock:
+                  expected = read_settings()["hook_token"]
+              if not token or not hmac.compare_digest(token.encode(), expected.encode()):
+                  return self.send(403, b"Wrong link: copy it again from Paydays > Pay & settings.", "text/plain; charset=utf-8")
+              try:
+                  line = handle_hook(body)
+              except BadRequest as error:
+                  line = str(error)
+              self.send(200, line.encode("utf-8"), "text/plain; charset=utf-8")
 
           def do_GET(self):
               self.route("GET")
@@ -835,7 +1179,7 @@ configs:
           spentList.slice(0, 8).forEach(function (p) {
             box.appendChild(el("div", { class: "row" }, [
               el("div", { class: "grow" }, [
-                el("div", { class: "name", text: p.note || "Spending" }),
+                el("div", { class: "name" }, [p.note || "Spending", p.source === "applepay" ? el("span", { class: "tag", text: "Apple Pay" }) : null]),
                 el("div", { class: "meta", text: dayLabel(parseISO(p.date)) })
               ]),
               el("span", { class: "amount", text: money(p.amount) }),
@@ -937,6 +1281,81 @@ configs:
           el("button", { class: "primary", type: "submit", text: "Save" })
         ]));
         root.appendChild(el("p", { class: "hint", text: "Each payday uses this amount until you put in what you actually got (Month tab → Edit next to a payday). Savings are taken off before working out what's safe to spend." }));
+        renderApplePay(root);
+        renderAlerts(root);
+      }
+
+      function hookURL() {
+        return window.location.origin + "/hook/spend?token=" + encodeURIComponent(state.settings.hook_token);
+      }
+
+      function copyText(text, done) {
+        (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function () { toast(done); }, function () {
+          window.prompt("Copy this:", text);
+        });
+      }
+
+      function renderApplePay(root) {
+        root.appendChild(el("h2", { text: "Apple Pay: log spending automatically" }));
+        var url = hookURL();
+        var steps = [
+          "Copy your private link with the button above.",
+          "On the iPhone open Shortcuts → Automation → + → Transaction.",
+          "Choose your Revolut card, leave every category ticked, pick \u201cRun Immediately\u201d, then Next → New Blank Automation.",
+          "Add the action \u201cGet Contents of URL\u201d. Paste the link as the URL. Tap Show More: Method POST, Request Body JSON.",
+          "Add two fields: amount (type Number) set to Shortcut Input → Amount, and merchant (type Text) set to Shortcut Input → Merchant.",
+          "Add the action \u201cShow Notification\u201d and set it to Contents of URL. Done.",
+          "Pay for something with Apple Pay: you'll see what you spent and what's left until payday."
+        ];
+        var list = el("ol", { style: "margin:0;padding-left:20px;display:grid;gap:6px" }, steps.map(function (step) { return el("li", { text: step }); }));
+        root.appendChild(el("div", { class: "stack card" }, [
+          el("div", { class: "meta", text: "Your private link (keep it to yourself: anyone with it can add spending):" }),
+          el("code", { style: "display:block;word-break:break-all;font-size:12px;background:var(--surface2);padding:8px 10px;border-radius:8px;margin:8px 0", text: url }),
+          el("div", { class: "two" }, [
+            el("button", { class: "primary", type: "button", text: "Copy link", onclick: function () { copyText(url, "Link copied"); } }),
+            el("button", { type: "button", text: "New link", onclick: function () {
+              if (confirm("Make a new link? The old one stops working, so you'll need to paste the new one into your Shortcut.")) api("POST", "/api/hook-token", {});
+            } })
+          ]),
+          el("h2", { text: "Set it up once", style: "margin-top:14px" }),
+          list,
+          el("p", { class: "hint", text: "Card payments without Apple Pay, online shopping and transfers aren't seen: add those with + Spent on the Month tab. " +
+            "If the site is behind Authelia, let /hook/spend through (see the README); it's protected by the link's key instead." })
+        ]));
+      }
+
+      function renderAlerts(root) {
+        var s = state.settings;
+        root.appendChild(el("h2", { text: "Spending alerts (ntfy)" }));
+        var server = el("input", { value: s.ntfy_server || "https://ntfy.sh" });
+        var topic = el("input", { value: s.ntfy_topic || "", placeholder: "e.g. paydays-k7f2q9x4" });
+        var token = el("input", { type: "password", placeholder: s.ntfy_token_set ? "Saved (leave blank to keep)" : "Only if your ntfy server needs one" });
+        var over = el("input", { type: "checkbox", checked: s.alert_over ? "checked" : null });
+        var pace = el("input", { type: "checkbox", checked: s.alert_pace ? "checked" : null });
+        var big = el("input", { inputmode: "decimal", value: s.alert_big ? poundsText(s.alert_big) : "", placeholder: "Off" });
+        root.appendChild(el("form", { class: "stack", onsubmit: function (ev) {
+          ev.preventDefault();
+          api("PUT", "/api/alerts", {
+            ntfy_server: server.value, ntfy_topic: topic.value.trim(), ntfy_token: token.value ? token.value : null,
+            alert_over: over.checked, alert_pace: pace.checked, alert_big: toPence(big.value) || 0, public_url: window.location.origin
+          }).then(function () { toast("Saved"); });
+        } }, [
+          el("label", { class: "field" }, ["ntfy topic (subscribe to the same one in the ntfy app)", topic]),
+          el("label", { class: "row", style: "padding:0" }, [over, el("span", { text: "Tell me when I've spent more than this pay allows" })]),
+          el("label", { class: "row", style: "padding:0" }, [pace, el("span", { text: "Warn me when I'm spending too fast for the days left" })]),
+          el("label", { class: "field" }, ["Alert for any single payment over (£)", big]),
+          el("details", {}, [el("summary", { class: "meta", text: "ntfy server" }), el("div", { class: "stack", style: "padding:10px 0 0;border:none" }, [
+            el("label", { class: "field" }, ["Server", server]), el("label", { class: "field" }, ["Access token", token])
+          ])]),
+          el("div", { class: "two" }, [
+            el("button", { type: "button", text: "Send a test", onclick: function () {
+              if (!s.ntfy_topic) { toast("Save a topic first"); return; }
+              api("POST", "/api/alerts/test", {}).then(function () { toast("Test sent"); });
+            } }),
+            el("button", { class: "primary", type: "submit", text: "Save alerts" })
+          ])
+        ]));
+        root.appendChild(el("p", { class: "hint", text: "Over-budget and too-fast alerts come at most once per pay period. They work for Apple Pay payments and ones you add yourself." }));
       }
       function option(value, text, current) { return el("option", { value: value, text: text, selected: value === current ? "selected" : null }); }
 
