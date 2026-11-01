@@ -517,7 +517,7 @@ def handle_hook(body):
             merchant = as_text(re.sub(r"\s+", " ", rest).strip(" -,:"), 60)
     merchant = merchant or "Apple Pay"
     if amount <= 0:
-        if not merchant and not raw:
+        if not as_text(body.get("merchant"), 60) and not raw:
             # Run by hand with the play button: no payment came with it.
             return "Connected to Paydays \u2713 Pay with Apple Pay to log a payment. " + status_line(period_status())
         return "Couldn't read the amount from Apple Pay. Add it in Paydays with + Spent."
