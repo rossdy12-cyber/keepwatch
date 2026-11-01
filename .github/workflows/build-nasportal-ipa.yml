@@ -1,0 +1,59 @@
+name: Build NAS Portal IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "nasportal/**"
+      - ".github/workflows/build-nasportal-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: nasportal
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project NASPortal.xcodeproj \
+            -target NASPortal \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet \
+            build
+
+      - name: Package Payload/NASPortal.app into NASPortal.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/NASPortal.app out/Payload/
+          cd out
+          zip -qry NASPortal.ipa Payload
+          ls -lh NASPortal.ipa
+
+      - name: Upload the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: NASPortal-ipa
+          path: nasportal/out/NASPortal.ipa
+          retention-days: 30

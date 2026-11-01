@@ -1,0 +1,641 @@
+"""Jarvis voice hub: a "Hey Jarvis" speaker made from a Raspberry Pi and your TrueNAS.
+
+The Pi only streams its microphone (16 kHz, 16-bit mono) to this hub over the network and plays whatever audio the
+hub sends back. Everything else happens here:
+
+  1. openWakeWord listens for "Hey Jarvis".
+  2. A beep tells you it's listening; your question is recorded until you stop talking.
+  3. faster-whisper turns it into text.
+  4. The Jarvis core answers (POST /api/chat).
+  5. The reply is spoken in the core's own voice when it sends one, otherwise with Kokoro: a natural British
+     male voice (Piper as a backup).
+
+It also serves that voice to the Jarvis iPhone app (GET or POST /tts), so the phone sounds the same.
+
+It also serves the Pi's setup script: on the Pi run the command printed in this app's logs.
+"""
+
+import io
+import json
+import math
+import os
+import queue
+import re
+import secrets
+import socket
+import socketserver
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import urllib.request
+import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import numpy as np
+
+DATA = os.environ.get("DATA_DIR", "/data")
+JARVIS_URL = os.environ.get("JARVIS_URL", "https://jarvis.nas-server.co.uk").rstrip("/")
+JARVIS_PATH = os.environ.get("JARVIS_PATH", "/api/chat")
+SESSION_ID = os.environ.get("SESSION_ID", "voice-hub")
+AUDIO_PORT = int(os.environ.get("AUDIO_PORT", "10700"))
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "10701"))
+WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", "0.5"))
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
+VOICE = os.environ.get("VOICE", "en_GB-alan-medium")  # Piper backup voice
+TTS_VOICE = os.environ.get("TTS_VOICE", "bm_george")  # Kokoro: bm_george, bm_fable, bm_lewis, bm_daniel
+TTS_SPEED = float(os.environ.get("TTS_SPEED", "0.95"))
+VOICE_EFFECT = os.environ.get("VOICE_EFFECT", "light").lower()  # "light" adds a subtle AI-assistant sheen; "none"
+USE_CORE_VOICE = os.environ.get("USE_CORE_VOICE", "true").lower() in ("1", "true", "yes")
+FOLLOW_UP_SECONDS = float(os.environ.get("FOLLOW_UP_SECONDS", "0"))
+GREETING = os.environ.get("GREETING", "Jarvis is listening.")
+
+# Cloudflare blocks Python's default user agent.
+USER_AGENT = "Mozilla/5.0 (compatible; JarvisVoiceHub/1.0)"
+
+RATE = 16000
+FRAME = 1280  # 80 ms, what openWakeWord expects
+FRAME_BYTES = FRAME * 2
+
+
+def log(message):
+    print(time.strftime("%H:%M:%S"), message, flush=True)
+
+
+# ---------------------------------------------------------------------------------------------- setup
+
+def load_token():
+    """The key the Pi must present. From TOKEN, or made once and kept in /data/token."""
+    token = os.environ.get("TOKEN", "").strip()
+    if token:
+        return token
+    path = os.path.join(DATA, "token")
+    if os.path.exists(path):
+        return open(path).read().strip()
+    token = secrets.token_urlsafe(18)
+    os.makedirs(DATA, exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(token)
+    return token
+
+
+TOKEN = load_token()
+
+
+def ensure_voice():
+    folder = os.path.join(DATA, "voices")
+    os.makedirs(folder, exist_ok=True)
+    model = os.path.join(folder, VOICE + ".onnx")
+    if not os.path.exists(model) or not os.path.exists(model + ".json"):
+        # e.g. en_GB-alan-medium -> en/en_GB/alan/medium/
+        lang, name, quality = VOICE.split("-", 2)
+        base = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/%s/%s/%s/%s/%s" % (
+            lang.split("_")[0], lang, name, quality, VOICE)
+        for suffix in (".onnx", ".onnx.json"):
+            log("Downloading voice %s%s" % (VOICE, suffix))
+            urllib.request.urlretrieve(base + suffix, model + suffix[5:] if suffix == ".onnx.json" else model)
+    return model
+
+
+KOKORO_FILES = {
+    "kokoro-v1.0.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+    "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+}
+
+
+def load_kokoro():
+    folder = os.path.join(DATA, "kokoro")
+    os.makedirs(folder, exist_ok=True)
+    try:
+        for name, url in KOKORO_FILES.items():
+            path = os.path.join(folder, name)
+            if not os.path.exists(path):
+                log("Downloading the Kokoro voice model (%s, first start only)" % name)
+                urllib.request.urlretrieve(url, path + ".part")
+                os.replace(path + ".part", path)
+        from kokoro_onnx import Kokoro
+        kokoro = Kokoro(os.path.join(folder, "kokoro-v1.0.onnx"), os.path.join(folder, "voices-v1.0.bin"))
+        if TTS_VOICE not in kokoro.get_voices():
+            log("Kokoro has no voice %s; using bm_george" % TTS_VOICE)
+        return kokoro
+    except Exception as error:
+        log("Kokoro unavailable, using Piper instead: %s" % error)
+        return None
+
+
+def load_models():
+    from openwakeword.utils import download_models
+    download_models(["hey_jarvis"])
+    from faster_whisper import WhisperModel
+    log("Loading Whisper model %s (first start downloads it)" % WHISPER_MODEL)
+    whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", download_root=os.path.join(DATA, "whisper"))
+    return whisper, ensure_voice()
+
+
+WHISPER, VOICE_MODEL = load_models()
+whisper_lock = threading.Lock()
+KOKORO = load_kokoro()
+kokoro_lock = threading.Lock()
+
+
+def new_wake_model():
+    from openwakeword.model import Model
+    return Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+
+
+# ---------------------------------------------------------------------------------------------- audio helpers
+
+def tone_wav(freqs, length=0.12, rate=16000, volume=0.35):
+    """A short beep (one tone per entry) as WAV bytes."""
+    samples = []
+    for freq in freqs:
+        count = int(rate * length)
+        for i in range(count):
+            fade = min(1.0, i / (rate * 0.01), (count - i) / (rate * 0.01))
+            samples.append(int(volume * fade * 32767 * math.sin(2 * math.pi * freq * i / rate)))
+    return pcm_to_wav(struct.pack("<%dh" % len(samples), *samples), rate)
+
+
+def pcm_to_wav(pcm, rate):
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(pcm)
+    return buffer.getvalue()
+
+
+def wav_seconds(data):
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:
+        return 2.0
+
+
+BEEP_LISTEN = tone_wav([880, 1320])
+BEEP_NOTHING = tone_wav([660, 440])
+
+
+def add_effect(wav):
+    """A subtle "AI assistant" sheen: trims rumble, adds a faint short room reflection, evens out the level."""
+    if VOICE_EFFECT in ("none", "off", ""):
+        return wav
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", "pipe:0", "-af",
+         "highpass=f=70,aecho=0.8:0.6:18|36:0.10|0.05,acompressor=threshold=-20dB:ratio=2.5:attack=5:release=80,"
+         "loudnorm=I=-16:TP=-1.5", "-ar", "24000", "-ac", "1", "-f", "s16le", "pipe:1"],
+        input=wav, capture_output=True, timeout=60)
+    # Raw samples, wrapped here: a WAV that ffmpeg writes to a pipe has no length in its header.
+    return pcm_to_wav(result.stdout, 24000) if result.returncode == 0 and result.stdout else wav
+
+
+def speak(text):
+    """Text to speech as WAV bytes: Kokoro (natural British voice), or Piper if Kokoro isn't available."""
+    clean = re.sub(r"[*_`#>]", "", text)
+    clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean).strip()
+    if not clean:
+        return None
+    if KOKORO is not None:
+        try:
+            voice = TTS_VOICE if TTS_VOICE in KOKORO.get_voices() else "bm_george"
+            with kokoro_lock:
+                samples, rate = KOKORO.create(clean, voice=voice, speed=TTS_SPEED, lang="en-gb")
+            pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+            return add_effect(pcm_to_wav(pcm, rate))
+        except Exception as error:
+            log("Kokoro failed, using Piper: %s" % error)
+    return speak_piper(clean)
+
+
+def speak_piper(clean):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+        path = handle.name
+    try:
+        piper = os.path.join(os.path.dirname(sys.executable), "piper")
+        subprocess.run([piper if os.path.exists(piper) else "piper", "--model", VOICE_MODEL, "--output_file", path],
+                       input=clean.encode("utf-8"), capture_output=True, timeout=120, check=True)
+        with open(path, "rb") as handle:
+            return handle.read()
+    except Exception as error:
+        log("Piper failed: %s" % error)
+        return None
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def fetch_as_wav(url):
+    """The core's own voice recording (usually MP3), converted to WAV for the Pi."""
+    if not url.lower().startswith("http"):
+        url = JARVIS_URL + ("" if url.startswith("/") else "/") + url
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), timeout=30) as response:
+            data = response.read()
+        result = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "22050", "-f", "s16le", "pipe:1"],
+                                input=data, capture_output=True, timeout=60)
+        return pcm_to_wav(result.stdout, 22050) if result.returncode == 0 and result.stdout else None
+    except Exception as error:
+        log("Couldn't fetch the core's voice: %s" % error)
+        return None
+
+
+def transcribe(audio):
+    samples = audio.astype(np.float32) / 32768.0
+    with whisper_lock:
+        segments, _ = WHISPER.transcribe(samples, language="en", beam_size=1, vad_filter=False,
+                                         condition_on_previous_text=False)
+        text = " ".join(segment.text for segment in segments).strip()
+    # Whisper's usual guesses for silence or noise.
+    if re.fullmatch(r"[\s.,!?]*|(thanks for watching|thank you|you)[.!]?", text.lower()):
+        return ""
+    return text
+
+
+def ask_jarvis(text):
+    body = json.dumps({"message": text, "session_id": SESSION_ID}).encode()
+    request = urllib.request.Request(JARVIS_URL + JARVIS_PATH, data=body, method="POST",
+                                     headers={"Content-Type": "application/json", "Accept": "application/json",
+                                              "User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=90) as response:
+        reply = json.loads(response.read() or b"{}")
+    if isinstance(reply, dict):
+        return str(reply.get("reply") or reply.get("response") or reply.get("text") or ""), reply.get("audio_url")
+    return str(reply), None
+
+
+# ---------------------------------------------------------------------------------------------- one Pi
+
+class Satellite:
+    """One connected Pi: wake word, recording, answering."""
+
+    def __init__(self, sock, name):
+        self.sock = sock
+        self.name = name
+        self.send_lock = threading.Lock()
+        self.wake = new_wake_model()
+        self.state = "wake"
+        self.muted_until = 0.0
+        self.noise = 300.0
+        self.recording = []
+        self.speech_started = False
+        self.silence = 0.0
+        self.recorded = 0.0
+        self.wait_limit = 5.0
+        self.pending = b""
+
+    def send_audio(self, wav, tail=0.6):
+        if not wav:
+            return
+        frame = b"A" + struct.pack(">I", len(wav)) + wav
+        with self.send_lock:
+            self.sock.sendall(frame)
+        # Ignore what the microphone hears while (and just after) the Pi is playing.
+        self.muted_until = max(self.muted_until, time.time()) + wav_seconds(wav) + tail
+
+    def feed(self, data):
+        self.pending += data
+        while len(self.pending) >= FRAME_BYTES:
+            chunk, self.pending = self.pending[:FRAME_BYTES], self.pending[FRAME_BYTES:]
+            self.frame(np.frombuffer(chunk, dtype=np.int16))
+
+    def frame(self, samples):
+        now = time.time()
+        level = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+        if self.state == "busy":
+            return
+        if now < self.muted_until:
+            if self.state == "wake":
+                self.wake.predict(np.zeros(FRAME, dtype=np.int16))
+            return
+        if self.state == "wake":
+            self.noise = 0.98 * self.noise + 0.02 * level
+            scores = self.wake.predict(samples)
+            if max(scores.values()) >= WAKE_THRESHOLD:
+                log("[%s] Wake word heard (%.2f)" % (self.name, max(scores.values())))
+                self.wake.reset()
+                self.start_recording(wait_limit=5.0)
+                self.send_audio(BEEP_LISTEN, tail=0.05)
+            return
+        # Recording a question.
+        self.recording.append(samples.copy())
+        self.recorded += FRAME / RATE
+        loud = level > max(self.noise * 2.5, 400)
+        if loud:
+            self.speech_started = True
+            self.silence = 0.0
+        else:
+            self.silence += FRAME / RATE
+        if not self.speech_started and self.recorded > self.wait_limit:
+            log("[%s] Nothing said" % self.name)
+            self.back_to_wake()
+            if self.wait_limit > 3:  # after the wake word, not after a follow-up window
+                self.send_audio(BEEP_NOTHING)
+        elif (self.speech_started and self.silence > 0.9) or self.recorded > 15:
+            audio = np.concatenate(self.recording)
+            self.state = "busy"
+            threading.Thread(target=self.answer, args=(audio,), daemon=True).start()
+
+    def start_recording(self, wait_limit):
+        self.state = "record"
+        self.recording, self.speech_started, self.silence, self.recorded = [], False, 0.0, 0.0
+        self.wait_limit = wait_limit
+
+    def back_to_wake(self):
+        self.state = "wake"
+        self.recording = []
+        self.wake.reset()
+
+    def answer(self, audio):
+        try:
+            text = transcribe(audio)
+            if not text:
+                log("[%s] Couldn't make out any words" % self.name)
+                self.send_audio(BEEP_NOTHING)
+                return
+            log("[%s] Heard: %s" % (self.name, text))
+            try:
+                reply, audio_url = ask_jarvis(text)
+            except Exception as error:
+                log("[%s] Jarvis core error: %s" % (self.name, error))
+                reply, audio_url = "Sorry, I can't reach the Jarvis core at the moment.", None
+            log("[%s] Jarvis: %s" % (self.name, reply))
+            wav = fetch_as_wav(audio_url) if (USE_CORE_VOICE and audio_url) else None
+            self.send_audio(wav or speak(reply) or BEEP_NOTHING)
+        except Exception as error:
+            log("[%s] Error: %s" % (self.name, error))
+            self.send_audio(BEEP_NOTHING)
+        finally:
+            if FOLLOW_UP_SECONDS > 0 and self.state == "busy":
+                # Carry on the conversation without the wake word, once the reply has finished.
+                self.start_recording(wait_limit=FOLLOW_UP_SECONDS)
+            else:
+                self.back_to_wake()
+
+
+class AudioHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        sock = self.request
+        sock.settimeout(30)
+        try:
+            hello = b""
+            while not hello.endswith(b"\n") and len(hello) < 512:
+                byte = sock.recv(1)
+                if not byte:
+                    return
+                hello += byte
+            parts = hello.decode("utf-8", "replace").split()
+            if len(parts) < 2 or parts[0] != "JARVIS1" or not secrets.compare_digest(parts[1], TOKEN):
+                log("Refused a connection from %s (wrong key)" % self.client_address[0])
+                return
+            name = parts[2] if len(parts) > 2 else self.client_address[0]
+            log("[%s] Connected from %s" % (name, self.client_address[0]))
+            satellite = Satellite(sock, name)
+            if GREETING:
+                threading.Thread(target=lambda: satellite.send_audio(speak(GREETING)), daemon=True).start()
+            while True:
+                data = sock.recv(8192)
+                if not data:
+                    break
+                satellite.feed(data)
+        except (OSError, socket.timeout) as error:
+            log("Connection ended: %s" % error)
+        finally:
+            log("Disconnected: %s" % self.client_address[0])
+
+
+class AudioServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+# ---------------------------------------------------------------------------------------------- Pi installer over HTTP
+
+PI_CLIENT = r'''#!/usr/bin/env python3
+"""Jarvis Pi speaker: streams the microphone to the Jarvis voice hub and plays what it sends back.
+Only uses the Python standard library plus arecord/aplay, so it runs happily on a Raspberry Pi 1."""
+import os, queue, socket, struct, subprocess, threading, time
+
+HUB = os.environ.get("HUB_HOST", "")
+PORT = int(os.environ.get("HUB_PORT", "10700"))
+TOKEN = os.environ.get("HUB_TOKEN", "")
+NAME = os.environ.get("SATELLITE_NAME", socket.gethostname())
+MIC = os.environ.get("MIC_DEVICE", "default")
+SPEAKER = os.environ.get("SPEAKER_DEVICE", "default")
+
+playback = queue.Queue()
+
+def player():
+    while True:
+        wav = playback.get()
+        try:
+            subprocess.run(["aplay", "-q", "-D", SPEAKER, "-"], input=wav, timeout=300)
+        except Exception as error:
+            print("aplay failed:", error, flush=True)
+
+threading.Thread(target=player, daemon=True).start()
+
+def recv_exact(sock, count):
+    data = b""
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
+        if not chunk:
+            raise ConnectionError("hub closed the connection")
+        data += chunk
+    return data
+
+def run_once():
+    sock = socket.create_connection((HUB, PORT), timeout=10)
+    sock.settimeout(None)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.sendall(("JARVIS1 %s %s\n" % (TOKEN, NAME)).encode())
+    mic = subprocess.Popen(["arecord", "-q", "-D", MIC, "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw"],
+                           stdout=subprocess.PIPE)
+    stop = threading.Event()
+
+    def stream():
+        try:
+            while not stop.is_set():
+                data = mic.stdout.read(2560)
+                if not data:
+                    break
+                sock.sendall(data)
+        except OSError:
+            pass
+        finally:
+            stop.set()
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    threading.Thread(target=stream, daemon=True).start()
+    print("Connected to the Jarvis hub at %s:%d" % (HUB, PORT), flush=True)
+    try:
+        while not stop.is_set():
+            kind = recv_exact(sock, 1)
+            length = struct.unpack(">I", recv_exact(sock, 4))[0]
+            payload = recv_exact(sock, length)
+            if kind == b"A":
+                playback.put(payload)
+    finally:
+        stop.set()
+        mic.kill()
+        sock.close()
+
+while True:
+    try:
+        run_once()
+    except Exception as error:
+        print("Hub connection problem:", error, "- retrying in 5 s", flush=True)
+    time.sleep(5)
+'''
+
+PI_SETUP = r'''#!/bin/bash
+# Sets up this Raspberry Pi as a "Hey Jarvis" speaker. Run as: curl -sSL '<link from the hub logs>' | sudo bash
+set -e
+HUB_HOST="__HUB_HOST__"
+HUB_PORT="__HUB_PORT__"
+HUB_TOKEN="__HUB_TOKEN__"
+HTTP_PORT="__HTTP_PORT__"
+
+echo "== Installing sound tools"
+apt-get update -qq
+apt-get install -y -qq alsa-utils python3 curl >/dev/null
+
+echo "== Finding the USB microphone / speakerphone"
+MIC_CARD=$(arecord -l 2>/dev/null | awk '/^card [0-9]+:/ && tolower($0) ~ /usb|jabra|respeaker|emeet|anker|seeed|audio/ {gsub(":","",$2); print $2; exit}')
+if [ -z "$MIC_CARD" ]; then
+  MIC_CARD=$(arecord -l 2>/dev/null | awk '/^card [0-9]+:/ {gsub(":","",$2); print $2; exit}')
+fi
+if [ -z "$MIC_CARD" ]; then
+  echo "!! No microphone found. Plug in the USB microphone / speakerphone and run this again."
+  exit 1
+fi
+# Play through the same USB device when it has a speaker (speakerphone, or a speaker plugged into the ReSpeaker);
+# otherwise through the Pi's own headphone socket.
+if aplay -l 2>/dev/null | grep -q "^card $MIC_CARD:"; then SPK_CARD=$MIC_CARD; else SPK_CARD=0; fi
+echo "   microphone: card $MIC_CARD, speaker: card $SPK_CARD"
+cat > /etc/asound.conf <<EOF
+pcm.!default {
+  type asym
+  playback.pcm "plug:hw:$SPK_CARD"
+  capture.pcm "plug:hw:$MIC_CARD"
+}
+ctl.!default {
+  type hw
+  card $SPK_CARD
+}
+EOF
+# Sensible levels (not every device has these controls).
+for control in Mic Capture; do amixer -q -c "$MIC_CARD" sset "$control" 85% cap 2>/dev/null || true; done
+for control in Speaker PCM Master Headphone; do amixer -q -c "$SPK_CARD" sset "$control" 85% unmute 2>/dev/null || true; done
+
+echo "== Installing the Jarvis speaker service"
+mkdir -p /opt/jarvis-voice
+curl -sSL "http://$HUB_HOST:$HTTP_PORT/pi/client.py?token=$HUB_TOKEN" -o /opt/jarvis-voice/jarvis-pi.py
+cat > /etc/jarvis-voice.env <<EOF
+HUB_HOST=$HUB_HOST
+HUB_PORT=$HUB_PORT
+HUB_TOKEN=$HUB_TOKEN
+SATELLITE_NAME=$(hostname)
+EOF
+chmod 600 /etc/jarvis-voice.env
+cat > /etc/systemd/system/jarvis-voice.service <<EOF
+[Unit]
+Description=Jarvis voice speaker
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/jarvis-voice.env
+ExecStart=/usr/bin/python3 -u /opt/jarvis-voice/jarvis-pi.py
+Restart=always
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now jarvis-voice.service
+sleep 3
+systemctl --no-pager --lines=5 status jarvis-voice.service || true
+echo
+echo "== Done. You should hear \"Jarvis is listening\" in a moment. Then say \"Hey Jarvis\"."
+echo "   Logs: journalctl -u jarvis-voice -f"
+'''
+
+
+class InstallerHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/tts":
+            return self.reply(404, b"Not found", "text/plain")
+        length = min(int(self.headers.get("Content-Length") or 0), 20000)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            body = {}
+        token = (urllib.parse.parse_qs(parsed.query).get("token") or [""])[0] or str(body.get("token") or "")
+        self.tts(token, str(body.get("text") or ""))
+
+    def tts(self, token, text):
+        """The Jarvis voice for the iPhone app."""
+        if not secrets.compare_digest(token, TOKEN):
+            return self.reply(403, b"Wrong key", "text/plain")
+        text = text.strip()[:2000]
+        if not text:
+            return self.reply(400, b"No text", "text/plain")
+        wav = speak(text)
+        if not wav:
+            return self.reply(500, b"Couldn't make speech", "text/plain")
+        self.reply(200, wav, "audio/wav")
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        token = (urllib.parse.parse_qs(parsed.query).get("token") or [""])[0]
+        if parsed.path == "/health":
+            return self.reply(200, b"ok", "text/plain")
+        if parsed.path == "/tts":
+            return self.tts(token, (urllib.parse.parse_qs(parsed.query).get("text") or [""])[0])
+        if parsed.path not in ("/pi/setup.sh", "/pi/client.py"):
+            return self.reply(404, b"Not found", "text/plain")
+        if not secrets.compare_digest(token, TOKEN):
+            return self.reply(403, b"echo 'Wrong key: copy the command from the jarvis-voice app logs again.'; exit 1\n", "text/plain")
+        if parsed.path == "/pi/client.py":
+            return self.reply(200, PI_CLIENT.encode(), "text/x-python")
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        script = (PI_SETUP.replace("__HUB_HOST__", host).replace("__HUB_PORT__", str(AUDIO_PORT))
+                  .replace("__HUB_TOKEN__", TOKEN).replace("__HTTP_PORT__", str(HTTP_PORT)))
+        self.reply(200, script.encode(), "text/x-shellscript")
+
+    def reply(self, status, body, content_type):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def main():
+    threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), InstallerHandler).serve_forever, daemon=True).start()
+    log("Jarvis voice hub ready. Jarvis core: %s%s" % (JARVIS_URL, JARVIS_PATH))
+    log("To set up the Raspberry Pi, run this on the Pi (use your NAS's IP address):")
+    log("  curl -sSL 'http://<NAS-IP>:%d/pi/setup.sh?token=%s' | sudo bash" % (HTTP_PORT, TOKEN))
+    log("For the same voice in the Jarvis iPhone app (Settings > Voice): address http://<NAS-IP>:%d, key %s"
+        % (HTTP_PORT, TOKEN))
+    AudioServer(("0.0.0.0", AUDIO_PORT), AudioHandler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

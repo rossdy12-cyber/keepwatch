@@ -1,0 +1,62 @@
+# XcodeGen project description. The "Build Jarvis IPA" workflow turns this into
+# Jarvis.xcodeproj with `xcodegen generate`, so nobody has to edit a .pbxproj.
+name: Jarvis
+options:
+  bundleIdPrefix: app.jarvis
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  Jarvis:
+    type: application
+    platform: iOS
+    sources:
+      - path: Jarvis
+    settings:
+      base:
+        PRODUCT_NAME: Jarvis
+        PRODUCT_BUNDLE_IDENTIFIER: app.jarvis.client
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+    info:
+      path: Jarvis/Info.plist
+      properties:
+        CFBundleDisplayName: Jarvis
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Jarvis may also be reached over Tailscale on plain http (http://100.x.x.x:port).
+        # Don't add the other NSAllows* keys: iOS ignores NSAllowsArbitraryLoads when any of them is present.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        # Keeps Navidrome music playing with the screen locked.
+        UIBackgroundModes:
+          - audio
+        NSLocalNetworkUsageDescription: Jarvis connects to the Jarvis core on your own server.
+        NSMicrophoneUsageDescription: Jarvis listens while you hold the microphone button so you can talk to it.
+        NSSpeechRecognitionUsageDescription: Jarvis turns what you say into text to send to your Jarvis core.

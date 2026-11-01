@@ -3,6 +3,15 @@ name: Build unsigned IPA
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "jarvis/**"
+      - ".github/workflows/build-jarvis-ipa.yml"
+      - "nasportal/**"
+      - "frigate-ntfy/**"
+      - "paydays/**"
+      - "jarvis-voice/**"
+      - "alexa/**"
+      - ".github/workflows/build-nasportal-ipa.yml"
   workflow_dispatch:
 
 jobs:

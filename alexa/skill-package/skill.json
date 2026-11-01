@@ -1,0 +1,47 @@
+{
+  "manifest": {
+    "publishingInformation": {
+      "locales": {
+        "en-GB": {
+          "name": "Jarvis",
+          "summary": "Talk to the J.A.R.V.I.S. core on your own TrueNAS server.",
+          "description": "A private skill for your own Echo devices. It sends what you say to your Jarvis core at jarvis.nas-server.co.uk and speaks its answer.",
+          "examplePhrases": [
+            "Alexa, open Jarvis",
+            "Alexa, ask Jarvis how is the NAS doing",
+            "Alexa, ask Jarvis for my daily briefing"
+          ],
+          "keywords": [
+            "jarvis",
+            "truenas",
+            "home server"
+          ]
+        }
+      },
+      "isAvailableWorldwide": false,
+      "distributionCountries": [
+        "GB"
+      ],
+      "testingInstructions": "Private skill for the developer's own devices.",
+      "category": "SMART_HOME"
+    },
+    "apis": {
+      "custom": {
+        "endpoint": {
+          "uri": "https://jarvis.nas-server.co.uk/api/alexa",
+          "sslCertificateType": "Wildcard"
+        }
+      }
+    },
+    "privacyAndCompliance": {
+      "allowsPurchases": false,
+      "usesPersonalInfo": false,
+      "isChildDirected": false,
+      "isExportCompliant": true,
+      "containsAds": false,
+      "locales": {
+        "en-GB": {}
+      }
+    }
+  }
+}

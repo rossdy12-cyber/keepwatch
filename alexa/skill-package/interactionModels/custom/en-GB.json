@@ -1,0 +1,279 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "jarvis",
+      "intents": [
+        {
+          "name": "ChatIntent",
+          "slots": [
+            {
+              "name": "query",
+              "type": "JARVIS_PHRASE"
+            }
+          ],
+          "samples": [
+            "{query}",
+            "ask {query}",
+            "tell me {query}",
+            "can you {query}",
+            "please {query}",
+            "I want to know {query}"
+          ]
+        },
+        {
+          "name": "DailyBriefingIntent",
+          "slots": [],
+          "samples": [
+            "daily briefing",
+            "give me my daily briefing",
+            "give me my briefing",
+            "my briefing",
+            "brief me",
+            "morning briefing",
+            "good morning",
+            "what's my briefing",
+            "status briefing",
+            "run the briefing"
+          ]
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        }
+      ],
+      "types": [
+        {
+          "name": "JARVIS_PHRASE",
+          "values": [
+            {
+              "name": {
+                "value": "how is the nas doing"
+              }
+            },
+            {
+              "name": {
+                "value": "is the storage pool healthy"
+              }
+            },
+            {
+              "name": {
+                "value": "anything on the cameras today"
+              }
+            },
+            {
+              "name": {
+                "value": "who was at the door"
+              }
+            },
+            {
+              "name": {
+                "value": "what time is it"
+              }
+            },
+            {
+              "name": {
+                "value": "what's the weather like"
+              }
+            },
+            {
+              "name": {
+                "value": "tell me a joke"
+              }
+            },
+            {
+              "name": {
+                "value": "remind me what you can do"
+              }
+            },
+            {
+              "name": {
+                "value": "check the security cameras"
+              }
+            },
+            {
+              "name": {
+                "value": "check truenas storage"
+              }
+            },
+            {
+              "name": {
+                "value": "how much space is left"
+              }
+            },
+            {
+              "name": {
+                "value": "are all the apps running"
+              }
+            },
+            {
+              "name": {
+                "value": "what happened on the bike camera"
+              }
+            },
+            {
+              "name": {
+                "value": "when was the last person seen"
+              }
+            },
+            {
+              "name": {
+                "value": "turn on the lights"
+              }
+            },
+            {
+              "name": {
+                "value": "what's on my calendar"
+              }
+            },
+            {
+              "name": {
+                "value": "give me a status report"
+              }
+            },
+            {
+              "name": {
+                "value": "how are the disks"
+              }
+            },
+            {
+              "name": {
+                "value": "is anything wrong"
+              }
+            },
+            {
+              "name": {
+                "value": "what should I have for dinner"
+              }
+            },
+            {
+              "name": {
+                "value": "explain how a raid works"
+              }
+            },
+            {
+              "name": {
+                "value": "what is the capital of france"
+              }
+            },
+            {
+              "name": {
+                "value": "summarise the latest alerts"
+              }
+            },
+            {
+              "name": {
+                "value": "good night"
+              }
+            },
+            {
+              "name": {
+                "value": "how hot are the drives"
+              }
+            },
+            {
+              "name": {
+                "value": "any new downloads"
+              }
+            },
+            {
+              "name": {
+                "value": "what's new on jellyfin"
+              }
+            },
+            {
+              "name": {
+                "value": "set a reminder for tomorrow"
+              }
+            },
+            {
+              "name": {
+                "value": "is my internet working"
+              }
+            },
+            {
+              "name": {
+                "value": "how long until payday"
+              }
+            },
+            {
+              "name": {
+                "value": "what can you see on the front camera"
+              }
+            },
+            {
+              "name": {
+                "value": "run a scrub"
+              }
+            },
+            {
+              "name": {
+                "value": "thank you"
+              }
+            },
+            {
+              "name": {
+                "value": "that's all"
+              }
+            },
+            {
+              "name": {
+                "value": "never mind"
+              }
+            },
+            {
+              "name": {
+                "value": "say something funny"
+              }
+            },
+            {
+              "name": {
+                "value": "who are you"
+              }
+            },
+            {
+              "name": {
+                "value": "how are you today"
+              }
+            },
+            {
+              "name": {
+                "value": "what's the cpu doing"
+              }
+            },
+            {
+              "name": {
+                "value": "restart the jellyfin app"
+              }
+            },
+            {
+              "name": {
+                "value": "how many cameras are online"
+              }
+            },
+            {
+              "name": {
+                "value": "what's my plan for today"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

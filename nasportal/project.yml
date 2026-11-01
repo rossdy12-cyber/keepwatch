@@ -1,0 +1,57 @@
+# XcodeGen project description. The "Build NASPortal IPA" workflow turns this into
+# NASPortal.xcodeproj with `xcodegen generate`, so nobody has to edit a .pbxproj.
+name: NASPortal
+options:
+  bundleIdPrefix: app.nasportal
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  NASPortal:
+    type: application
+    platform: iOS
+    sources:
+      - path: NASPortal
+    settings:
+      base:
+        PRODUCT_NAME: NASPortal
+        PRODUCT_BUNDLE_IDENTIFIER: app.nasportal.browser
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+    info:
+      path: NASPortal/Info.plist
+      properties:
+        CFBundleDisplayName: NAS Portal
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Apps on the NAS are often reached over Tailscale on plain http (http://100.x.x.x:port).
+        # Don't add the other NSAllows* keys: iOS ignores NSAllowsArbitraryLoads when any of them is present.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSLocalNetworkUsageDescription: NAS Portal opens the web pages of your own NAS and its apps.
