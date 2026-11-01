@@ -9,6 +9,8 @@ on:
       - "nasportal/**"
       - "frigate-ntfy/**"
       - "paydays/**"
+      - "jarvis-voice/**"
+      - "alexa/**"
       - ".github/workflows/build-nasportal-ipa.yml"
   workflow_dispatch:
 
