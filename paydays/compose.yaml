@@ -1,0 +1,1001 @@
+# Paydays: monthly bills against weekly pay, and how much is safe to spend each week.
+# TrueNAS: Apps -> Discover Apps -> (three dots) Install via YAML -> name it paydays -> paste this file.
+# Then open http://<nas-ip>:8450 (or add a proxy host for it). Generated from server.py by build_compose.py.
+services:
+  paydays:
+    image: python:3.12-alpine
+    container_name: paydays
+    restart: unless-stopped
+    command: python -u /app/server.py
+    ports:
+      - "8450:8450"
+    configs:
+      - source: server
+        target: /app/server.py
+    volumes:
+      # Your bills and pay are kept here. To keep them in a dataset you back up, replace this with a path,
+      # e.g. /mnt/<pool>/apps/paydays:/data
+      - paydays-data:/data
+    environment:
+      TZ: Europe/London
+      # Optional: a password for the page (username can be anything). Leave empty if it sits behind Authelia.
+      APP_PASSWORD: ""
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8450/health')"]
+      interval: 60s
+      timeout: 5s
+
+volumes:
+  paydays-data:
+
+configs:
+  server:
+    content: |
+      """Paydays: monthly bills against weekly pay.
+
+      A tiny self-hosted web app. Python standard library only (http.server + sqlite3), one file,
+      data in /data/paydays.db. Amounts are stored in pence.
+      """
+
+      import base64
+      import hmac
+      import json
+      import os
+      import re
+      import sqlite3
+      import threading
+      from datetime import date
+      from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+      from urllib.parse import urlparse
+
+      DB_PATH = os.environ.get("DB_PATH", "/data/paydays.db")
+      PORT = int(os.environ.get("PORT", "8450"))
+      PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+      db_lock = threading.Lock()
+
+
+      def connect():
+          folder = os.path.dirname(DB_PATH)
+          if folder:
+              os.makedirs(folder, exist_ok=True)
+          conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+          conn.row_factory = sqlite3.Row
+          conn.executescript(
+              """
+              PRAGMA journal_mode=WAL;
+              CREATE TABLE IF NOT EXISTS bills (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL,
+                  amount INTEGER NOT NULL,
+                  day INTEGER NOT NULL,
+                  category TEXT NOT NULL DEFAULT '',
+                  active INTEGER NOT NULL DEFAULT 1
+              );
+              CREATE TABLE IF NOT EXISTS pays (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  date TEXT NOT NULL,
+                  amount INTEGER NOT NULL,
+                  kind TEXT NOT NULL DEFAULT 'pay',
+                  note TEXT NOT NULL DEFAULT ''
+              );
+              CREATE INDEX IF NOT EXISTS pays_date ON pays(date);
+              CREATE TABLE IF NOT EXISTS paid (
+                  bill_id INTEGER NOT NULL,
+                  month TEXT NOT NULL,
+                  PRIMARY KEY (bill_id, month)
+              );
+              CREATE TABLE IF NOT EXISTS months (
+                  month TEXT PRIMARY KEY,
+                  opening INTEGER NOT NULL DEFAULT 0
+              );
+              CREATE TABLE IF NOT EXISTS settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+              );
+              """
+          )
+          return conn
+
+
+      conn = connect()
+
+      DEFAULT_SETTINGS = {"pay_amount": "0", "pay_frequency": "weekly", "pay_anchor": "", "currency": "GBP", "savings": "0"}
+      DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+      MONTH_RE = re.compile(r"^\d{4}-\d{2}\Z")
+
+
+      class BadRequest(Exception):
+          pass
+
+
+      def as_pence(value, allow_negative=False):
+          try:
+              number = int(value)
+          except (TypeError, ValueError):
+              raise BadRequest("Amount must be a whole number of pence")
+          if not allow_negative and number < 0:
+              raise BadRequest("Amount can't be negative")
+          if abs(number) > 10_000_000_00:
+              raise BadRequest("Amount is too large")
+          return number
+
+
+      def as_date(value):
+          if not isinstance(value, str) or not DATE_RE.match(value):
+              raise BadRequest("Date must look like 2026-11-28")
+          try:
+              date.fromisoformat(value)
+          except ValueError:
+              raise BadRequest("That date doesn't exist")
+          return value
+
+
+      def as_month(value):
+          if not isinstance(value, str) or not MONTH_RE.match(value):
+              raise BadRequest("Month must look like 2026-11")
+          return value
+
+
+      def as_text(value, limit=80, required=False):
+          text = str(value or "").strip()[:limit]
+          if required and not text:
+              raise BadRequest("Please give it a name")
+          return text
+
+
+      def everything():
+          with db_lock:
+              settings = dict(DEFAULT_SETTINGS)
+              settings.update({row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings")})
+              return {
+                  "bills": [dict(r) for r in conn.execute("SELECT * FROM bills ORDER BY day, name")],
+                  "pays": [dict(r) for r in conn.execute("SELECT * FROM pays ORDER BY date")],
+                  "paid": [dict(r) for r in conn.execute("SELECT * FROM paid")],
+                  "months": {r["month"]: r["opening"] for r in conn.execute("SELECT * FROM months")},
+                  "settings": {
+                      "pay_amount": int(settings["pay_amount"] or 0),
+                      "pay_frequency": settings["pay_frequency"],
+                      "pay_anchor": settings["pay_anchor"],
+                      "currency": settings["currency"],
+                      "savings": int(settings["savings"] or 0),
+                  },
+              }
+
+
+      def handle_api(method, path, body):
+          parts = [p for p in path.split("/") if p][1:]  # drop "api"
+          if method == "GET" and parts == ["data"]:
+              return everything()
+
+          with db_lock, conn:
+              if parts == ["bills"] and method == "POST":
+                  day = int(body.get("day") or 0)
+                  if not 1 <= day <= 31:
+                      raise BadRequest("Day must be between 1 and 31")
+                  conn.execute(
+                      "INSERT INTO bills (name, amount, day, category) VALUES (?, ?, ?, ?)",
+                      (as_text(body.get("name"), required=True), as_pence(body.get("amount")), day,
+                       as_text(body.get("category"), 40)),
+                  )
+              elif len(parts) == 2 and parts[0] == "bills" and method == "PUT":
+                  day = int(body.get("day") or 0)
+                  if not 1 <= day <= 31:
+                      raise BadRequest("Day must be between 1 and 31")
+                  conn.execute(
+                      "UPDATE bills SET name = ?, amount = ?, day = ?, category = ?, active = ? WHERE id = ?",
+                      (as_text(body.get("name"), required=True), as_pence(body.get("amount")), day,
+                       as_text(body.get("category"), 40), 1 if body.get("active", True) else 0, int(parts[1])),
+                  )
+              elif len(parts) == 2 and parts[0] == "bills" and method == "DELETE":
+                  conn.execute("DELETE FROM bills WHERE id = ?", (int(parts[1]),))
+                  conn.execute("DELETE FROM paid WHERE bill_id = ?", (int(parts[1]),))
+              elif parts == ["pay"] and method == "PUT":
+                  # The actual amount for one payday. null puts it back to the usual amount.
+                  day = as_date(body.get("date"))
+                  conn.execute("DELETE FROM pays WHERE date = ? AND kind = 'pay'", (day,))
+                  if body.get("amount") is not None:
+                      conn.execute("INSERT INTO pays (date, amount, kind) VALUES (?, ?, 'pay')", (day, as_pence(body["amount"])))
+              elif parts == ["extra"] and method == "POST":
+                  conn.execute(
+                      "INSERT INTO pays (date, amount, kind, note) VALUES (?, ?, 'extra', ?)",
+                      (as_date(body.get("date")), as_pence(body.get("amount"), allow_negative=True),
+                       as_text(body.get("note"), 60) or "Extra"),
+                  )
+              elif len(parts) == 2 and parts[0] == "extra" and method == "DELETE":
+                  conn.execute("DELETE FROM pays WHERE id = ? AND kind = 'extra'", (int(parts[1]),))
+              elif parts == ["spend"] and method == "POST":
+                  # Day-to-day spending, so "safe to spend" knows what's left this pay period.
+                  amount = as_pence(body.get("amount"))
+                  if amount == 0:
+                      raise BadRequest("Enter how much you spent")
+                  conn.execute(
+                      "INSERT INTO pays (date, amount, kind, note) VALUES (?, ?, 'spend', ?)",
+                      (as_date(body.get("date")), amount, as_text(body.get("note"), 60)),
+                  )
+              elif len(parts) == 2 and parts[0] == "spend" and method == "DELETE":
+                  conn.execute("DELETE FROM pays WHERE id = ? AND kind = 'spend'", (int(parts[1]),))
+              elif parts == ["paid"] and method == "PUT":
+                  bill_id, month = int(body.get("bill_id") or 0), as_month(body.get("month"))
+                  if body.get("paid"):
+                      conn.execute("INSERT OR IGNORE INTO paid (bill_id, month) VALUES (?, ?)", (bill_id, month))
+                  else:
+                      conn.execute("DELETE FROM paid WHERE bill_id = ? AND month = ?", (bill_id, month))
+              elif parts == ["month"] and method == "PUT":
+                  conn.execute(
+                      "INSERT INTO months (month, opening) VALUES (?, ?) ON CONFLICT(month) DO UPDATE SET opening = excluded.opening",
+                      (as_month(body.get("month")), as_pence(body.get("opening"), allow_negative=True)),
+                  )
+              elif parts == ["settings"] and method == "PUT":
+                  frequency = body.get("pay_frequency", "weekly")
+                  if frequency not in ("weekly", "fortnightly", "fourweekly", "monthly"):
+                      raise BadRequest("Unknown pay frequency")
+                  anchor = body.get("pay_anchor") or ""
+                  if anchor:
+                      as_date(anchor)
+                  values = {"pay_amount": str(as_pence(body.get("pay_amount"))), "pay_frequency": frequency, "pay_anchor": anchor,
+                            "savings": str(as_pence(body.get("savings") or 0))}
+                  for key, value in values.items():
+                      conn.execute(
+                          "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                          (key, value),
+                      )
+              else:
+                  return None
+          return everything()
+
+
+      class Handler(BaseHTTPRequestHandler):
+          server_version = "Paydays"
+
+          def log_message(self, fmt, *args):
+              if os.environ.get("LOG_REQUESTS"):
+                  super().log_message(fmt, *args)
+
+          def authorised(self):
+              if not PASSWORD:
+                  return True
+              header = self.headers.get("Authorization", "")
+              if header.startswith("Basic "):
+                  try:
+                      _, _, given = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+                  except Exception:
+                      return False
+                  return hmac.compare_digest(given.encode(), PASSWORD.encode())
+              return False
+
+          def send(self, status, payload, content_type="application/json; charset=utf-8"):
+              data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+              self.send_response(status)
+              self.send_header("Content-Type", content_type)
+              self.send_header("Content-Length", str(len(data)))
+              self.send_header("Cache-Control", "no-store")
+              self.send_header("X-Content-Type-Options", "nosniff")
+              self.send_header("Referrer-Policy", "same-origin")
+              self.end_headers()
+              self.wfile.write(data)
+
+          def route(self, method):
+              if not self.authorised():
+                  self.send_response(401)
+                  self.send_header("WWW-Authenticate", 'Basic realm="Paydays"')
+                  self.send_header("Content-Length", "0")
+                  self.end_headers()
+                  return
+              path = urlparse(self.path).path
+              if method == "GET" and path in ("/", "/index.html"):
+                  return self.send(200, PAGE.encode(), "text/html; charset=utf-8")
+              if method == "GET" and path == "/health":
+                  return self.send(200, {"status": "ok"})
+              if method == "GET" and path == "/manifest.json":
+                  return self.send(200, MANIFEST, "application/manifest+json")
+              if not path.startswith("/api/"):
+                  return self.send(404, {"error": "Not found"})
+              body = {}
+              if method in ("POST", "PUT"):
+                  length = int(self.headers.get("Content-Length") or 0)
+                  if length > 100_000:
+                      return self.send(413, {"error": "Too much data"})
+                  try:
+                      body = json.loads(self.rfile.read(length) or b"{}")
+                  except ValueError:
+                      return self.send(400, {"error": "Not valid JSON"})
+                  if not isinstance(body, dict):
+                      return self.send(400, {"error": "Expected a JSON object"})
+                  # Simple CSRF guard: only accept JSON from our own page.
+                  if "application/json" not in (self.headers.get("Content-Type") or ""):
+                      return self.send(415, {"error": "Send JSON"})
+              try:
+                  result = handle_api(method, path, body)
+              except BadRequest as error:
+                  return self.send(400, {"error": str(error)})
+              except (ValueError, TypeError):
+                  return self.send(400, {"error": "Something in that form isn't valid"})
+              if result is None:
+                  return self.send(404, {"error": "Not found"})
+              self.send(200, result)
+
+          def do_GET(self):
+              self.route("GET")
+
+          def do_POST(self):
+              self.route("POST")
+
+          def do_PUT(self):
+              self.route("PUT")
+
+          def do_DELETE(self):
+              self.route("DELETE")
+
+
+      MANIFEST = {
+          "name": "Paydays",
+          "short_name": "Paydays",
+          "start_url": "/",
+          "display": "standalone",
+          "background_color": "#0b1220",
+          "theme_color": "#0b1220",
+      }
+
+      PAGE = r"""<!doctype html>
+      <html lang="en-GB">
+      <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+      <meta name="apple-mobile-web-app-capable" content="yes">
+      <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+      <meta name="theme-color" content="#0b1220">
+      <link rel="manifest" href="/manifest.json">
+      <title>Paydays</title>
+      <style>
+      :root {
+        --bg: #f4f6fa; --surface: #ffffff; --surface2: #eef1f6; --text: #0f172a; --muted: #5b6577;
+        --line: #dde2ea; --accent: #0f9d8a; --accent-soft: #d8f3ee; --good: #15803d; --bad: #c2410c; --bad-soft: #fde8dc;
+        --warn: #a16207; --radius: 14px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b1220; --surface: #121b2d; --surface2: #18233a; --text: #e8edf6; --muted: #93a0b6;
+          --line: #24314d; --accent: #3dd6c0; --accent-soft: #123a3a; --good: #4ade80; --bad: #fb923c; --bad-soft: #3b2216;
+          --warn: #facc15;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); }
+      body { font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+      header { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: calc(10px + env(safe-area-inset-top)) 16px 8px; border-bottom: 1px solid var(--line); }
+      h1 { font-size: 20px; margin: 0; }
+      .monthnav { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+      .monthnav strong { font-size: 17px; }
+      button { font: inherit; color: inherit; background: var(--surface2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; cursor: pointer; }
+      button.primary { background: var(--accent); color: #fff; border-color: transparent; font-weight: 600; }
+      button.link { background: none; border: none; color: var(--accent); padding: 4px 6px; }
+      button.danger { color: var(--bad); }
+      main { padding: 12px 16px; max-width: 760px; margin: 0 auto; }
+      .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
+      .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+      .card .value { font-size: 22px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+      .card .sub { font-size: 12px; color: var(--muted); }
+      .good { color: var(--good); } .bad { color: var(--bad); } .muted { color: var(--muted); } .warn { color: var(--warn); }
+      h2 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+      .list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+      .row { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-top: 1px solid var(--line); }
+      .row:first-child { border-top: none; }
+      .row .grow { flex: 1; min-width: 0; }
+      .row .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .meta { font-size: 12px; color: var(--muted); }
+      .amount { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+      .payday { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 10px; overflow: hidden; }
+      .payday-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: var(--accent-soft); }
+      .payday-head .grow { flex: 1; }
+      .payday-foot { display: flex; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--line); font-weight: 600; }
+      .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--surface2); color: var(--muted); margin-left: 6px; }
+      .tag.edited { background: var(--accent-soft); color: var(--accent); }
+      .note { background: var(--bad-soft); color: var(--bad); border-radius: 10px; padding: 10px 12px; margin: 10px 0; font-size: 14px; }
+      .hint { color: var(--muted); font-size: 13px; margin: 6px 2px; }
+      input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--accent); }
+      .paid .name, .paid .amount { text-decoration: line-through; color: var(--muted); }
+      form.stack { display: grid; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+      label.field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+      input, select { font: inherit; color: var(--text); background: var(--surface2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; }
+      .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; display: flex; background: var(--surface); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); z-index: 10; }
+      nav.tabs button { flex: 1; border: none; background: none; border-radius: 0; padding: 12px 0 10px; color: var(--muted); font-size: 13px; }
+      nav.tabs button.on { color: var(--accent); font-weight: 700; }
+      .timeline .row { padding: 8px 14px; }
+      .timeline .date { width: 44px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+      .empty { padding: 18px 14px; color: var(--muted); text-align: center; }
+      dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); width: min(420px, calc(100vw - 32px)); padding: 0; }
+      dialog::backdrop { background: rgba(0,0,0,.45); }
+      dialog form { border: none; }
+      .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(86px + env(safe-area-inset-bottom)); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 999px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }
+      .toast.show { opacity: 1; }
+      </style>
+      </head>
+      <body>
+      <header>
+        <h1>Paydays</h1>
+        <div class="monthnav" id="monthnav">
+          <button id="prev" aria-label="Previous month">&#8249;</button>
+          <strong id="monthLabel"></strong>
+          <button id="next" aria-label="Next month">&#8250;</button>
+        </div>
+      </header>
+      <main>
+        <section id="tab-month"></section>
+        <section id="tab-bills" hidden></section>
+        <section id="tab-settings" hidden></section>
+      </main>
+      <nav class="tabs">
+        <button data-tab="month" class="on">Month</button>
+        <button data-tab="bills">Bills</button>
+        <button data-tab="settings">Pay &amp; settings</button>
+      </nav>
+      <dialog id="dialog"></dialog>
+      <div class="toast" id="toast"></div>
+      <script>
+      "use strict";
+      var state = null;
+      var tab = "month";
+      var today = new Date();
+      var viewYear = today.getFullYear();
+      var viewMonth = today.getMonth(); // 0-11
+      var DAY = 86400000;
+
+      function el(tag, attrs, children) {
+        var node = document.createElement(tag);
+        attrs = attrs || {};
+        Object.keys(attrs).forEach(function (key) {
+          if (key === "text") node.textContent = attrs[key];
+          else if (key === "class") node.className = attrs[key];
+          else if (key.slice(0, 2) === "on") node.addEventListener(key.slice(2), attrs[key]);
+          else if (attrs[key] !== null && attrs[key] !== undefined && attrs[key] !== false) node.setAttribute(key, attrs[key]);
+        });
+        (children || []).forEach(function (child) {
+          if (child === null || child === undefined || child === false) return;
+          node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+        });
+        return node;
+      }
+
+      function money(pence) {
+        var currency = (state && state.settings.currency) || "GBP";
+        return new Intl.NumberFormat("en-GB", { style: "currency", currency: currency }).format((pence || 0) / 100);
+      }
+      function toPence(text) {
+        var cleaned = String(text || "").replace(/[^0-9.\-]/g, "");
+        if (!cleaned) return null;
+        var value = Math.round(parseFloat(cleaned) * 100);
+        return isNaN(value) ? null : value;
+      }
+      function poundsText(pence) { return pence === null || pence === undefined ? "" : (pence / 100).toFixed(2); }
+
+      // Dates are handled as UTC midnights so clock changes never shift a day.
+      function utc(y, m, d) { return Date.UTC(y, m, d); }
+      function iso(t) { return new Date(t).toISOString().slice(0, 10); }
+      function parseISO(s) { var p = s.split("-"); return utc(+p[0], +p[1] - 1, +p[2]); }
+      function daysIn(y, m) { return new Date(Date.UTC(y, m + 1, 0)).getUTCDate(); }
+      function monthKey(y, m) { return y + "-" + String(m + 1).padStart(2, "0"); }
+      function dayLabel(t) { return new Date(t).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", timeZone: "UTC" }); }
+      function longLabel(t) { return new Date(t).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" }); }
+      function shortDate(t) { return new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }); }
+
+      async function api(method, path, body) {
+        var response = await fetch(path, {
+          method: method,
+          headers: body ? { "Content-Type": "application/json" } : {},
+          body: body ? JSON.stringify(body) : undefined,
+          credentials: "same-origin"
+        });
+        var data = await response.json().catch(function () { return {}; });
+        if (!response.ok) { toast(data.error || "Something went wrong"); throw new Error(data.error); }
+        state = data;
+        render();
+        return data;
+      }
+
+      var toastTimer = null;
+      function toast(text) {
+        var t = document.getElementById("toast");
+        t.textContent = text; t.classList.add("show");
+        clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.classList.remove("show"); }, 2200);
+      }
+
+      // ---------- Pay and bill calculations ----------
+
+      function stepDays() {
+        return { weekly: 7, fortnightly: 14, fourweekly: 28 }[state.settings.pay_frequency] || 0;
+      }
+
+      // Paydays falling in [from, to] (UTC ms, inclusive).
+      function paydaysBetween(from, to) {
+        var s = state.settings, out = [];
+        if (!s.pay_anchor) return out;
+        var anchor = parseISO(s.pay_anchor);
+        if (s.pay_frequency === "monthly") {
+          var anchorDay = new Date(anchor).getUTCDate();
+          var d = new Date(from), y = d.getUTCFullYear(), m = d.getUTCMonth();
+          for (var i = 0; i < 24; i++) {
+            var t = utc(y, m, Math.min(anchorDay, daysIn(y, m)));
+            if (t > to) break;
+            if (t >= from) out.push(t);
+            m++; if (m > 11) { m = 0; y++; }
+          }
+          return out;
+        }
+        var step = stepDays() * DAY;
+        var k = Math.ceil((from - anchor) / step);
+        for (var t2 = anchor + k * step; t2 <= to; t2 += step) out.push(t2);
+        return out;
+      }
+
+      function payFor(t) {
+        var key = iso(t);
+        var actual = state.pays.find(function (p) { return p.kind === "pay" && p.date === key; });
+        return actual ? { amount: actual.amount, edited: true } : { amount: state.settings.pay_amount, edited: false };
+      }
+
+      // Every bill due in [from, to], with its date.
+      function billsBetween(from, to) {
+        var out = [];
+        var d = new Date(from), y = d.getUTCFullYear(), m = d.getUTCMonth();
+        for (var i = 0; i < 24; i++) {
+          var start = utc(y, m, 1);
+          if (start > to) break;
+          state.bills.forEach(function (bill) {
+            if (!bill.active) return;
+            var t = utc(y, m, Math.min(bill.day, daysIn(y, m)));
+            if (t >= from && t <= to) out.push({ bill: bill, date: t, month: monthKey(y, m) });
+          });
+          m++; if (m > 11) { m = 0; y++; }
+        }
+        return out.sort(function (a, b) { return a.date - b.date || a.bill.name.localeCompare(b.bill.name); });
+      }
+
+      var PAYS_PER_YEAR = { weekly: 365.25 / 7, fortnightly: 365.25 / 14, fourweekly: 365.25 / 28, monthly: 12 };
+      var WEEKS_PER_YEAR = 365.25 / 7;
+
+      function monthlyBillTotal() {
+        return state.bills.filter(function (b) { return b.active; }).reduce(function (s, b) { return s + b.amount; }, 0);
+      }
+
+      // Steady spending money per week: a year of pay, minus a year of bills and savings, spread over 52 weeks.
+      // Big bills (like rent) are smoothed out, so the weeks they land in don't leave you short.
+      function weeklyAllowance() {
+        var s = state.settings;
+        var yearlyPay = s.pay_amount * (PAYS_PER_YEAR[s.pay_frequency] || 0);
+        var yearlyOut = (monthlyBillTotal() + (s.savings || 0)) * 12;
+        return Math.floor((yearlyPay - yearlyOut) / WEEKS_PER_YEAR);
+      }
+
+      // The pay period today falls in: from the last payday up to the day before the next one.
+      function currentPeriod() {
+        if (!state.settings.pay_anchor) return null;
+        var now = utc(today.getFullYear(), today.getMonth(), today.getDate());
+        var recent = paydaysBetween(now - 40 * DAY, now);
+        var start = recent[recent.length - 1];
+        var next = paydaysBetween(now + DAY, now + 40 * DAY)[0];
+        if (start === undefined || next === undefined) return null;
+        return { start: start, end: next - DAY, next: next, now: now };
+      }
+
+      function spendsBetween(from, to) {
+        return state.pays.filter(function (p) {
+          if (p.kind !== "spend") return false;
+          var t = parseISO(p.date);
+          return t >= from && t <= to;
+        }).sort(function (a, b) { return b.date.localeCompare(a.date) || b.id - a.id; });
+      }
+
+      function isPaid(billId, month) {
+        return state.paid.some(function (p) { return p.bill_id === billId && p.month === month; });
+      }
+
+      // ---------- Month tab ----------
+
+      function renderMonth() {
+        var root = document.getElementById("tab-month");
+        root.innerHTML = "";
+        var y = viewYear, m = viewMonth, key = monthKey(y, m);
+        var first = utc(y, m, 1), last = utc(y, m, daysIn(y, m));
+
+        if (!state.settings.pay_anchor || !state.settings.pay_amount) {
+          root.appendChild(el("div", { class: "note" }, [
+            "Start in ", el("b", { text: "Pay & settings" }), ": enter your usual pay and the date of one recent payday."
+          ]));
+        }
+
+        if (state.settings.pay_anchor && state.settings.pay_amount) renderSpending(root);
+
+        var paydays = paydaysBetween(first, last);
+        var extras = state.pays.filter(function (p) { return p.kind === "extra" && p.date.slice(0, 7) === key; });
+        var spends = state.pays.filter(function (p) { return p.kind === "spend" && p.date.slice(0, 7) === key; });
+        var monthBills = billsBetween(first, last);
+        var payTotal = paydays.reduce(function (sum, t) { return sum + payFor(t).amount; }, 0);
+        var extraTotal = extras.reduce(function (sum, p) { return sum + p.amount; }, 0);
+        var billTotal = monthBills.reduce(function (sum, b) { return sum + b.bill.amount; }, 0);
+        var left = payTotal + extraTotal - billTotal;
+        var unpaid = monthBills.filter(function (b) { return !isPaid(b.bill.id, b.month); })
+          .reduce(function (sum, b) { return sum + b.bill.amount; }, 0);
+
+        root.appendChild(el("h2", { text: "This month" }));
+        var summary = el("div", { class: "cards" }, [
+          card("Pay this month", money(payTotal + extraTotal), paydays.length + " payday" + (paydays.length === 1 ? "" : "s") + (extraTotal ? " + extra" : "")),
+          card("Bills this month", money(billTotal), monthBills.length + " payment" + (monthBills.length === 1 ? "" : "s")),
+          card("Left over", money(left), left < 0 ? "Bills are more than pay" : "after every bill", left < 0 ? "bad" : "good"),
+          card("Still to pay", money(unpaid), unpaid ? "not ticked off yet" : "all bills ticked off", unpaid ? "" : "good")
+        ]);
+        root.appendChild(summary);
+
+        // Each payday and the bills it has to cover (up to the day before the next payday).
+        root.appendChild(el("h2", { text: "Each payday" }));
+        if (!paydays.length) {
+          root.appendChild(el("div", { class: "list" }, [el("div", { class: "empty", text: "No paydays this month yet. Set up your pay in Pay & settings." })]));
+        } else {
+          var before = billsBetween(first, paydays[0] - DAY);
+          if (before.length) {
+            var beforeTotal = before.reduce(function (s, b) { return s + b.bill.amount; }, 0);
+            root.appendChild(el("p", { class: "hint", text: "Due before your first pay this month (covered by last month's final pay): " +
+              before.map(function (b) { return b.bill.name + " " + money(b.bill.amount); }).join(", ") + " = " + money(beforeTotal) + "." }));
+          }
+          paydays.forEach(function (t, index) {
+            var nextPay = paydaysBetween(t + DAY, t + 62 * DAY)[0];
+            var until = nextPay ? nextPay - DAY : t + stepDays() * DAY - DAY;
+            var covers = billsBetween(t, until);
+            var pay = payFor(t);
+            var coverTotal = covers.reduce(function (s, b) { return s + b.bill.amount; }, 0);
+            var rest = pay.amount - coverTotal;
+            var box = el("div", { class: "payday" }, [
+              el("div", { class: "payday-head" }, [
+                el("div", { class: "grow" }, [
+                  el("div", { class: "name" }, [longLabel(t), pay.edited ? el("span", { class: "tag edited", text: "actual" }) : el("span", { class: "tag", text: "usual" })]),
+                  el("div", { class: "meta", text: "Covers bills up to " + shortDate(until) })
+                ]),
+                el("span", { class: "amount", text: money(pay.amount) }),
+                el("button", { class: "link", text: "Edit", onclick: function () { editPay(t); } })
+              ])
+            ]);
+            var list = el("div", {});
+            if (!covers.length) list.appendChild(el("div", { class: "empty", text: "No bills before the next payday." }));
+            covers.forEach(function (b) {
+              list.appendChild(el("div", { class: "row" + (isPaid(b.bill.id, b.month) ? " paid" : "") }, [
+                el("div", { class: "grow" }, [
+                  el("div", { class: "name", text: b.bill.name }),
+                  el("div", { class: "meta", text: dayLabel(b.date) + (b.month !== key ? " " + new Date(b.date).toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" }) : "") + (b.bill.category ? " · " + b.bill.category : "") })
+                ]),
+                el("span", { class: "amount", text: "−" + money(b.bill.amount) })
+              ]));
+            });
+            box.appendChild(list);
+            box.appendChild(el("div", { class: "payday-foot" }, [
+              el("span", { text: "Left from this pay" }),
+              el("span", { class: "amount " + (rest < 0 ? "bad" : "good"), text: money(rest) })
+            ]));
+            root.appendChild(box);
+          });
+        }
+
+        // Running balance through the month.
+        var opening = state.months[key] || 0;
+        root.appendChild(el("h2", { text: "Day by day" }));
+        var events = [];
+        paydays.forEach(function (t) { events.push({ date: t, order: 0, name: "Pay", amount: payFor(t).amount }); });
+        extras.forEach(function (p) { events.push({ date: parseISO(p.date), order: 1, name: p.note, amount: p.amount, extra: p }); });
+        spends.forEach(function (p) { events.push({ date: parseISO(p.date), order: 3, name: "Spent" + (p.note ? ": " + p.note : ""), amount: -p.amount }); });
+        monthBills.forEach(function (b) { events.push({ date: b.date, order: 2, name: b.bill.name, amount: -b.bill.amount }); });
+        events.sort(function (a, b) { return a.date - b.date || a.order - b.order; });
+        var balance = opening, lowest = opening, lowestDate = null;
+        var timeline = el("div", { class: "list timeline" }, [
+          el("div", { class: "row" }, [
+            el("span", { class: "date", text: "1st" }),
+            el("div", { class: "grow" }, [el("div", { class: "name", text: "Start balance" }), el("div", { class: "meta", text: "In the bank on the 1st" })]),
+            el("span", { class: "amount", text: money(opening) }),
+            el("button", { class: "link", text: "Edit", onclick: editOpening })
+          ])
+        ]);
+        events.forEach(function (e) {
+          balance += e.amount;
+          if (balance < lowest) { lowest = balance; lowestDate = e.date; }
+          timeline.appendChild(el("div", { class: "row" }, [
+            el("span", { class: "date", text: String(new Date(e.date).getUTCDate()) }),
+            el("div", { class: "grow" }, [
+              el("div", { class: "name", text: e.name }),
+              el("div", { class: "meta " + (balance < 0 ? "bad" : ""), text: "Balance " + money(balance) })
+            ]),
+            el("span", { class: "amount " + (e.amount >= 0 ? "good" : ""), text: (e.amount >= 0 ? "+" : "−") + money(Math.abs(e.amount)) }),
+            e.extra ? el("button", { class: "link danger", text: "✕", "aria-label": "Remove", onclick: function () { if (confirm("Remove " + e.name + "?")) api("DELETE", "/api/extra/" + e.extra.id); } }) : null
+          ]));
+        });
+        if (lowest < 0) {
+          root.insertBefore(el("div", { class: "note", text: "Heads up: your balance drops to " + money(lowest) + " on " + longLabel(lowestDate) +
+            ". A bill comes out before enough pay has gone in. If you've been paid already, check the start balance under Day by day." }), summary);
+        }
+        root.appendChild(timeline);
+        root.appendChild(el("div", { style: "margin-top:10px" }, [el("button", { text: "+ Add extra money in or out", onclick: addExtra })]));
+
+        // Tick-off list.
+        root.appendChild(el("h2", { text: "Tick off bills as they go out" }));
+        var checklist = el("div", { class: "list" });
+        if (!monthBills.length) checklist.appendChild(el("div", { class: "empty", text: "No bills yet. Add them in the Bills tab." }));
+        monthBills.forEach(function (b) {
+          var paid = isPaid(b.bill.id, b.month);
+          checklist.appendChild(el("label", { class: "row" + (paid ? " paid" : "") }, [
+            el("input", { type: "checkbox", checked: paid ? "checked" : null, onchange: function (ev) {
+              api("PUT", "/api/paid", { bill_id: b.bill.id, month: b.month, paid: ev.target.checked });
+            } }),
+            el("div", { class: "grow" }, [
+              el("div", { class: "name", text: b.bill.name }),
+              el("div", { class: "meta", text: dayLabel(b.date) })
+            ]),
+            el("span", { class: "amount", text: money(b.bill.amount) })
+          ]));
+        });
+        root.appendChild(checklist);
+      }
+
+      function renderSpending(root) {
+        var weekly = weeklyAllowance();
+        var period = currentPeriod();
+        root.appendChild(el("h2", { text: "Safe to spend" }));
+        if (weekly <= 0) {
+          root.appendChild(el("div", { class: "note", text: "Your bills" + (state.settings.savings ? " and savings" : "") +
+            " add up to more than your pay over a year, so there's nothing safe to spend. Look at the Bills tab for something to cut or pause." }));
+          return;
+        }
+        var cards = [card("Per week", money(weekly), "about " + money(Math.floor(weekly / 7)) + " a day", "good")];
+        if (period) {
+          var days = Math.round((period.end - period.start) / DAY) + 1;
+          var allowance = Math.floor(weekly * days / 7);
+          var spent = spendsBetween(period.start, period.end).reduce(function (s, p) { return s + p.amount; }, 0);
+          var left = allowance - spent;
+          var daysLeft = Math.round((period.end - period.now) / DAY) + 1;
+          var perDay = left > 0 ? Math.floor(left / daysLeft) : 0;
+          cards.push(card("Left until payday", money(left),
+            left < 0 ? "over by " + money(-left) : money(perDay) + " a day for " + daysLeft + " day" + (daysLeft === 1 ? "" : "s"),
+            left < 0 ? "bad" : (perDay < weekly / 14 ? "warn" : "good")));
+          root.appendChild(el("div", { class: "cards" }, cards));
+          var spentList = spendsBetween(period.start, period.end);
+          var box = el("div", { class: "list", style: "margin-top:10px" }, [
+            el("div", { class: "row" }, [
+              el("div", { class: "grow" }, [
+                el("div", { class: "name", text: "This pay period: " + shortDate(period.start) + " – " + shortDate(period.end) }),
+                el("div", { class: "meta", text: "Spent " + money(spent) + " of " + money(allowance) + " · next payday " + longLabel(period.next) })
+              ]),
+              el("button", { class: "primary", text: "+ Spent", onclick: addSpend })
+            ])
+          ]);
+          var bar = el("div", { style: "height:8px;background:var(--surface2);margin:0 14px 12px;border-radius:99px;overflow:hidden" }, [
+            el("div", { style: "height:100%;width:" + Math.min(100, Math.round(spent * 100 / Math.max(1, allowance))) + "%;background:" + (left < 0 ? "var(--bad)" : "var(--accent)") })
+          ]);
+          box.appendChild(bar);
+          spentList.slice(0, 8).forEach(function (p) {
+            box.appendChild(el("div", { class: "row" }, [
+              el("div", { class: "grow" }, [
+                el("div", { class: "name", text: p.note || "Spending" }),
+                el("div", { class: "meta", text: dayLabel(parseISO(p.date)) })
+              ]),
+              el("span", { class: "amount", text: money(p.amount) }),
+              el("button", { class: "link danger", text: "✕", "aria-label": "Remove", onclick: function () {
+                if (confirm("Remove " + money(p.amount) + (p.note ? " (" + p.note + ")" : "") + "?")) api("DELETE", "/api/spend/" + p.id);
+              } })
+            ]));
+          });
+          root.appendChild(box);
+        } else {
+          root.appendChild(el("div", { class: "cards" }, cards));
+        }
+        root.appendChild(el("p", { class: "hint", text: "Your bills are spread evenly over the year: put " + money(billsPerPay()) +
+          " from every pay towards bills, and the rest is yours to spend. Weeks with a big bill don't leave you short that way." }));
+      }
+
+      function billsPerPay() {
+        var per = PAYS_PER_YEAR[state.settings.pay_frequency] || 0;
+        return per ? Math.ceil((monthlyBillTotal() + (state.settings.savings || 0)) * 12 / per) : 0;
+      }
+
+      function addSpend() {
+        var amount = el("input", { inputmode: "decimal", placeholder: "0.00", required: "required" });
+        var note = el("input", { placeholder: "Optional, e.g. Food shop, petrol" });
+        var when = el("input", { type: "date", value: iso(utc(today.getFullYear(), today.getMonth(), today.getDate())) });
+        openDialog("Money spent", [
+          el("div", { class: "two" }, [el("label", { class: "field" }, ["Amount (£)", amount]), el("label", { class: "field" }, ["Date", when])]),
+          el("label", { class: "field" }, ["On what", note])
+        ], function () {
+          var pence = toPence(amount.value);
+          if (!pence || !when.value) { toast("Enter an amount"); return false; }
+          return api("POST", "/api/spend", { date: when.value, amount: Math.abs(pence), note: note.value });
+        });
+        setTimeout(function () { amount.focus(); }, 50);
+      }
+
+      function card(label, value, sub, cls) {
+        return el("div", { class: "card" }, [
+          el("div", { class: "label", text: label }),
+          el("div", { class: "value " + (cls || ""), text: value }),
+          el("div", { class: "sub", text: sub })
+        ]);
+      }
+
+      // ---------- Bills tab ----------
+
+      function renderBills() {
+        var root = document.getElementById("tab-bills");
+        root.innerHTML = "";
+        var total = monthlyBillTotal();
+        var perPay = billsPerPay();
+        root.appendChild(el("div", { class: "cards" }, [
+          card("Monthly bills", money(total), state.bills.length + " payment" + (state.bills.length === 1 ? "" : "s")),
+          card("Put aside each pay", money(perPay), "on average, to cover them")
+        ]));
+        root.appendChild(el("h2", { text: "Monthly payments" }));
+        var list = el("div", { class: "list" });
+        if (!state.bills.length) list.appendChild(el("div", { class: "empty", text: "No bills yet." }));
+        state.bills.forEach(function (bill) {
+          list.appendChild(el("div", { class: "row" }, [
+            el("div", { class: "grow" }, [
+              el("div", { class: "name", text: bill.name + (bill.active ? "" : " (paused)") }),
+              el("div", { class: "meta", text: "Day " + bill.day + " of each month" + (bill.category ? " · " + bill.category : "") })
+            ]),
+            el("span", { class: "amount " + (bill.active ? "" : "muted"), text: money(bill.amount) }),
+            el("button", { class: "link", text: "Edit", onclick: function () { editBill(bill); } })
+          ]));
+        });
+        root.appendChild(list);
+        root.appendChild(el("div", { style: "margin-top:12px" }, [el("button", { class: "primary", text: "+ Add a monthly payment", onclick: function () { editBill(null); } })]));
+        root.appendChild(el("p", { class: "hint", text: "Bills on the 29th, 30th or 31st come out on the last day of shorter months." }));
+      }
+
+      // ---------- Settings tab ----------
+
+      function renderSettings() {
+        var root = document.getElementById("tab-settings");
+        root.innerHTML = "";
+        var s = state.settings;
+        var amount = el("input", { inputmode: "decimal", value: poundsText(s.pay_amount), placeholder: "e.g. 450.00" });
+        var freq = el("select", {}, [
+          option("weekly", "Every week", s.pay_frequency), option("fortnightly", "Every two weeks", s.pay_frequency),
+          option("fourweekly", "Every four weeks", s.pay_frequency), option("monthly", "Once a month", s.pay_frequency)
+        ]);
+        var anchor = el("input", { type: "date", value: s.pay_anchor || "" });
+        var savings = el("input", { inputmode: "decimal", value: s.savings ? poundsText(s.savings) : "", placeholder: "Optional, e.g. 100.00" });
+        root.appendChild(el("h2", { text: "Your pay" }));
+        root.appendChild(el("form", { class: "stack", onsubmit: function (ev) {
+          ev.preventDefault();
+          var pence = toPence(amount.value);
+          if (pence === null) { toast("Enter your usual pay"); return; }
+          if (!anchor.value) { toast("Pick the date of a recent payday"); return; }
+          api("PUT", "/api/settings", { pay_amount: pence, pay_frequency: freq.value, pay_anchor: anchor.value, savings: toPence(savings.value) || 0 }).then(function () { toast("Saved"); });
+        } }, [
+          el("label", { class: "field" }, ["Usual take-home pay (£)", amount]),
+          el("label", { class: "field" }, ["How often you're paid", freq]),
+          el("label", { class: "field" }, ["Date of a recent payday", anchor]),
+          el("label", { class: "field" }, ["Save each month (£)", savings]),
+          el("button", { class: "primary", type: "submit", text: "Save" })
+        ]));
+        root.appendChild(el("p", { class: "hint", text: "Each payday uses this amount until you put in what you actually got (Month tab → Edit next to a payday). Savings are taken off before working out what's safe to spend." }));
+      }
+      function option(value, text, current) { return el("option", { value: value, text: text, selected: value === current ? "selected" : null }); }
+
+      // ---------- Dialogs ----------
+
+      function openDialog(title, fields, onSave, extraButtons) {
+        var dialog = document.getElementById("dialog");
+        dialog.innerHTML = "";
+        var form = el("form", { class: "stack", method: "dialog" }, [el("strong", { text: title })].concat(fields).concat([
+          el("div", { class: "two" }, [
+            el("button", { type: "button", text: "Cancel", onclick: function () { dialog.close(); } }),
+            el("button", { class: "primary", type: "submit", text: "Save" })
+          ])
+        ]).concat(extraButtons || []));
+        form.addEventListener("submit", function (ev) {
+          ev.preventDefault();
+          Promise.resolve(onSave()).then(function (ok) { if (ok !== false) dialog.close(); }).catch(function () {});
+        });
+        dialog.appendChild(form);
+        dialog.showModal();
+      }
+
+      function editBill(bill) {
+        var name = el("input", { value: bill ? bill.name : "", placeholder: "e.g. Rent", required: "required" });
+        var amount = el("input", { inputmode: "decimal", value: bill ? poundsText(bill.amount) : "", placeholder: "0.00", required: "required" });
+        var day = el("input", { type: "number", min: "1", max: "31", value: bill ? bill.day : "", placeholder: "1–31", required: "required" });
+        var category = el("input", { value: bill ? bill.category : "", placeholder: "Optional, e.g. Home" });
+        var active = el("input", { type: "checkbox", checked: !bill || bill.active ? "checked" : null });
+        var fields = [
+          el("label", { class: "field" }, ["Name", name]),
+          el("div", { class: "two" }, [el("label", { class: "field" }, ["Amount (£)", amount]), el("label", { class: "field" }, ["Day of month", day])]),
+          el("label", { class: "field" }, ["Category", category])
+        ];
+        if (bill) fields.push(el("label", { class: "row", style: "padding:0" }, [active, el("span", { text: "Active (untick to pause it)" })]));
+        var extra = bill ? [el("button", { type: "button", class: "danger", text: "Delete this bill", onclick: function () {
+          if (confirm("Delete " + bill.name + "?")) { document.getElementById("dialog").close(); api("DELETE", "/api/bills/" + bill.id); }
+        } })] : [];
+        openDialog(bill ? "Edit payment" : "New monthly payment", fields, function () {
+          var pence = toPence(amount.value);
+          if (pence === null) { toast("Enter an amount"); return false; }
+          var body = { name: name.value, amount: pence, day: parseInt(day.value, 10), category: category.value, active: active.checked };
+          return bill ? api("PUT", "/api/bills/" + bill.id, body) : api("POST", "/api/bills", body);
+        }, extra);
+      }
+
+      function editPay(t) {
+        var pay = payFor(t);
+        var amount = el("input", { inputmode: "decimal", value: poundsText(pay.amount) });
+        var extra = pay.edited ? [el("button", { type: "button", class: "link", text: "Use my usual pay (" + money(state.settings.pay_amount) + ")", onclick: function () {
+          document.getElementById("dialog").close(); api("PUT", "/api/pay", { date: iso(t), amount: null });
+        } })] : [];
+        openDialog("Pay on " + longLabel(t), [el("label", { class: "field" }, ["What you actually got (£)", amount])], function () {
+          var pence = toPence(amount.value);
+          if (pence === null) { toast("Enter an amount"); return false; }
+          return api("PUT", "/api/pay", { date: iso(t), amount: pence });
+        }, extra);
+      }
+
+      function editOpening() {
+        var key = monthKey(viewYear, viewMonth);
+        var amount = el("input", { inputmode: "decimal", value: poundsText(state.months[key] || 0) });
+        openDialog("In the bank on the 1st", [el("label", { class: "field" }, ["Balance (£, can be negative)", amount])], function () {
+          var pence = toPence(amount.value);
+          return api("PUT", "/api/month", { month: key, opening: pence || 0 });
+        });
+      }
+
+      function addExtra() {
+        var key = monthKey(viewYear, viewMonth);
+        var defaultDate = (today.getFullYear() === viewYear && today.getMonth() === viewMonth) ? iso(utc(viewYear, viewMonth, today.getDate())) : key + "-01";
+        var note = el("input", { placeholder: "e.g. Overtime, birthday money, car repair" });
+        var amount = el("input", { inputmode: "decimal", placeholder: "0.00" });
+        var kind = el("select", {}, [option("in", "Money in", "in"), option("out", "Money out", "in")]);
+        var when = el("input", { type: "date", value: defaultDate });
+        openDialog("Extra money in or out", [
+          el("label", { class: "field" }, ["What for", note]),
+          el("div", { class: "two" }, [el("label", { class: "field" }, ["Amount (£)", amount]), el("label", { class: "field" }, ["In or out", kind])]),
+          el("label", { class: "field" }, ["Date", when])
+        ], function () {
+          var pence = toPence(amount.value);
+          if (pence === null || !when.value) { toast("Enter an amount and date"); return false; }
+          return api("POST", "/api/extra", { date: when.value, amount: kind.value === "out" ? -Math.abs(pence) : Math.abs(pence), note: note.value });
+        });
+      }
+
+      // ---------- Shell ----------
+
+      function render() {
+        if (!state) return;
+        document.getElementById("monthLabel").textContent = new Date(Date.UTC(viewYear, viewMonth, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+        document.getElementById("monthnav").style.display = tab === "month" ? "flex" : "none";
+        ["month", "bills", "settings"].forEach(function (name) {
+          document.getElementById("tab-" + name).hidden = name !== tab;
+        });
+        document.querySelectorAll("nav.tabs button").forEach(function (b) { b.classList.toggle("on", b.dataset.tab === tab); });
+        if (tab === "month") renderMonth();
+        if (tab === "bills") renderBills();
+        if (tab === "settings") renderSettings();
+      }
+
+      document.getElementById("prev").addEventListener("click", function () { viewMonth--; if (viewMonth < 0) { viewMonth = 11; viewYear--; } render(); });
+      document.getElementById("next").addEventListener("click", function () { viewMonth++; if (viewMonth > 11) { viewMonth = 0; viewYear++; } render(); });
+      document.querySelectorAll("nav.tabs button").forEach(function (b) {
+        b.addEventListener("click", function () { tab = b.dataset.tab; render(); window.scrollTo(0, 0); });
+      });
+
+      api("GET", "/api/data").then(function () {
+        if (!state.settings.pay_anchor) { tab = "settings"; render(); }
+      }).catch(function () {
+        document.getElementById("tab-month").appendChild(el("div", { class: "note", text: "Couldn't load your data. Pull down to try again." }));
+      });
+      </script>
+      </body>
+      </html>
+      """
+
+
+      def main():
+          server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+          print("Paydays listening on port %d, data in %s%s" % (PORT, DB_PATH, ", password on" if PASSWORD else ""), flush=True)
+          server.serve_forever()
+
+
+      if __name__ == "__main__":
+          main()

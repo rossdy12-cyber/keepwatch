@@ -8,6 +8,7 @@ on:
       - ".github/workflows/build-jarvis-ipa.yml"
       - "nasportal/**"
       - "frigate-ntfy/**"
+      - "paydays/**"
       - ".github/workflows/build-nasportal-ipa.yml"
   workflow_dispatch:
 
