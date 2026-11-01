@@ -30,7 +30,7 @@ final class ChatStore: ObservableObject {
     }
 
     /// Sends a message and streams the reply into the last bubble. Calls `onReply` with the full text when done.
-    func send(_ text: String, settings: JarvisSettings, onReply: @escaping (String) -> Void = { _ in }) {
+    func send(_ text: String, settings: JarvisSettings, onReply: @escaping (String, URL?) -> Void = { _, _ in }) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !isSending else { return }
         turns.append(ChatTurn(role: .user, text: message))
@@ -47,12 +47,16 @@ final class ChatStore: ObservableObject {
                 let history = self.turns.filter { $0.id != replyID }
                 let stream = settings.client.reply(history: history, endpoint: settings.endpoint,
                                                    systemPrompt: settings.config.systemPrompt, sessionID: self.sessionID)
-                for try await chunk in stream {
-                    self.update(replyID) { $0.text += chunk }
+                var audio: URL?
+                for try await part in stream {
+                    switch part {
+                    case .text(let chunk): self.update(replyID) { $0.text += chunk }
+                    case .audio(let url): audio = url; self.update(replyID) { $0.audioURL = url }
+                    }
                 }
                 self.health = .online("Online")
                 if let reply = self.turns.first(where: { $0.id == replyID })?.text {
-                    onReply(reply)
+                    onReply(reply, audio)
                 }
             } catch {
                 if isCancellation(error) {
@@ -75,7 +79,7 @@ final class ChatStore: ObservableObject {
     }
 
     /// Re-sends the last thing you said.
-    func retry(settings: JarvisSettings, onReply: @escaping (String) -> Void = { _ in }) {
+    func retry(settings: JarvisSettings, onReply: @escaping (String, URL?) -> Void = { _, _ in }) {
         guard !isSending, let lastUser = turns.lastIndex(where: { $0.role == .user }) else { return }
         let text = turns[lastUser].text
         turns.removeSubrange(lastUser...)

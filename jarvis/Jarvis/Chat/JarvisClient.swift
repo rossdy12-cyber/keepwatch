@@ -8,6 +8,14 @@ struct ChatTurn: Codable, Identifiable, Equatable {
     var text: String
     var date = Date()
     var failed = false
+    /// Jarvis's own recording of this reply, when the core sends one.
+    var audioURL: URL?
+}
+
+/// A piece of Jarvis's answer: more text, or a recording of Jarvis saying it.
+enum ReplyPart {
+    case text(String)
+    case audio(URL)
 }
 
 enum HealthStatus: Equatable {
@@ -103,7 +111,7 @@ struct JarvisClient {
 
     /// Streams the reply to the last user message, chunk by chunk.
     func reply(history: [ChatTurn], endpoint: ResolvedEndpoint, systemPrompt: String, sessionID: String)
-        -> AsyncThrowingStream<String, Error> {
+        -> AsyncThrowingStream<ReplyPart, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -119,7 +127,7 @@ struct JarvisClient {
     }
 
     private func streamReply(history: [ChatTurn], endpoint: ResolvedEndpoint, systemPrompt: String, sessionID: String,
-                             emit: (String) -> Void) async throws {
+                             emit: (ReplyPart) -> Void) async throws {
         let usable = history.filter { !$0.failed && !$0.text.isEmpty }
         var messages: [[String: String]] = []
         let prompt = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -164,14 +172,14 @@ struct JarvisClient {
                 } else {
                     chunk = String(payload)
                 }
-                if let chunk, !chunk.isEmpty { gotText = true; emit(chunk) }
+                if let chunk, !chunk.isEmpty { gotText = true; emit(.text(chunk)) }
             }
         } else if ok && type.contains("ndjson") {
             // Ollama: one JSON object per line.
             for try await line in bytes.lines {
                 guard let data = line.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else { continue }
-                if let chunk = Self.extractText(json), !chunk.isEmpty { gotText = true; emit(chunk) }
+                if let chunk = Self.extractText(json), !chunk.isEmpty { gotText = true; emit(.text(chunk)) }
             }
         } else {
             var data = Data()
@@ -181,13 +189,37 @@ struct JarvisClient {
             try Self.check(response, body: data, path: path)
             if Self.isHTML(response, data) { throw JarvisError.webPage }
             if let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
-                if let text = Self.extractText(json), !text.isEmpty { gotText = true; emit(text) }
+                if let text = Self.extractText(json), !text.isEmpty { gotText = true; emit(.text(text)) }
+                if let audio = audioURL(in: json) { emit(.audio(audio)) }
             } else {
                 let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { gotText = true; emit(text) }
+                if !text.isEmpty { gotText = true; emit(.text(text)) }
             }
         }
         if !gotText { throw JarvisError.emptyReply }
+    }
+
+    /// Downloads one of Jarvis's voice recordings. The token is only sent to the Jarvis server itself.
+    func fetchAudio(_ url: URL) async throws -> Data {
+        var request = try makeRequest("", timeout: 60)
+        let sameHost = request.url?.host?.lowercased() == url.host?.lowercased()
+        if !sameHost { request = URLRequest(url: url, timeoutInterval: 60) }
+        request.url = url
+        request.setValue("audio/*, */*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await httpSession.data(for: request)
+        try Self.check(response, body: data, path: url.path)
+        return data
+    }
+
+    /// Jarvis can answer with a recording of its own voice: `{"reply": "…", "audio_url": "/voice/abc.mp3"}`.
+    private func audioURL(in json: Any) -> URL? {
+        guard let dict = json as? [String: Any] else { return nil }
+        for key in ["audio_url", "audioUrl", "audio", "voice_url"] {
+            guard let raw = dict[key] as? String, !raw.isEmpty else { continue }
+            if raw.lowercased().hasPrefix("http") { return URL(string: raw) }
+            return URL(string: base + (raw.hasPrefix("/") ? raw : "/" + raw))
+        }
+        return nil
     }
 
     static let replyKeys = ["reply", "response", "answer", "output", "text", "content", "choices", "message",

@@ -11,7 +11,7 @@ struct ChatView: View {
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
 
-    private let suggestions = ["What's the status of the NAS?", "What can you do?", "Good morning, Jarvis"]
+    private let suggestions = ["How is the NAS doing?", "Anything on the cameras today?", "What can you do?"]
 
     var body: some View {
         NavigationStack {
@@ -25,7 +25,7 @@ struct ChatView: View {
                                 ForEach(chat.turns) { turn in
                                     MessageBubble(turn: turn, isStreaming: chat.isSending && turn.id == chat.turns.last?.id,
                                                   onRetry: { chat.retry(settings: settings, onReply: replyFinished(false)) },
-                                                  onSpeak: { speaker.speak(turn.text) })
+                                                  onSpeak: { speaker.speak(turn.text, audio: turn.audioURL, client: settings.client) })
                                         .id(turn.id)
                                 }
                                 Color.clear.frame(height: 1).id("bottom")
@@ -174,12 +174,13 @@ struct ChatView: View {
         chat.send(text, settings: settings, onReply: replyFinished(viaVoice))
     }
 
-    private func replyFinished(_ viaVoice: Bool) -> (String) -> Void {
+    private func replyFinished(_ viaVoice: Bool) -> (String, URL?) -> Void {
         let mode = settings.config.speakMode
         let speaker = speaker
-        return { reply in
+        let client = settings.client
+        return { reply, audio in
             if mode == .always || (mode == .afterVoice && viaVoice) {
-                speaker.speak(reply)
+                speaker.speak(reply, audio: audio, client: client)
             }
         }
     }

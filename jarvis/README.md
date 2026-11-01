@@ -8,6 +8,12 @@ A chat-and-voice app for the **Jarvis core** running on your TrueNAS server, rea
 - **Status dot** shows whether Jarvis is reachable; tap it to check again.
 - The conversation is kept on the phone; ✎ starts a new one (with a new `session_id`).
 
+## Your Jarvis core
+
+The J.A.R.V.I.S. TrueNAS Core (FastAPI) is detected automatically from its `/openapi.json`: chats go to
+`POST /api/chat` with `{"message": "…"}`, and the answer `{"reply": "…", "audio_url": …}` is shown in the chat.
+When `audio_url` is set, **Read aloud** plays Jarvis's own recording instead of the iPhone voice. The status dot uses `GET /health`.
+
 ## Which Jarvis APIs it understands
 
 Settings → **Connection type** is **Detect automatically** by default. On first use (or **Test connection**) the app looks for:
