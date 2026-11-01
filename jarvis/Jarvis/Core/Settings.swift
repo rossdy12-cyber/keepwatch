@@ -76,6 +76,9 @@ struct ResolvedEndpoint {
 
 @MainActor
 final class JarvisSettings: ObservableObject {
+    /// One copy for the app and for Siri requests.
+    static let shared = JarvisSettings()
+
     private static let configKey = "jarvis.config"
     private static let detectionKey = "jarvis.detection"
     private static let secretsKey = "secrets"

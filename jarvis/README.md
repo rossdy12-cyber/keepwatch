@@ -11,6 +11,10 @@ A chat-and-voice app for the **Jarvis core** running on your TrueNAS server, rea
   understood on the phone and played straight from Navidrome, so they work even if the Jarvis core is busy or down.
   Music keeps playing with the screen locked, with lock-screen controls and a now-playing bar in the chat; it pauses
   while you talk to Jarvis. Set it up in Settings → Music (Navidrome).
+- **Siri:** "Hey Siri, ask Jarvis" → *"What would you like?"* → say anything, including music requests.
+  Also "Hey Siri, shuffle music in Jarvis", "pause Jarvis", "next song in Jarvis". All of these can go on the
+  Action Button or in Spotlight. Siri can only see Jarvis when it's installed directly (Sideloadly), not inside
+  LiveContainer.
 - The conversation is kept on the phone; ✎ starts a new one (with a new `session_id`).
 
 ## Your Jarvis core

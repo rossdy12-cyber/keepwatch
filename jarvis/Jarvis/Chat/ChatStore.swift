@@ -3,6 +3,9 @@ import Foundation
 /// The conversation with Jarvis. Saved on the phone so it survives restarts.
 @MainActor
 final class ChatStore: ObservableObject {
+    /// One copy for the app and for Siri requests, so Siri conversations show up in the chat.
+    static let shared = ChatStore()
+
     private struct Saved: Codable {
         var sessionID: String
         var turns: [ChatTurn]
@@ -72,6 +75,13 @@ final class ChatStore: ObservableObject {
             self.task = nil
             self.save()
         }
+    }
+
+    /// Adds a finished exchange (from Siri) to the conversation.
+    func addExchange(user: String, reply: String) {
+        turns.append(ChatTurn(role: .user, text: user))
+        turns.append(ChatTurn(role: .assistant, text: reply))
+        save()
     }
 
     /// Shows a request the phone answers itself (music), with a typing bubble until `finishLocal`.

@@ -2,8 +2,8 @@ import SwiftUI
 
 @main
 struct JarvisApp: App {
-    @StateObject private var settings = JarvisSettings()
-    @StateObject private var chat = ChatStore()
+    @StateObject private var settings = JarvisSettings.shared
+    @StateObject private var chat = ChatStore.shared
     @StateObject private var speaker = Speaker()
 
     init() {
