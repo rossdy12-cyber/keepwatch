@@ -504,7 +504,18 @@ def parse_amount(value):
 def handle_hook(body):
     """An Apple Pay payment from the iPhone Shortcut. Returns the line shown in the notification."""
     amount = parse_amount(body.get("amount"))
-    merchant = as_text(body.get("merchant"), 60) or "Apple Pay"
+    merchant = as_text(body.get("merchant"), 60)
+    raw = str(body.get("raw") or "").strip()
+    if raw and (amount <= 0 or not merchant):
+        # The Shortcut also sends the whole transaction as text, in case Amount / Merchant came through empty.
+        found = re.search(r"[\u00a3\u20ac\x24]\s?(\d{1,3}(?:,\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2})?)", raw) \
+            or re.search(r"(\d+[.,]\d{2})", raw)
+        if amount <= 0 and found:
+            amount = parse_amount(found.group(1))
+        if not merchant:
+            rest = raw.replace(found.group(0), " ") if found else raw
+            merchant = as_text(re.sub(r"\s+", " ", rest).strip(" -,:"), 60)
+    merchant = merchant or "Apple Pay"
     if amount <= 0:
         return "Couldn't read the amount from Apple Pay. Add it in Paydays with + Spent."
     today = uk_today().isoformat()
