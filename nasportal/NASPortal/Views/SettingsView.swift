@@ -35,6 +35,16 @@ struct SettingsView: View {
                 OTPSection()
 
                 Section {
+                    NavigationLink {
+                        TransferView()
+                    } label: {
+                        Label("Move 2FA codes to Vaultwarden", systemImage: "arrow.right.doc.on.clipboard")
+                    }
+                } footer: {
+                    Text("Reads Google Authenticator's export QR codes and turns the accounts you choose into something Vaultwarden can import.")
+                }
+
+                Section {
                     Button("Sign out of everything", role: .destructive) { confirmSignOut = true }
                     if signedOut {
                         Label("Signed out. Pages will ask you to sign in again.", systemImage: "checkmark.circle")

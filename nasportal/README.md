@@ -18,6 +18,11 @@ signing in every time, plus one-tap shortcuts to the web pages of the apps on yo
     then in NAS Portal choose *Read the QR code from a screenshot*. Scan the same QR code into your authenticator app.
     For Authelia, register a new one-time password device in its settings and do the same.
   - Secrets are stored in this iPhone's Keychain only. It does mean one phone holds both your password and your codes.
+- **Move 2FA codes to Vaultwarden:** Settings → *Move 2FA codes to Vaultwarden*. Pick screenshots of Google
+  Authenticator's *Transfer accounts → Export accounts* QR codes (or any ordinary 2FA QR code), untick what should
+  stay out of Vaultwarden, then either copy each one into an existing login's *Authenticator key* in the Bitwarden
+  app, or save an import file for the web vault (*Tools → Import data → Bitwarden (csv)*). Nothing is uploaded;
+  delete the screenshots and the file afterwards. (Microsoft Authenticator has no export: re-enrol those accounts.)
 - **Self-signed certificates** (TrueNAS on `https://100.x.x.x`) are accepted for home and Tailscale addresses only.
 
 Build: GitHub **Actions → Build NAS Portal IPA → Run workflow**, download **NASPortal-ipa**, and install

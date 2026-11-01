@@ -178,6 +178,14 @@ struct OTPEditor: View {
 }
 
 enum QRReader {
+    /// Every QR code in a picture (a screenshot can hold more than one).
+    static func readAll(_ imageData: Data) -> [String] {
+        guard let image = CIImage(data: imageData),
+              let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil,
+                                        options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]) else { return [] }
+        return detector.features(in: image).compactMap { ($0 as? CIQRCodeFeature)?.messageString }
+    }
+
     static func read(_ imageData: Data) -> String? {
         guard let image = CIImage(data: imageData),
               let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil,
