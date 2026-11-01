@@ -547,6 +547,64 @@ function currentPeriod() {
   return { start: start, end: next - DAY, next: next, now: now };
 }
 
+// The saving plan: each pay saves towards whichever bill comes out next.
+// A bill is saved for by the pays from when the previous bill of a similar size (at least half as big) went out,
+// up to the day before it's due, split evenly. E.g. rent £700 on the 5th and StepChange £494 on the 20th, paid
+// weekly: pays from the 5th to the 19th save for StepChange, pays from the 20th to the 4th save for rent. Small
+// bills don't break that up; they're saved for alongside. If no pay falls in that gap, saving starts from the
+// similar-sized bill before that (at the latest, the same bill's previous due date).
+// Returns { "<payday ms>": [{ bill, due, amount }] }.
+var planCache = null;
+function savingPlan() {
+  if (planCache) return planCache;
+  var plan = {};
+  if (!state.settings.pay_anchor) return (planCache = plan);
+  var from = utc(viewYear, viewMonth, 1) - 120 * DAY, to = utc(viewYear, viewMonth, 1) + 160 * DAY;
+  var occurrences = billsBetween(from, to);
+  var pays = paydaysBetween(from - 40 * DAY, to);
+  occurrences.forEach(function (o, i) {
+    var windowPays = [];
+    for (var j = i - 1; j >= 0; j--) {
+      var prev = occurrences[j];
+      if (prev.date >= o.date || prev.bill.amount * 2 < o.bill.amount) continue;
+      var start = prev.date;
+      windowPays = pays.filter(function (t) { return t >= start && t < o.date; });
+      if (windowPays.length) break;
+    }
+    if (!windowPays.length) return; // too close to the start of the range to know; outside the months shown
+    var share = Math.floor(o.bill.amount / windowPays.length), extra = o.bill.amount - share * windowPays.length;
+    windowPays.forEach(function (t, k) {
+      // Any leftover pence go on the earliest pays, so the money is there in time.
+      (plan[t] = plan[t] || []).push({ bill: o.bill, due: o.date, month: o.month, amount: share + (k < extra ? 1 : 0) });
+    });
+  });
+  Object.keys(plan).forEach(function (t) { plan[t].sort(function (a, b) { return a.due - b.due; }); });
+  return (planCache = plan);
+}
+
+function savingsPerPay() {
+  var per = PAYS_PER_YEAR[state.settings.pay_frequency] || 0;
+  return per && state.settings.savings ? Math.ceil(state.settings.savings * 12 / per) : 0;
+}
+
+// What a pay has to put aside (bills plus the savings goal), and what's left to spend from it.
+function payBreakdown(t) {
+  var items = savingPlan()[t] || [];
+  var aside = items.reduce(function (s, x) { return s + x.amount; }, 0) + savingsPerPay();
+  var pay = payFor(t);
+  return { pay: pay, items: items, aside: aside, spend: pay.amount - aside };
+}
+
+// What the plan says should already be put aside on the 1st, for bills due this month or later.
+function plannedPotAt(monthStart) {
+  var plan = savingPlan(), total = 0;
+  Object.keys(plan).forEach(function (key) {
+    if (+key >= monthStart) return;
+    plan[key].forEach(function (x) { if (x.due >= monthStart) total += x.amount; });
+  });
+  return total;
+}
+
 function spendsBetween(from, to) {
   return state.pays.filter(function (p) {
     if (p.kind !== "spend") return false;
@@ -595,56 +653,62 @@ function renderMonth() {
   ]);
   root.appendChild(summary);
 
-  // Each payday and the bills it has to cover (up to the day before the next payday).
+  // Each payday: what to put aside, which bill it's for, and what's left to spend.
   root.appendChild(el("h2", { text: "Each payday" }));
   if (!paydays.length) {
     root.appendChild(el("div", { class: "list" }, [el("div", { class: "empty", text: "No paydays this month yet. Set up your pay in Pay & settings." })]));
   } else {
-    var before = billsBetween(first, paydays[0] - DAY);
-    if (before.length) {
-      var beforeTotal = before.reduce(function (s, b) { return s + b.bill.amount; }, 0);
-      root.appendChild(el("p", { class: "hint", text: "Due before your first pay this month (covered by last month's final pay): " +
-        before.map(function (b) { return b.bill.name + " " + money(b.bill.amount); }).join(", ") + " = " + money(beforeTotal) + "." }));
-    }
-    paydays.forEach(function (t, index) {
+    root.appendChild(el("p", { class: "hint", text: "Each pay saves towards the next big bill that's due (smaller bills alongside), so the money is already there when it goes out." }));
+    paydays.forEach(function (t) {
+      var b = payBreakdown(t);
       var nextPay = paydaysBetween(t + DAY, t + 62 * DAY)[0];
       var until = nextPay ? nextPay - DAY : t + stepDays() * DAY - DAY;
-      var covers = billsBetween(t, until);
-      var pay = payFor(t);
-      var coverTotal = covers.reduce(function (s, b) { return s + b.bill.amount; }, 0);
-      var rest = pay.amount - coverTotal;
+      var goingOut = billsBetween(t, until);
       var box = el("div", { class: "payday" }, [
         el("div", { class: "payday-head" }, [
           el("div", { class: "grow" }, [
-            el("div", { class: "name" }, [longLabel(t), pay.edited ? el("span", { class: "tag edited", text: "actual" }) : el("span", { class: "tag", text: "usual" })]),
-            el("div", { class: "meta", text: "Covers bills up to " + shortDate(until) })
+            el("div", { class: "name" }, [longLabel(t), b.pay.edited ? el("span", { class: "tag edited", text: "actual" }) : el("span", { class: "tag", text: "usual" })]),
+            el("div", { class: "meta", text: "Put aside " + money(b.aside) })
           ]),
-          el("span", { class: "amount", text: money(pay.amount) }),
+          el("span", { class: "amount", text: money(b.pay.amount) }),
           el("button", { class: "link", text: "Edit", onclick: function () { editPay(t); } })
         ])
       ]);
       var list = el("div", {});
-      if (!covers.length) list.appendChild(el("div", { class: "empty", text: "No bills before the next payday." }));
-      covers.forEach(function (b) {
-        list.appendChild(el("div", { class: "row" + (isPaid(b.bill.id, b.month) ? " paid" : "") }, [
+      if (!b.items.length && !savingsPerPay()) list.appendChild(el("div", { class: "empty", text: "Nothing to put aside from this pay." }));
+      b.items.forEach(function (x) {
+        list.appendChild(el("div", { class: "row" }, [
           el("div", { class: "grow" }, [
-            el("div", { class: "name", text: b.bill.name }),
-            el("div", { class: "meta", text: dayLabel(b.date) + (b.month !== key ? " " + new Date(b.date).toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" }) : "") + (b.bill.category ? " · " + b.bill.category : "") })
+            el("div", { class: "name", text: "Save for " + x.bill.name }),
+            el("div", { class: "meta", text: money(x.bill.amount) + " due " + longLabel(x.due) })
           ]),
-          el("span", { class: "amount", text: "−" + money(b.bill.amount) })
+          el("span", { class: "amount", text: money(x.amount) })
         ]));
       });
+      if (savingsPerPay()) {
+        list.appendChild(el("div", { class: "row" }, [
+          el("div", { class: "grow" }, [el("div", { class: "name", text: "Savings" }), el("div", { class: "meta", text: money(state.settings.savings) + " a month" })]),
+          el("span", { class: "amount", text: money(savingsPerPay()) })
+        ]));
+      }
+      if (goingOut.length) {
+        list.appendChild(el("div", { class: "row" }, [
+          el("div", { class: "grow" }, [el("div", { class: "meta", text: "Going out before the next payday (from money already put aside): " +
+            goingOut.map(function (o) { return o.bill.name + " " + money(o.bill.amount) + " on " + dayLabel(o.date); }).join(", ") })])
+        ]));
+      }
       box.appendChild(list);
       box.appendChild(el("div", { class: "payday-foot" }, [
-        el("span", { text: "Left from this pay" }),
-        el("span", { class: "amount " + (rest < 0 ? "bad" : "good"), text: money(rest) })
+        el("span", { text: "Left to spend from this pay" }),
+        el("span", { class: "amount " + (b.spend < 0 ? "bad" : "good"), text: money(b.spend) })
       ]));
       root.appendChild(box);
     });
   }
 
   // Running balance through the month.
-  var opening = state.months[key] || 0;
+  var openingSet = Object.prototype.hasOwnProperty.call(state.months, key);
+  var opening = openingSet ? state.months[key] : plannedPotAt(first);
   root.appendChild(el("h2", { text: "Day by day" }));
   var events = [];
   paydays.forEach(function (t) { events.push({ date: t, order: 0, name: "Pay", amount: payFor(t).amount }); });
@@ -656,7 +720,7 @@ function renderMonth() {
   var timeline = el("div", { class: "list timeline" }, [
     el("div", { class: "row" }, [
       el("span", { class: "date", text: "1st" }),
-      el("div", { class: "grow" }, [el("div", { class: "name", text: "Start balance" }), el("div", { class: "meta", text: "In the bank on the 1st" })]),
+      el("div", { class: "grow" }, [el("div", { class: "name", text: "Start balance" }), el("div", { class: "meta", text: openingSet ? "In the bank on the 1st" : "Estimate: what your saving plan has put aside. Tap Edit to enter your real balance." })]),
       el("span", { class: "amount", text: money(opening) }),
       el("button", { class: "link", text: "Edit", onclick: editOpening })
     ])
@@ -710,10 +774,9 @@ function renderSpending(root) {
       " add up to more than your pay over a year, so there's nothing safe to spend. Look at the Bills tab for something to cut or pause." }));
     return;
   }
-  var cards = [card("Per week", money(weekly), "about " + money(Math.floor(weekly / 7)) + " a day", "good")];
+  var cards = [card("Average per week", money(weekly), "about " + money(Math.floor(weekly / 7)) + " a day, across the year", "good")];
   if (period) {
-    var days = Math.round((period.end - period.start) / DAY) + 1;
-    var allowance = Math.floor(weekly * days / 7);
+    var allowance = Math.max(0, payBreakdown(period.start).spend);
     var spent = spendsBetween(period.start, period.end).reduce(function (s, p) { return s + p.amount; }, 0);
     var left = allowance - spent;
     var daysLeft = Math.round((period.end - period.now) / DAY) + 1;
@@ -727,7 +790,7 @@ function renderSpending(root) {
       el("div", { class: "row" }, [
         el("div", { class: "grow" }, [
           el("div", { class: "name", text: "This pay period: " + shortDate(period.start) + " – " + shortDate(period.end) }),
-          el("div", { class: "meta", text: "Spent " + money(spent) + " of " + money(allowance) + " · next payday " + longLabel(period.next) })
+          el("div", { class: "meta", text: "Spent " + money(spent) + " of " + money(allowance) + " (this pay after putting " + money(payBreakdown(period.start).aside) + " aside) · next payday " + longLabel(period.next) })
         ]),
         el("button", { class: "primary", text: "+ Spent", onclick: addSpend })
       ])
@@ -752,8 +815,8 @@ function renderSpending(root) {
   } else {
     root.appendChild(el("div", { class: "cards" }, cards));
   }
-  root.appendChild(el("p", { class: "hint", text: "Your bills are spread evenly over the year: put " + money(billsPerPay()) +
-    " from every pay towards bills, and the rest is yours to spend. Weeks with a big bill don't leave you short that way." }));
+  root.appendChild(el("p", { class: "hint", text: "Left until payday is what this pay leaves after putting money aside for your next bills (see Each payday below). " +
+    "Some pays put more aside than others, depending on which bill is next; the average works out at " + money(billsPerPay()) + " a pay." }));
 }
 
 function billsPerPay() {
@@ -930,6 +993,7 @@ function addExtra() {
 
 function render() {
   if (!state) return;
+  planCache = null;
   document.getElementById("monthLabel").textContent = new Date(Date.UTC(viewYear, viewMonth, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
   document.getElementById("monthnav").style.display = tab === "month" ? "flex" : "none";
   ["month", "bills", "settings"].forEach(function (name) {

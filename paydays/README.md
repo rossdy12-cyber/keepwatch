@@ -8,11 +8,15 @@ NAS Portal, or open it in Safari and choose *Share → Add to Home Screen*.
 - **Safe to spend:** a steady amount per week (and per day). Work it out as your pay over a year, minus a year of
   bills and savings, spread evenly over 52 weeks. Big bills like rent are smoothed out, so the week they land in
   doesn't leave you short.
-- **Until payday:** what's left of that for the current pay period, after the spending you've logged with
-  **+ Spent**, and what that works out to per day until payday.
+- **Until payday:** what this pay leaves after putting money aside for the next bills, minus the spending you've
+  logged with **+ Spent**, and what that works out to per day until payday.
 - **This month:** pay in, bills out, left over, and what's still to pay.
-- **Each payday:** which bills come out before the next payday, and what's left from that pay.
-- **Day by day:** a running balance, with a warning if a bill would take you below zero.
+- **Each payday:** what to put aside from that pay, which bill it's for, and what's left to spend. Each pay saves
+  towards the next big bill: with rent £700 on the 5th and StepChange £494 on the 20th, the pays from the 5th to
+  the 19th save for StepChange and the pays from the 20th to the 4th save for rent. Smaller bills are saved for
+  alongside, from the last bill at least half their size.
+- **Day by day:** a running balance, with a warning if a bill would take you below zero. Until you enter your real
+  balance on the 1st, it starts from what the saving plan says should already be put aside.
 - **Tick off** each bill as it leaves your account.
 
 **Bills tab:** add each monthly payment with its amount and the day of the month it goes out.
