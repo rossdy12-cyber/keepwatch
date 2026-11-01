@@ -4,9 +4,10 @@ import UIKit
 import UserNotifications
 
 /// "Hey Siri, ask Jarvis" → "What would you like?" → your request.
-/// Music requests play from Navidrome in the background; anything else goes to the Jarvis core and Siri reads the reply.
-/// Conforms to AudioPlaybackIntent so iOS lets it start music without opening the app.
-struct AskJarvisIntent: AudioPlaybackIntent {
+/// Anything that isn't music goes to the Jarvis core and Siri reads the reply. Music plays from Navidrome; if iOS won't
+/// let it start from the background, Siri offers to open Jarvis to start it.
+/// (A plain AppIntent: Siri won't ask "What would you like?" for an audio-playback intent.)
+struct AskJarvisIntent: AppIntent, ForegroundContinuableIntent {
     static var title: LocalizedStringResource = "Ask Jarvis"
     static var description = IntentDescription("Ask Jarvis anything, or ask it to play music from Navidrome.")
     static var openAppWhenRun = false
@@ -16,7 +17,13 @@ struct AskJarvisIntent: AudioPlaybackIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let reply = await JarvisVoice.answer(request)
+        let text = request
+        let reply = await JarvisVoice.answer(text)
+        if let command = MusicCommand.parse(text), command.startsMusic, !MusicPlayer.shared.lastStartAllowed {
+            throw needsToContinueInForegroundError("Open Jarvis to start the music?") {
+                _ = await MusicDJ.handle(command, account: JarvisSettings.shared.navidrome)
+            }
+        }
         return .result(dialog: "\(reply)")
     }
 }

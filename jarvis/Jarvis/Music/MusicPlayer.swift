@@ -93,10 +93,18 @@ final class MusicPlayer: ObservableObject {
 
     // MARK: Internals
 
+    /// False when iOS wouldn't let the music start (e.g. asked from Siri while Jarvis is in the background).
+    @Published private(set) var lastStartAllowed = true
+
     private func activateSession() {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default)
-        try? session.setActive(true)
+        do {
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+            lastStartAllowed = true
+        } catch {
+            lastStartAllowed = false
+        }
     }
 
     private func loadCurrent() {
