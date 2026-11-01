@@ -1,5 +1,7 @@
 import AppIntents
 import Foundation
+import UIKit
+import UserNotifications
 
 /// "Hey Siri, ask Jarvis" → "What would you like?" → your request.
 /// Music requests play from Navidrome in the background; anything else goes to the Jarvis core and Siri reads the reply.
@@ -95,6 +97,36 @@ enum JarvisVoice {
             chat.addExchange(user: text, reply: reply)
             return reply
         }
+
+        // The Jarvis core can take 10 seconds or more, and Siri gives up on an app at about that point.
+        // Wait up to 8 seconds; if the answer isn't ready, finish in the background and send it as a notification.
+        let work = Task { @MainActor in await coreReply(text) }
+        let quick: String? = await withTaskGroup(of: String?.self) { group in
+            group.addTask { await work.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        if let quick { return quick }
+
+        let background = BackgroundTask()
+        background.begin()
+        Task { @MainActor in
+            let reply = await work.value
+            await notify(reply)
+            background.end()
+        }
+        return "Give me a moment, I'll send the answer as a notification."
+    }
+
+    /// Asks the Jarvis core and records the exchange in the chat.
+    private static func coreReply(_ text: String) async -> String {
+        let settings = JarvisSettings.shared
+        let chat = ChatStore.shared
         do {
             if settings.config.style == .auto && settings.detection == nil {
                 settings.detection = try await settings.client.detect()
@@ -110,5 +142,32 @@ enum JarvisVoice {
         } catch {
             return describe(error)
         }
+    }
+
+    private static func notify(_ reply: String) async {
+        let content = UNMutableNotificationContent()
+        content.title = "Jarvis"
+        content.body = reply
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        try? await UNUserNotificationCenter.current().add(request)
+    }
+}
+
+/// Asks iOS for a little time to finish a reply after Siri has moved on.
+@MainActor
+final class BackgroundTask {
+    private var id = UIBackgroundTaskIdentifier.invalid
+
+    func begin() {
+        id = UIApplication.shared.beginBackgroundTask(withName: "Jarvis reply") { [weak self] in
+            Task { @MainActor in self?.end() }
+        }
+    }
+
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
     }
 }

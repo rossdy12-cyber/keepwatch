@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct JarvisApp: App {
@@ -18,6 +19,14 @@ struct JarvisApp: App {
                 .environmentObject(speaker)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
+                .task {
+                    // Slow Siri answers arrive as notifications.
+                    _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                    // Work out the core's API now, so the first Siri request doesn't have to.
+                    if settings.config.style == .auto && settings.detection == nil {
+                        settings.detection = try? await settings.client.detect()
+                    }
+                }
         }
     }
 }
