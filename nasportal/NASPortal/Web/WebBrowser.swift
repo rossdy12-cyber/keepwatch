@@ -15,11 +15,16 @@ struct WebDestination: Identifiable, Equatable {
 final class WebViewPool {
     static let shared = WebViewPool()
     private var views: [String: WKWebView] = [:]
+    private var messageProxies: [ObjectIdentifier: ScriptMessageProxy] = [:]
 
     func webView(for url: URL) -> (view: WKWebView, isNew: Bool) {
         let key = url.absoluteString
         if let existing = views[key] { return (existing, false) }
         let configuration = WKWebViewConfiguration()
+        let proxy = ScriptMessageProxy()
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: OTPScript.source, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        configuration.userContentController.add(proxy, name: OTPScript.messageName)
         configuration.websiteDataStore = .default()
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
         configuration.allowsInlineMediaPlayback = true
@@ -31,7 +36,23 @@ final class WebViewPool {
         view.scrollView.backgroundColor = UIColor(Theme.background)
         view.scrollView.refreshControl = UIRefreshControl()
         views[key] = view
+        messageProxies[ObjectIdentifier(view)] = proxy
         return (view, true)
+    }
+
+    func messageProxy(for view: WKWebView) -> ScriptMessageProxy? {
+        messageProxies[ObjectIdentifier(view)]
+    }
+}
+
+/// Passes messages from the page to whichever screen currently shows the web view, without
+/// the web view keeping that screen alive.
+@MainActor
+final class ScriptMessageProxy: NSObject, WKScriptMessageHandler {
+    weak var target: WebPageModel?
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.codeFieldChanged(message.body as? String ?? "")
     }
 }
 
@@ -43,6 +64,11 @@ final class WebPageModel: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     @Published var isLoading = false
     @Published var progress = 0.0
     @Published var errorMessage: String?
+    @Published var host: String?
+    /// True while the page shows a sign-in code field; the code button only appears then.
+    @Published var codeFieldShown = false
+    /// Briefly shown after a code was typed in for you.
+    @Published var filledNotice: String?
 
     let destination: WebDestination
     let webView: WKWebView
@@ -55,6 +81,7 @@ final class WebPageModel: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         super.init()
         view.navigationDelegate = self
         view.uiDelegate = self
+        WebViewPool.shared.messageProxy(for: view)?.target = self
         if let refresh = view.scrollView.refreshControl {
             refresh.removeTarget(nil, action: nil, for: .valueChanged)
             refresh.addTarget(self, action: #selector(pulledToRefresh), for: .valueChanged)
@@ -78,11 +105,42 @@ final class WebPageModel: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             view.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] view, _ in
                 let value = view.estimatedProgress
                 Task { @MainActor in self?.progress = value }
+            },
+            view.observe(\.url, options: [.initial, .new]) { [weak self] view, _ in
+                let value = view.url?.host
+                Task { @MainActor in self?.host = value }
             }
         ]
         if isNew || view.url == nil {
             view.load(URLRequest(url: destination.url))
         }
+    }
+
+    // MARK: Two-factor codes
+
+    /// A sign-in code field appeared ('empty' / 'filled') or went away ('gone').
+    func codeFieldChanged(_ state: String) {
+        codeFieldShown = state != "gone"
+        if state == "empty" && OTPVault.shared.autoFill {
+            fillOTP(force: false)
+        }
+    }
+
+    /// Types the current code into the page's one-time-code field. Returns false when there's no code for this site.
+    @discardableResult
+    func fillOTP(force: Bool) -> Bool {
+        guard let account = OTPVault.shared.account(for: webView.url?.host),
+              let code = account.code() else { return false }
+        let script = "window.__portalFillOTP && window.__portalFillOTP('\(code)', \(force ? "true" : "false"))"
+        webView.evaluateJavaScript(script) { [weak self] result, _ in
+            guard let self, let outcome = result as? String, outcome != "none", outcome != "already" else { return }
+            Task { @MainActor in
+                self.filledNotice = "\(account.name) code filled in"
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                self.filledNotice = nil
+            }
+        }
+        return true
     }
 
     @objc private func pulledToRefresh() {
@@ -126,7 +184,10 @@ final class WebPageModel: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     }
 
     nonisolated func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        Task { @MainActor in self.errorMessage = nil }
+        Task { @MainActor in
+            self.errorMessage = nil
+            self.codeFieldShown = false
+        }
     }
 
     nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -266,6 +327,9 @@ struct WebScreen: View {
                         .padding(16)
                 }
             }
+            .overlay(alignment: .bottom) {
+                OTPPill(page: page)
+            }
             .navigationTitle(page.destination.title)
             .navigationBarTitleDisplayMode(.inline)
             .portalChrome()
@@ -306,6 +370,51 @@ struct WebScreen: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// A small "2FA code" button at the bottom of sign-in pages for sites you've added a code for.
+/// Tap to type the current code into the page; long-press to copy it.
+private struct OTPPill: View {
+    @ObservedObject var page: WebPageModel
+    @ObservedObject private var vault = OTPVault.shared
+
+    var body: some View {
+        if page.codeFieldShown, let account = vault.account(for: page.host) {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Button {
+                    page.fillOTP(force: true)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: page.filledNotice == nil ? "key.fill" : "checkmark.circle.fill")
+                        if let notice = page.filledNotice {
+                            Text(notice)
+                        } else {
+                            Text(OTPCodeLabel.format(account.code(at: context.date) ?? "------"))
+                                .font(.system(.body, design: .monospaced).weight(.semibold))
+                            Text("\(account.secondsLeft(at: context.date))s")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(Theme.background.opacity(0.7))
+                        }
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.background)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Theme.accent, in: Capsule())
+                    .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+                }
+                .contextMenu {
+                    Button {
+                        UIPasteboard.general.string = account.code()
+                    } label: {
+                        Label("Copy code", systemImage: "doc.on.doc")
+                    }
+                }
+                .accessibilityLabel("Fill in the \(account.name) two-factor code")
+            }
+            .padding(.bottom, 14)
         }
     }
 }

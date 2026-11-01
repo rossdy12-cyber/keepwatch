@@ -32,6 +32,8 @@ struct SettingsView: View {
                     Text("Only for home and Tailscale addresses (192.168.x.x, 10.x.x.x, 100.x.x.x, .local, .ts.net). TrueNAS uses a self-signed certificate on those. Public websites are always checked.")
                 }
 
+                OTPSection()
+
                 Section {
                     Button("Sign out of everything", role: .destructive) { confirmSignOut = true }
                     if signedOut {
