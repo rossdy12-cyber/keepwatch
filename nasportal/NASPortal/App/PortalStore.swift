@@ -51,7 +51,7 @@ final class PortalStore: ObservableObject {
         sites = Self.defaultSites
     }
 
-    static func url(from address: String) -> URL? {
+    nonisolated static func url(from address: String) -> URL? {
         var text = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         if !text.lowercased().hasPrefix("http://") && !text.lowercased().hasPrefix("https://") {

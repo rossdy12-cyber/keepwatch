@@ -113,12 +113,12 @@ final class WebPageModel: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
     }
 
-    nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                              decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         // Phone numbers, e-mail and App Store links go to the system; everything else stays in the app.
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(),
            !["http", "https", "about", "blob", "data", "javascript"].contains(scheme) {
-            Task { @MainActor in UIApplication.shared.open(url) }
+            UIApplication.shared.open(url)
             decisionHandler(.cancel)
             return
         }
@@ -173,10 +173,10 @@ final class WebPageModel: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     // MARK: WKUIDelegate
 
     /// Links that open a new window (target="_blank") open in the same view instead.
-    nonisolated func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                              for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
-            Task { @MainActor in webView.load(URLRequest(url: url)) }
+            webView.load(URLRequest(url: url))
         }
         return nil
     }
