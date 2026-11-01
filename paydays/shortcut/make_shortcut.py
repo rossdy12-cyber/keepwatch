@@ -1,5 +1,8 @@
-"""Builds "Paydays Apple Pay.shortcut" (unsigned). The GitHub workflow signs it on a Mac with
-`shortcuts sign --mode anyone`, because iPhones only import signed shortcuts.
+"""Builds "Paydays Apple Pay.shortcut" (unsigned). iPhones only import signed shortcuts, and signing needs a Mac
+that is signed in to iCloud (GitHub's Mac runners aren't), so sign it on one:
+
+    python3 make_shortcut.py unsigned.shortcut
+    shortcuts sign --mode anyone --input unsigned.shortcut --output "Paydays Apple Pay.shortcut"
 
 The shortcut asks for your private Paydays link when you add it, then for each Wallet transaction it is given:
 POST {amount, merchant, raw} as JSON to that link and shows the answer as a notification.

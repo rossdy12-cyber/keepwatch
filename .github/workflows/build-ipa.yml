@@ -9,7 +9,6 @@ on:
       - "nasportal/**"
       - "frigate-ntfy/**"
       - "paydays/**"
-      - ".github/workflows/build-paydays-shortcut.yml"
       - ".github/workflows/build-nasportal-ipa.yml"
   workflow_dispatch:
 
