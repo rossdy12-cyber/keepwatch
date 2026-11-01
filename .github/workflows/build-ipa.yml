@@ -3,6 +3,9 @@ name: Build unsigned IPA
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "jarvis/**"
+      - ".github/workflows/build-jarvis-ipa.yml"
   workflow_dispatch:
 
 jobs:
