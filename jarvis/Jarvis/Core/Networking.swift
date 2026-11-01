@@ -45,7 +45,7 @@ enum JarvisError: LocalizedError {
         case 523:
             return prefix + "Cloudflare can't reach the NAS at all. Check the DNS record or tunnel."
         case 525:
-            return prefix + "The secure (SSL) handshake failed: Cloudflare is set to talk https to the NAS, but Jarvis on that port only speaks http. In Cloudflare, either set SSL/TLS to Flexible for this host, or (better) point a Cloudflare Tunnel at http://<nas-ip>:<jarvis-port>."
+            return prefix + "The secure (SSL) handshake with the NAS failed. Usually this means Nginx Proxy Manager has no proxy host (and so no SSL certificate) for this hostname yet: add one in Nginx Proxy Manager that forwards to the Jarvis app's port, with an SSL certificate."
         case 526:
             return prefix + "The NAS's certificate isn't valid for this name. Use Cloudflare SSL mode Full (not Full strict), or install a Cloudflare Origin certificate on the NAS."
         case 530:

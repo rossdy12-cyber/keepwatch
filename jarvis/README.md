@@ -31,11 +31,14 @@ Same as Keepwatch (see the main README): GitHub **Actions → Build Jarvis IPA �
 
 ## If it says "Cloudflare couldn't get through (error 525)"
 
-525 means Cloudflare tried to talk **https** to the NAS, but the Jarvis app on that port speaks plain **http**.
-Fix one of these in Cloudflare:
+`*.nas-server.co.uk` all goes through Cloudflare to **Nginx Proxy Manager** on the NAS. A 525 for `jarvis.` means
+Nginx Proxy Manager has no proxy host for that name, so it has no SSL certificate to offer. (Over plain http the same
+name shows Nginx Proxy Manager's "Congratulations… a host that isn't set up yet" page.) Fix it in Nginx Proxy Manager:
 
-- **Best:** use a Cloudflare Tunnel (the `cloudflared` app on TrueNAS) with the public hostname
-  `jarvis.nas-server.co.uk` pointing at `http://<nas-ip>:<jarvis-port>`.
-- Or: SSL/TLS → Configuration Rules → for `jarvis.nas-server.co.uk` set SSL to **Flexible**.
+1. **Hosts → Proxy Hosts → Add Proxy Host.** Domain name: `jarvis.nas-server.co.uk`.
+2. Scheme `http`, forward hostname/IP: the NAS's LAN IP, forward port: the Jarvis app's port (TrueNAS → Apps → Jarvis).
+   Turn on **Websockets Support** and **Block Common Exploits**.
+3. **SSL** tab: pick your existing `*.nas-server.co.uk` certificate (or request a new one), turn on **Force SSL**. Save.
 
-You can also skip Cloudflare entirely: put `http://<nas-tailscale-ip>:<jarvis-port>` as the address and turn on Tailscale.
+Then open `https://jarvis.nas-server.co.uk` in Safari: you should get Jarvis, not an error page. You can also skip
+Cloudflare entirely: put `http://<nas-tailscale-ip>:<jarvis-port>` as the address and turn on Tailscale.
