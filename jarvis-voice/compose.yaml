@@ -22,8 +22,12 @@ services:
       SESSION_ID: bedroom-pi
       # "base.en" is quick; "small.en" understands more but is slower.
       WHISPER_MODEL: base.en
-      # British male voice for replies when the core doesn't send its own recording.
-      VOICE: en_GB-alan-medium
+      # Jarvis's voice when the core doesn't send its own recording: a natural British male voice (Kokoro).
+      # Try bm_george (deep, butler-like), bm_fable, bm_lewis or bm_daniel.
+      TTS_VOICE: bm_george
+      TTS_SPEED: "0.95"
+      # "light" adds a subtle AI-assistant sheen; "none" for the plain voice.
+      VOICE_EFFECT: light
       USE_CORE_VOICE: "true"
       # Lower = wakes more easily (and more false wakes). 0.5 is a good start.
       WAKE_THRESHOLD: "0.5"
@@ -36,9 +40,9 @@ services:
       - -c
       - >-
         (command -v ffmpeg >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null))
-        && ([ -f /data/venv/.ready-1 ] || (python -m venv /data/venv
-        && /data/venv/bin/pip install -q --no-cache-dir "openwakeword==0.6.0" "faster-whisper==1.1.1" "piper-tts==1.2.0" "onnxruntime>=1.17,<2" numpy
-        && touch /data/venv/.ready-1))
+        && ([ -f /data/venv/.ready-2 ] || (python -m venv /data/venv
+        && /data/venv/bin/pip install -q --no-cache-dir "openwakeword==0.6.0" "faster-whisper==1.1.1" "piper-tts==1.2.0" "onnxruntime>=1.17,<2" "kokoro-onnx==0.4.9" numpy
+        && touch /data/venv/.ready-2))
         && exec /data/venv/bin/python -u /app/hub.py
 
 volumes:
@@ -56,7 +60,10 @@ configs:
         2. A beep tells you it's listening; your question is recorded until you stop talking.
         3. faster-whisper turns it into text.
         4. The Jarvis core answers (POST /api/chat).
-        5. The reply is spoken in the core's own voice when it sends one, otherwise with Piper (a British voice).
+        5. The reply is spoken in the core's own voice when it sends one, otherwise with Kokoro: a natural British
+           male voice (Piper as a backup).
+
+      It also serves that voice to the Jarvis iPhone app (GET or POST /tts), so the phone sounds the same.
 
       It also serves the Pi's setup script: on the Pi run the command printed in this app's logs.
       """
@@ -91,7 +98,10 @@ configs:
       HTTP_PORT = int(os.environ.get("HTTP_PORT", "10701"))
       WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", "0.5"))
       WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
-      VOICE = os.environ.get("VOICE", "en_GB-alan-medium")
+      VOICE = os.environ.get("VOICE", "en_GB-alan-medium")  # Piper backup voice
+      TTS_VOICE = os.environ.get("TTS_VOICE", "bm_george")  # Kokoro: bm_george, bm_fable, bm_lewis, bm_daniel
+      TTS_SPEED = float(os.environ.get("TTS_SPEED", "0.95"))
+      VOICE_EFFECT = os.environ.get("VOICE_EFFECT", "light").lower()  # "light" adds a subtle AI-assistant sheen; "none"
       USE_CORE_VOICE = os.environ.get("USE_CORE_VOICE", "true").lower() in ("1", "true", "yes")
       FOLLOW_UP_SECONDS = float(os.environ.get("FOLLOW_UP_SECONDS", "0"))
       GREETING = os.environ.get("GREETING", "Jarvis is listening.")
@@ -143,6 +153,32 @@ configs:
           return model
 
 
+      KOKORO_FILES = {
+          "kokoro-v1.0.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+          "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+      }
+
+
+      def load_kokoro():
+          folder = os.path.join(DATA, "kokoro")
+          os.makedirs(folder, exist_ok=True)
+          try:
+              for name, url in KOKORO_FILES.items():
+                  path = os.path.join(folder, name)
+                  if not os.path.exists(path):
+                      log("Downloading the Kokoro voice model (%s, first start only)" % name)
+                      urllib.request.urlretrieve(url, path + ".part")
+                      os.replace(path + ".part", path)
+              from kokoro_onnx import Kokoro
+              kokoro = Kokoro(os.path.join(folder, "kokoro-v1.0.onnx"), os.path.join(folder, "voices-v1.0.bin"))
+              if TTS_VOICE not in kokoro.get_voices():
+                  log("Kokoro has no voice %s; using bm_george" % TTS_VOICE)
+              return kokoro
+          except Exception as error:
+              log("Kokoro unavailable, using Piper instead: %s" % error)
+              return None
+
+
       def load_models():
           from openwakeword.utils import download_models
           download_models(["hey_jarvis"])
@@ -154,6 +190,8 @@ configs:
 
       WHISPER, VOICE_MODEL = load_models()
       whisper_lock = threading.Lock()
+      KOKORO = load_kokoro()
+      kokoro_lock = threading.Lock()
 
 
       def new_wake_model():
@@ -196,12 +234,38 @@ configs:
       BEEP_NOTHING = tone_wav([660, 440])
 
 
+      def add_effect(wav):
+          """A subtle "AI assistant" sheen: trims rumble, adds a faint short room reflection, evens out the level."""
+          if VOICE_EFFECT in ("none", "off", ""):
+              return wav
+          result = subprocess.run(
+              ["ffmpeg", "-v", "error", "-i", "pipe:0", "-af",
+               "highpass=f=70,aecho=0.8:0.6:18|36:0.10|0.05,acompressor=threshold=-20dB:ratio=2.5:attack=5:release=80,"
+               "loudnorm=I=-16:TP=-1.5", "-ar", "24000", "-ac", "1", "-f", "s16le", "pipe:1"],
+              input=wav, capture_output=True, timeout=60)
+          # Raw samples, wrapped here: a WAV that ffmpeg writes to a pipe has no length in its header.
+          return pcm_to_wav(result.stdout, 24000) if result.returncode == 0 and result.stdout else wav
+
+
       def speak(text):
-          """Piper text-to-speech, WAV bytes."""
+          """Text to speech as WAV bytes: Kokoro (natural British voice), or Piper if Kokoro isn't available."""
           clean = re.sub(r"[*_`#>]", "", text)
           clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean).strip()
           if not clean:
               return None
+          if KOKORO is not None:
+              try:
+                  voice = TTS_VOICE if TTS_VOICE in KOKORO.get_voices() else "bm_george"
+                  with kokoro_lock:
+                      samples, rate = KOKORO.create(clean, voice=voice, speed=TTS_SPEED, lang="en-gb")
+                  pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+                  return add_effect(pcm_to_wav(pcm, rate))
+              except Exception as error:
+                  log("Kokoro failed, using Piper: %s" % error)
+          return speak_piper(clean)
+
+
+      def speak_piper(clean):
           with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
               path = handle.name
           try:
@@ -227,9 +291,9 @@ configs:
           try:
               with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), timeout=30) as response:
                   data = response.read()
-              result = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "22050", "-f", "wav", "pipe:1"],
+              result = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "22050", "-f", "s16le", "pipe:1"],
                                       input=data, capture_output=True, timeout=60)
-              return result.stdout if result.returncode == 0 and result.stdout else None
+              return pcm_to_wav(result.stdout, 22050) if result.returncode == 0 and result.stdout else None
           except Exception as error:
               log("Couldn't fetch the core's voice: %s" % error)
               return None
@@ -566,11 +630,37 @@ configs:
           def log_message(self, fmt, *args):
               pass
 
+          def do_POST(self):
+              parsed = urllib.parse.urlparse(self.path)
+              if parsed.path != "/tts":
+                  return self.reply(404, b"Not found", "text/plain")
+              length = min(int(self.headers.get("Content-Length") or 0), 20000)
+              try:
+                  body = json.loads(self.rfile.read(length) or b"{}")
+              except ValueError:
+                  body = {}
+              token = (urllib.parse.parse_qs(parsed.query).get("token") or [""])[0] or str(body.get("token") or "")
+              self.tts(token, str(body.get("text") or ""))
+
+          def tts(self, token, text):
+              """The Jarvis voice for the iPhone app."""
+              if not secrets.compare_digest(token, TOKEN):
+                  return self.reply(403, b"Wrong key", "text/plain")
+              text = text.strip()[:2000]
+              if not text:
+                  return self.reply(400, b"No text", "text/plain")
+              wav = speak(text)
+              if not wav:
+                  return self.reply(500, b"Couldn't make speech", "text/plain")
+              self.reply(200, wav, "audio/wav")
+
           def do_GET(self):
               parsed = urllib.parse.urlparse(self.path)
               token = (urllib.parse.parse_qs(parsed.query).get("token") or [""])[0]
               if parsed.path == "/health":
                   return self.reply(200, b"ok", "text/plain")
+              if parsed.path == "/tts":
+                  return self.tts(token, (urllib.parse.parse_qs(parsed.query).get("text") or [""])[0])
               if parsed.path not in ("/pi/setup.sh", "/pi/client.py"):
                   return self.reply(404, b"Not found", "text/plain")
               if not secrets.compare_digest(token, TOKEN):
@@ -595,6 +685,8 @@ configs:
           log("Jarvis voice hub ready. Jarvis core: %s%s" % (JARVIS_URL, JARVIS_PATH))
           log("To set up the Raspberry Pi, run this on the Pi (use your NAS's IP address):")
           log("  curl -sSL 'http://<NAS-IP>:%d/pi/setup.sh?token=%s' | sudo bash" % (HTTP_PORT, TOKEN))
+          log("For the same voice in the Jarvis iPhone app (Settings > Voice): address http://<NAS-IP>:%d, key %s"
+              % (HTTP_PORT, TOKEN))
           AudioServer(("0.0.0.0", AUDIO_PORT), AudioHandler).serve_forever()
 
 

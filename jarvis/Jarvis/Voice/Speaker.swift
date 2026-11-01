@@ -1,7 +1,7 @@
 import AVFoundation
 
-/// Reads Jarvis's replies out loud: in Jarvis's own voice when the core sends a recording,
-/// otherwise with the iPhone's British English voice.
+/// Reads Jarvis's replies out loud. In order of preference: the core's own recording, the natural NAS voice
+/// (Kokoro, from the jarvis-voice app), then the best British voice installed on the iPhone.
 @MainActor
 final class Speaker: ObservableObject {
     private let synthesizer = AVSpeechSynthesizer()
@@ -10,23 +10,37 @@ final class Speaker: ObservableObject {
 
     func speak(_ text: String, audio: URL? = nil, client: JarvisClient? = nil) {
         stop()
-        guard let audio, let client else {
-            speakWithSystemVoice(text)
-            return
-        }
+        let voice = JarvisSettings.shared.voice
+        let plain = Self.plainText(text)
         loading = Task { [weak self] in
-            do {
-                let data = try await client.fetchAudio(audio)
+            if let audio, let client, let data = try? await client.fetchAudio(audio) {
                 guard !Task.isCancelled, let self else { return }
-                self.activatePlayback()
-                let player = try AVAudioPlayer(data: data)
-                self.player = player
-                player.play()
-            } catch {
-                guard !Task.isCancelled, let self else { return }
-                self.speakWithSystemVoice(text)
+                if self.play(data) { return }
             }
+            if voice.mode != .iphone, voice.hubConfigured, !plain.isEmpty, let data = await Self.hubSpeech(plain, voice) {
+                guard !Task.isCancelled, let self else { return }
+                if self.play(data) { return }
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.speakWithSystemVoice(text, voice: voice)
         }
+    }
+
+    private func play(_ data: Data) -> Bool {
+        activatePlayback()
+        guard let player = try? AVAudioPlayer(data: data) else { return false }
+        self.player = player
+        return player.play()
+    }
+
+    /// The natural voice from the jarvis-voice app on TrueNAS.
+    private static func hubSpeech(_ text: String, _ voice: VoiceSettings) async -> Data? {
+        guard let url = voice.hubSpeechURL(for: String(text.prefix(2000))) else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.setValue("audio/wav", forHTTPHeaderField: "Accept")
+        guard let result = try? await httpSession.data(for: request),
+              (result.1 as? HTTPURLResponse)?.statusCode == 200, result.0.count > 44 else { return nil }
+        return result.0
     }
 
     func stop() {
@@ -39,13 +53,15 @@ final class Speaker: ObservableObject {
         }
     }
 
-    private func speakWithSystemVoice(_ text: String) {
+    private func speakWithSystemVoice(_ text: String, voice: VoiceSettings) {
         let plain = Self.plainText(text)
         guard !plain.isEmpty else { return }
         activatePlayback()
         let utterance = AVSpeechUtterance(string: plain)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-GB")
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.05
+        utterance.voice = voice.iphoneVoice()
+        // A touch slower and lower than the default: calmer, more butler than satnav.
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.95
+        utterance.pitchMultiplier = 0.92
         synthesizer.speak(utterance)
     }
 

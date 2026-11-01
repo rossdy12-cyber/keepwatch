@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var settings: JarvisSettings
     @EnvironmentObject private var chat: ChatStore
+    @EnvironmentObject private var speaker: Speaker
 
     @State private var testing = false
     @State private var testResult: (ok: Bool, message: String)?
@@ -111,6 +112,38 @@ struct SettingsView: View {
                     Text("Music (Navidrome)")
                 } footer: {
                     Text("Say or type things like \u{201c}play Coldplay\u{201d}, \u{201c}play the album Rumours\u{201d}, \u{201c}play Yellow by Coldplay\u{201d}, \u{201c}play some jazz\u{201d}, \u{201c}play my gym playlist\u{201d}, \u{201c}shuffle my music\u{201d}, \u{201c}skip\u{201d}, \u{201c}pause\u{201d} or \u{201c}what's playing\u{201d}. Music keeps playing with the screen locked. The password is kept in the iPhone Keychain.")
+                }
+
+                Section {
+                    Picker("Voice", selection: $settings.voice.mode) {
+                        ForEach(VoiceSettings.Mode.allCases) { Text($0.label).tag($0) }
+                    }
+                    if settings.voice.mode != .iphone {
+                        TextField("http://100.85.127.42:10701", text: $settings.voice.hubAddress)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        SecureField("Voice hub key", text: $settings.voice.hubKey)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    if settings.voice.mode != .hub {
+                        Picker("iPhone voice", selection: $settings.voice.iphoneVoiceID) {
+                            Text("Best British voice").tag(String?.none)
+                            ForEach(VoiceSettings.englishVoices(), id: \.identifier) { voice in
+                                Text(VoiceSettings.label(voice)).tag(String?.some(voice.identifier))
+                            }
+                        }
+                    }
+                    Button {
+                        speaker.speak("Good evening, sir. All systems are online, and the storage pool is in excellent health.")
+                    } label: {
+                        Label("Preview voice", systemImage: "speaker.wave.2")
+                    }
+                } header: {
+                    Text("Voice")
+                } footer: {
+                    Text("The NAS voice is the natural British voice from the jarvis-voice app on TrueNAS: its logs show the address and key. Automatic uses it when it can reach the NAS, and the iPhone voice otherwise. For a better iPhone voice, download one: iPhone Settings \u{2192} Accessibility \u{2192} Spoken Content \u{2192} Voices \u{2192} English \u{2192} English (UK) \u{2192} Arthur (Premium) or Daniel (Enhanced).")
                 }
 
                 Section {

@@ -99,6 +99,11 @@ final class JarvisSettings: ObservableObject {
         didSet { Keychain.save(secrets, for: Self.secretsKey) }
     }
 
+    /// Which voice Jarvis speaks with (and the voice hub's key), kept in the Keychain.
+    @Published var voice: VoiceSettings {
+        didSet { Keychain.save(voice, for: "voice") }
+    }
+
     /// Navidrome sign-in for playing music, kept in the Keychain.
     @Published var navidrome: NavidromeAccount {
         didSet { Keychain.save(navidrome, for: "navidrome") }
@@ -121,6 +126,7 @@ final class JarvisSettings: ObservableObject {
         detection = defaults.data(forKey: Self.detectionKey).flatMap { try? JSONDecoder().decode(Detection.self, from: $0) }
         secrets = Keychain.load(JarvisSecrets.self, for: Self.secretsKey) ?? JarvisSecrets()
         navidrome = Keychain.load(NavidromeAccount.self, for: "navidrome") ?? NavidromeAccount()
+        voice = Keychain.load(VoiceSettings.self, for: "voice") ?? VoiceSettings()
         TrustDelegate.shared.setTrusted(host: host(of: config.address), trusted: config.trustSelfSigned)
     }
 

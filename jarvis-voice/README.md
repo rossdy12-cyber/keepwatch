@@ -6,7 +6,9 @@ its microphone to your NAS and plays what comes back. The NAS does everything el
 - **Wake word:** openWakeWord, with its "Hey Jarvis" model.
 - **Speech to text:** Whisper.
 - **Answers:** your Jarvis core.
-- **The voice:** the core's own recording when it sends one, otherwise Piper's British "Alan" voice.
+- **The voice:** the core's own recording when it sends one. Otherwise Kokoro, a natural British male voice
+  ("George" by default), with Piper as a backup. The hub also gives the Jarvis iPhone app the same voice: in the
+  app, go to Settings → Voice and enter the address and key from the hub's logs.
 
 Say **"Hey Jarvis"** and wait for the beep. Ask your question, and Jarvis answers through the speaker. A low double
 beep means it didn't catch anything. There's no time limit on answers, unlike Alexa.
@@ -57,7 +59,10 @@ The Pi starts listening by itself every time it's powered on.
 | `WAKE_THRESHOLD` | Lower (e.g. `0.35`) if it doesn't hear "Hey Jarvis" from across the room; higher (`0.7`) if it wakes by itself. |
 | `FOLLOW_UP_SECONDS` | e.g. `5`: after an answer, keep listening for 5 s so you can ask a follow-up without "Hey Jarvis". |
 | `WHISPER_MODEL` | `small.en` understands more (accents, background noise) but is slower. |
-| `USE_CORE_VOICE` | `false` to always use the Piper voice. |
+| `TTS_VOICE` | Kokoro British male voice: `bm_george` (deep, butler-like), `bm_fable`, `bm_lewis` or `bm_daniel`. |
+| `TTS_SPEED` | `0.95` is slightly unhurried; `1.0` is normal. |
+| `VOICE_EFFECT` | `light` adds a subtle AI-assistant sheen; `none` for the plain voice. |
+| `USE_CORE_VOICE` | `false` to always use the hub's voice, even when the core sends its own recording. |
 | `GREETING` | What it says when the Pi connects. Empty for silence. |
 
 ## Troubleshooting

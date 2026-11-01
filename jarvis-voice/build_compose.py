@@ -32,8 +32,12 @@ services:
       SESSION_ID: bedroom-pi
       # "base.en" is quick; "small.en" understands more but is slower.
       WHISPER_MODEL: base.en
-      # British male voice for replies when the core doesn't send its own recording.
-      VOICE: en_GB-alan-medium
+      # Jarvis's voice when the core doesn't send its own recording: a natural British male voice (Kokoro).
+      # Try bm_george (deep, butler-like), bm_fable, bm_lewis or bm_daniel.
+      TTS_VOICE: bm_george
+      TTS_SPEED: "0.95"
+      # "light" adds a subtle AI-assistant sheen; "none" for the plain voice.
+      VOICE_EFFECT: light
       USE_CORE_VOICE: "true"
       # Lower = wakes more easily (and more false wakes). 0.5 is a good start.
       WAKE_THRESHOLD: "0.5"
@@ -46,9 +50,9 @@ services:
       - -c
       - >-
         (command -v ffmpeg >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null))
-        && ([ -f /data/venv/.ready-1 ] || (python -m venv /data/venv
-        && /data/venv/bin/pip install -q --no-cache-dir "openwakeword==0.6.0" "faster-whisper==1.1.1" "piper-tts==1.2.0" "onnxruntime>=1.17,<2" numpy
-        && touch /data/venv/.ready-1))
+        && ([ -f /data/venv/.ready-2 ] || (python -m venv /data/venv
+        && /data/venv/bin/pip install -q --no-cache-dir "openwakeword==0.6.0" "faster-whisper==1.1.1" "piper-tts==1.2.0" "onnxruntime>=1.17,<2" "kokoro-onnx==0.4.9" numpy
+        && touch /data/venv/.ready-2))
         && exec /data/venv/bin/python -u /app/hub.py
     environment_file_note: ""
 
