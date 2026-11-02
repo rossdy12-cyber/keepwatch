@@ -154,7 +154,10 @@ final class HomelabBridgeStore: ObservableObject {
     }
 
     private func session() -> URLSession {
-        httpSession(acceptSelfSigned: JarvisSettings.shared.config.trustSelfSigned)
+        if let host = URL(string: baseURL)?.host {
+            TrustDelegate.shared.setTrusted(host: host, trusted: JarvisSettings.shared.config.trustSelfSigned)
+        }
+        return httpSession
     }
 
     private func applyHeaders(_ req: inout URLRequest) {
