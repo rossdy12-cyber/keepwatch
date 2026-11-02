@@ -56,4 +56,6 @@ targets:
         NSLocalNetworkUsageDescription: Jarvis AR connects to your Jarvis core and homelab on your local network or Tailscale.
         NSMicrophoneUsageDescription: Jarvis AR listens while you use Push-to-Talk or Hands-Free mode so you can speak to Jarvis through your XREAL glasses.
         NSSpeechRecognitionUsageDescription: Jarvis AR turns your speech into live HUD subtitles and sends commands to your Jarvis core.
-        NSMotionUsageDescription: Jarvis AR reads device pitch, roll, and compass heading for the tactical HUD horizon ribbon.
+        NSMotionUsageDescription: Jarvis AR reads head motion from AirPods/Beats or the device gyroscope to pan, tilt, and shift the 3D spatial HUD as you move your head.
+        NSCameraUsageDescription: Jarvis AR uses the front TrueDepth camera to track your 3D head yaw, pitch, and roll so the XREAL HUD reacts as you turn your head.
+
