@@ -11,8 +11,8 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     SWIFT_STRICT_CONCURRENCY: minimal
-    MARKETING_VERSION: "2.0.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "2.1.0"
+    CURRENT_PROJECT_VERSION: "3"
 
 targets:
   Keepwatch:
@@ -61,3 +61,4 @@ targets:
         NSLocalNetworkUsageDescription: Keepwatch connects to your TrueNAS server, Jarvis, Paydays and media apps.
         NSMicrophoneUsageDescription: Keepwatch listens while you tap the microphone button so you can talk to Jarvis.
         NSSpeechRecognitionUsageDescription: Keepwatch turns what you say into text to send to your Jarvis core.
+        NSCameraUsageDescription: Keepwatch uses the camera to scan Racebolt barcodes and 2FA QR codes.

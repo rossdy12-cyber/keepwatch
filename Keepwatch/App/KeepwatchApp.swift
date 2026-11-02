@@ -13,6 +13,7 @@ struct KeepwatchApp: App {
     @StateObject private var portal = PortalStore()
     @StateObject private var paydays = PaydaysStore.shared
     @StateObject private var hub = HubStore.shared
+    @StateObject private var bridge = HomelabBridgeStore.shared
 
     init() {
         Theme.applyUIKitAppearance()
@@ -31,6 +32,7 @@ struct KeepwatchApp: App {
                 .environmentObject(portal)
                 .environmentObject(paydays)
                 .environmentObject(hub)
+                .environmentObject(bridge)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
                 .task {

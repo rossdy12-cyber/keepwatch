@@ -2,7 +2,7 @@ import AVFoundation
 import MediaPlayer
 import UIKit
 
-/// Plays Navidrome music in the background, with lock-screen and Control Center controls.
+/// Plays Navidrome music in the background, with lock-screen controls and offline song caching.
 @MainActor
 final class MusicPlayer: ObservableObject {
     static let shared = MusicPlayer()
@@ -11,6 +11,8 @@ final class MusicPlayer: ObservableObject {
     @Published private(set) var index = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var artwork: UIImage?
+    @Published private(set) var cachedSongs: [SubsonicSong] = []
+    @Published private(set) var cachingInProgress = false
 
     var client: NavidromeClient?
 
@@ -22,7 +24,19 @@ final class MusicPlayer: ObservableObject {
     var current: SubsonicSong? { queue.indices.contains(index) ? queue[index] : nil }
     var hasQueue: Bool { current != nil }
 
+    private var offlineDirectory: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let dir = docs.appendingPathComponent("OfflineMusic", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private var offlineIndexURL: URL {
+        offlineDirectory.appendingPathComponent("index.json")
+    }
+
     private init() {
+        loadCachedIndex()
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main) { note in
             let finished = (note.object as? AVPlayerItem).map { ObjectIdentifier($0) }
             Task { @MainActor in MusicPlayer.shared.itemFinished(finished) }
@@ -32,6 +46,65 @@ final class MusicPlayer: ObservableObject {
             Task { @MainActor in MusicPlayer.shared.playingChanged(playing) }
         }
         setUpRemoteCommands()
+    }
+
+    // MARK: - Offline Music Cache (#9)
+
+    func localFileURL(for song: SubsonicSong) -> URL? {
+        let safeID = song.id.replacingOccurrences(of: "/", with: "_")
+        let ext = song.suffix ?? "mp3"
+        let file = offlineDirectory.appendingPathComponent("\(safeID).\(ext)")
+        return FileManager.default.fileExists(atPath: file.path) ? file : nil
+    }
+
+    func isCached(_ song: SubsonicSong) -> Bool {
+        localFileURL(for: song) != nil
+    }
+
+    private func loadCachedIndex() {
+        guard let data = try? Data(contentsOf: offlineIndexURL),
+              let decoded = try? JSONDecoder().decode([SubsonicSong].self, from: data) else { return }
+        cachedSongs = decoded.filter { isCached($0) }
+    }
+
+    private func saveCachedIndex() {
+        if let data = try? JSONEncoder().encode(cachedSongs) {
+            try? data.write(to: offlineIndexURL)
+        }
+    }
+
+    func cacheCurrentQueue() async {
+        guard let client, !queue.isEmpty, !cachingInProgress else { return }
+        cachingInProgress = true
+        defer { cachingInProgress = false }
+
+        for song in queue.prefix(25) {
+            if isCached(song) { continue }
+            guard let url = client.streamURL(for: song) else { continue }
+            do {
+                let (data, _) = try await httpSession.data(from: url)
+                let safeID = song.id.replacingOccurrences(of: "/", with: "_")
+                let ext = song.suffix ?? "mp3"
+                let dest = offlineDirectory.appendingPathComponent("\(safeID).\(ext)")
+                try data.write(to: dest)
+                if !cachedSongs.contains(where: { $0.id == song.id }) {
+                    cachedSongs.append(song)
+                    saveCachedIndex()
+                }
+            } catch {
+                continue
+            }
+        }
+    }
+
+    func playCachedOffline() {
+        guard !cachedSongs.isEmpty else { return }
+        play(cachedSongs.shuffled(), startAt: 0)
+    }
+
+    func clearOfflineCache() {
+        try? FileManager.default.removeItem(at: offlineDirectory)
+        cachedSongs = []
     }
 
     // MARK: Controls
@@ -108,14 +181,15 @@ final class MusicPlayer: ObservableObject {
     }
 
     private func loadCurrent() {
-        guard let song = current, let client, let url = client.streamURL(for: song) else { return }
+        guard let song = current else { return }
+        let playURL = localFileURL(for: song) ?? client?.streamURL(for: song)
+        guard let url = playURL else { return }
         activateSession()
         let item = AVPlayerItem(url: url)
         let songId = song.id
         itemObservation = item.observe(\.status, options: [.new]) { observed, _ in
             guard observed.status == .failed else { return }
             Task { @MainActor in
-                // Skip a song this iPhone can't play rather than stopping the music.
                 if MusicPlayer.shared.current?.id == songId { MusicPlayer.shared.next() }
             }
         }
@@ -123,8 +197,10 @@ final class MusicPlayer: ObservableObject {
         player.play()
         isPlaying = true
         updateNowPlaying()
-        loadArtwork(for: song, client: client)
-        Task { await client.scrobble(songId, submission: false) }
+        if let client {
+            loadArtwork(for: song, client: client)
+            Task { await client.scrobble(songId, submission: false) }
+        }
     }
 
     private func itemFinished(_ itemId: ObjectIdentifier?) {

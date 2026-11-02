@@ -99,6 +99,67 @@ struct CheckPaydaysBalanceIntent: AppIntent {
     }
 }
 
+// MARK: - Drop-to-NAS Share Sheet, House Broadcast, Camera & Handover Intents (#1, #2, #7, #8, #15)
+
+struct DropToNASIntent: AppIntent {
+    static var title: LocalizedStringResource = "Send Link or Search to NAS"
+    static var description = IntentDescription("Send a shared video, audio, gallery, Mega link, or Soulseek music search straight to your TrueNAS downloaders.")
+    static var openAppWhenRun = false
+
+    @Parameter(title: "URL or Search Query", requestValueDialog: IntentDialog("Paste or speak the link or album to send to your NAS"))
+    var urlOrQuery: String
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let msg = await HomelabBridgeStore.shared.dropToNAS(urlOrQuery: urlOrQuery, target: "auto")
+        return .result(dialog: "\(msg)")
+    }
+}
+
+struct BroadcastHouseIntent: AppIntent {
+    static var title: LocalizedStringResource = "Broadcast to House Speaker"
+    static var description = IntentDescription("Speak an announcement over your Raspberry Pi / Kokoro voice hub and Jarvis intercom.")
+    static var openAppWhenRun = false
+
+    @Parameter(title: "Message", requestValueDialog: IntentDialog("What should Jarvis announce to the house?"))
+    var message: String
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await HomelabBridgeStore.shared.broadcastToHouse(message: message)
+        return .result(dialog: "Announced to house: \(message)")
+    }
+}
+
+struct ToggleCameraAlertsIntent: AppIntent {
+    static var title: LocalizedStringResource = "Toggle Camera Home / Away Alerts"
+    static var description = IntentDescription("Mute or unmute Frigate camera ntfy alerts when arriving home or leaving.")
+    static var openAppWhenRun = false
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await HomelabBridgeStore.shared.cameraAction("toggle_alerts")
+        let msg = HomelabBridgeStore.shared.statusBanner ?? "Toggled camera alerts."
+        return .result(dialog: "\(msg)")
+    }
+}
+
+struct HandoverChecklistIntent: AppIntent {
+    static var title: LocalizedStringResource = "Check Handover Schedule"
+    static var description = IntentDescription("Read out pending Lauren & Ross handover items and shared checklist tasks.")
+    static var openAppWhenRun = false
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await HomelabBridgeStore.shared.loadSystemBridge()
+        let pending = HomelabBridgeStore.shared.sharedNotes.filter { !$0.done }.map(\.text)
+        let summary = pending.isEmpty
+            ? "All shared handover checklist tasks are complete!"
+            : "Pending tasks: " + pending.joined(separator: "; ")
+        return .result(dialog: "\(summary)")
+    }
+}
+
 // MARK: - Unified App Shortcuts Provider
 
 struct KeepwatchShortcuts: AppShortcutsProvider {
@@ -132,6 +193,42 @@ struct KeepwatchShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Safe to Spend",
             systemImageName: "shield.checkered"
+        )
+        AppShortcut(
+            intent: DropToNASIntent(),
+            phrases: [
+                "Send to NAS in \(.applicationName)",
+                "Download with \(.applicationName)"
+            ],
+            shortTitle: "Drop to NAS",
+            systemImageName: "tray.and.arrow.down.fill"
+        )
+        AppShortcut(
+            intent: BroadcastHouseIntent(),
+            phrases: [
+                "Announce to house in \(.applicationName)",
+                "Broadcast with \(.applicationName)"
+            ],
+            shortTitle: "House Broadcast",
+            systemImageName: "megaphone.fill"
+        )
+        AppShortcut(
+            intent: ToggleCameraAlertsIntent(),
+            phrases: [
+                "Toggle camera alerts in \(.applicationName)",
+                "Home mode in \(.applicationName)"
+            ],
+            shortTitle: "Camera Alerts",
+            systemImageName: "video.fill"
+        )
+        AppShortcut(
+            intent: HandoverChecklistIntent(),
+            phrases: [
+                "Check handover in \(.applicationName)",
+                "Handover schedule in \(.applicationName)"
+            ],
+            shortTitle: "Handover Status",
+            systemImageName: "checklist.checked"
         )
         AppShortcut(
             intent: ShuffleMusicIntent(),

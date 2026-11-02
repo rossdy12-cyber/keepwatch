@@ -11,6 +11,8 @@ struct ChatView: View {
     @ObservedObject private var music = MusicPlayer.shared
     @State private var musicWasPlaying = false
     @State private var draft = ""
+    @State private var showCarMode = false
+    @State private var showControlSheet = false
     @FocusState private var inputFocused: Bool
 
     private let suggestions = [
@@ -80,7 +82,21 @@ struct ChatView: View {
                     JarvisStatusDot(status: chat.health)
                         .onTapGesture { Task { await chat.checkHealth(settings: settings) } }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button {
+                        showCarMode = true
+                    } label: {
+                        Image(systemName: "car.fill")
+                    }
+                    .accessibilityLabel("Car & Offline Music Mode")
+
+                    Button {
+                        showControlSheet = true
+                    } label: {
+                        Image(systemName: "alarm.waves.left.and.right.fill")
+                    }
+                    .accessibilityLabel("PC, Smart Alarms & House Broadcast")
+
                     Button {
                         speaker.stop()
                         chat.newChat()
@@ -89,6 +105,12 @@ struct ChatView: View {
                     }
                     .disabled(chat.turns.isEmpty)
                 }
+            }
+            .sheet(isPresented: $showCarMode) {
+                CarDrivingModeSheet()
+            }
+            .sheet(isPresented: $showControlSheet) {
+                JarvisControlSheet()
             }
             .task(id: settings.config.address) {
                 await chat.checkHealth(settings: settings)

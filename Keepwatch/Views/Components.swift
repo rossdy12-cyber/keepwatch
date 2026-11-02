@@ -213,3 +213,18 @@ extension View {
         modifier(KeepwatchChrome())
     }
 }
+
+struct SectionTitle: View {
+    var title: String
+    var symbol: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .foregroundStyle(Theme.accent)
+            Text(title)
+                .font(.headline)
+            Spacer()
+        }
+    }
+}

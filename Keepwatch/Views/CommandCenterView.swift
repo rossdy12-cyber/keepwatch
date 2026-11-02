@@ -2,6 +2,11 @@ import SwiftUI
 
 enum CommandSubTab: String, CaseIterable, Identifiable {
     case pulse = "Pulse"
+    case docker = "Docker"
+    case cameras = "Cameras"
+    case drop = "Drop"
+    case discover = "Discover"
+    case apple = "iCloud & Alt"
     case portal = "Portal"
     case media = "Media"
     case downloads = "Queue"
@@ -12,6 +17,11 @@ enum CommandSubTab: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .pulse: return "gauge.medium"
+        case .docker: return "shippingbox.fill"
+        case .cameras: return "video.fill"
+        case .drop: return "tray.and.arrow.down.fill"
+        case .discover: return "sparkles.tv"
+        case .apple: return "key.icloud.fill"
         case .portal: return "square.grid.2x2"
         case .media: return "film.stack"
         case .downloads: return "arrow.down.circle"
@@ -30,6 +40,16 @@ struct CommandCenterView: View {
                 switch router.commandSubTab {
                 case .pulse:
                     OverviewView()
+                case .docker:
+                    DockerDeckView()
+                case .cameras:
+                    CamerasPatrolView()
+                case .drop:
+                    DropToNASView()
+                case .discover:
+                    MediaPipelineView()
+                case .apple:
+                    AppleWatchdogView()
                 case .portal:
                     SitesView()
                 case .media:

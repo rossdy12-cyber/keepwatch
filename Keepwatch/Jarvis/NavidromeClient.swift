@@ -196,7 +196,7 @@ struct SubsonicAlbumDetail: Decodable {
     let song: [SubsonicSong]?
 }
 
-struct SubsonicSong: Decodable, Identifiable, Equatable {
+struct SubsonicSong: Codable, Identifiable, Equatable {
     let id: String
     let title: String?
     let artist: String?

@@ -44,10 +44,48 @@ struct WooStoreConfig: Codable, Equatable {
 struct WooProduct: Codable, Identifiable, Equatable {
     var id: Int
     var name: String
+    var sku: String?
     var status: String // "publish", "private", "draft", "pending"
     var price: String
+    var regular_price: String?
     var stock_status: String // "instock", "outofstock"
+    var stock_quantity: Int?
     var permalink: String?
+}
+
+struct WooOrderBilling: Codable, Equatable {
+    var first_name: String?
+    var last_name: String?
+    var email: String?
+
+    var fullName: String {
+        let joined = [first_name ?? "", last_name ?? ""].joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        return joined.isEmpty ? "Guest Customer" : joined
+    }
+}
+
+struct WooOrderLineItem: Codable, Identifiable, Equatable {
+    var id: Int
+    var name: String
+    var quantity: Int
+    var total: String
+}
+
+struct WooOrder: Codable, Identifiable, Equatable {
+    var id: Int
+    var number: String
+    var status: String
+    var total: String
+    var currency_symbol: String?
+    var date_created: String
+    var billing: WooOrderBilling?
+    var line_items: [WooOrderLineItem]?
+}
+
+struct WooTotalEntry: Codable, Equatable {
+    var slug: String
+    var name: String
+    var total: Int
 }
 
 @MainActor
@@ -81,7 +119,10 @@ final class HubStore: ObservableObject {
     }
 
     @Published private(set) var products: [WooProduct] = []
+    @Published private(set) var orders: [WooOrder] = []
     @Published private(set) var isLoadingProducts = false
+    @Published private(set) var isLoadingOrders = false
+    @Published var mirrorComparison: String?
     @Published var storeError: String?
     @Published var radarrStatus: String?
 
@@ -170,7 +211,6 @@ final class HubStore: ObservableObject {
                 return
             }
 
-            // Fetch root folder and quality profile
             guard let rootURL = makeURL(base: radarrConfig.baseURL, path: "/api/v3/rootfolder"),
                   let profURL = makeURL(base: radarrConfig.baseURL, path: "/api/v3/qualityprofile") else { return }
             var rootReq = URLRequest(url: rootURL)
@@ -207,7 +247,14 @@ final class HubStore: ObservableObject {
         }
     }
 
-    // MARK: - WooCommerce REST API
+    // MARK: - WooCommerce REST API (#4 Racebolt UK Pocket Manager)
+
+    private var authQuery: [URLQueryItem] {
+        [
+            URLQueryItem(name: "consumer_key", value: wooConfig.consumerKey),
+            URLQueryItem(name: "consumer_secret", value: wooConfig.consumerSecret)
+        ]
+    }
 
     func fetchProducts(search: String = "") async {
         guard wooConfig.isConfigured else { return }
@@ -217,10 +264,8 @@ final class HubStore: ObservableObject {
         do {
             var query: [URLQueryItem] = [
                 URLQueryItem(name: "per_page", value: "40"),
-                URLQueryItem(name: "status", value: "any"),
-                URLQueryItem(name: "consumer_key", value: wooConfig.consumerKey),
-                URLQueryItem(name: "consumer_secret", value: wooConfig.consumerSecret)
-            ]
+                URLQueryItem(name: "status", value: "any")
+            ] + authQuery
             let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 query.append(URLQueryItem(name: "search", value: trimmed))
@@ -249,16 +294,26 @@ final class HubStore: ObservableObject {
     }
 
     func updateProductStatus(_ product: WooProduct, newStatus: String) async {
+        await updateProductFields(product, body: ["status": newStatus])
+    }
+
+    func updateProductStockAndPrice(_ product: WooProduct, price: String, stockQuantity: Int?) async {
+        var body: [String: Any] = ["regular_price": price]
+        if let qty = stockQuantity {
+            body["manage_stock"] = true
+            body["stock_quantity"] = qty
+            body["stock_status"] = qty > 0 ? "instock" : "outofstock"
+        }
+        await updateProductFields(product, body: body)
+    }
+
+    private func updateProductFields(_ product: WooProduct, body: [String: Any]) async {
         guard wooConfig.isConfigured else { return }
-        let query = [
-            URLQueryItem(name: "consumer_key", value: wooConfig.consumerKey),
-            URLQueryItem(name: "consumer_secret", value: wooConfig.consumerSecret)
-        ]
-        guard let url = makeURL(base: wooConfig.baseURL, path: "/wp-json/wc/v3/products/\(product.id)", query: query) else { return }
+        guard let url = makeURL(base: wooConfig.baseURL, path: "/wp-json/wc/v3/products/\(product.id)", query: authQuery) else { return }
         var request = URLRequest(url: url, timeoutInterval: 20)
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["status": newStatus])
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         do {
             let (data, response) = try await httpSession.data(for: request)
             if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
@@ -268,6 +323,65 @@ final class HubStore: ObservableObject {
             }
         } catch {
             storeError = describe(error)
+        }
+    }
+
+    func fetchOrders() async {
+        guard wooConfig.isConfigured else { return }
+        isLoadingOrders = true
+        storeError = nil
+        defer { isLoadingOrders = false }
+        do {
+            let query = [URLQueryItem(name: "per_page", value: "25")] + authQuery
+            guard let url = makeURL(base: wooConfig.baseURL, path: "/wp-json/wc/v3/orders", query: query) else { return }
+            var request = URLRequest(url: url, timeoutInterval: 20)
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            let (data, response) = try await httpSession.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return }
+            orders = try JSONDecoder().decode([WooOrder].self, from: data)
+        } catch {
+            if !isCancellation(error) {
+                storeError = describe(error)
+            }
+        }
+    }
+
+    func updateOrderStatus(_ order: WooOrder, newStatus: String) async {
+        guard wooConfig.isConfigured else { return }
+        guard let url = makeURL(base: wooConfig.baseURL, path: "/wp-json/wc/v3/orders/\(order.id)", query: authQuery) else { return }
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["status": newStatus])
+        do {
+            let (data, response) = try await httpSession.data(for: request)
+            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+               let updated = try? JSONDecoder().decode(WooOrder.self, from: data),
+               let idx = orders.firstIndex(where: { $0.id == order.id }) {
+                orders[idx] = updated
+            }
+        } catch {
+            storeError = describe(error)
+        }
+    }
+
+    func compareLiveAndNASMirror() async {
+        guard wooConfig.isConfigured else { return }
+        mirrorComparison = "Checking raceboltuk.com vs raceboltuk.nas-server.co.uk…"
+        async let liveTotals = fetchProductTotals(base: "https://raceboltuk.com")
+        async let nasTotals = fetchProductTotals(base: "https://raceboltuk.nas-server.co.uk")
+        let (live, nas) = await (liveTotals, nasTotals)
+        mirrorComparison = "Live (raceboltuk.com): \(live) published · TrueNAS Mirror: \(nas) published"
+    }
+
+    private func fetchProductTotals(base: String) async -> Int {
+        guard let url = makeURL(base: base, path: "/wp-json/wc/v3/reports/products/totals", query: authQuery) else { return 0 }
+        do {
+            let (data, _) = try await httpSession.data(from: url)
+            let decoded = try JSONDecoder().decode([WooTotalEntry].self, from: data)
+            return decoded.first(where: { $0.slug == "publish" })?.total ?? decoded.reduce(0) { $0 + $1.total }
+        } catch {
+            return 0
         }
     }
 }
