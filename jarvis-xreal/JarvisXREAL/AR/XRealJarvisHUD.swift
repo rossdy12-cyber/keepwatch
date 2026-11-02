@@ -737,14 +737,14 @@ struct XRealCockpitView: View {
                             .fill(Theme.surface)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 18)
-                                    .stroke(listener.isListening ? Theme.danger : xreal.palette.primary.opacity(0.45), lineWidth: 1.5)
+                                    .stroke(listener.isRecording ? Theme.danger : xreal.palette.primary.opacity(0.45), lineWidth: 1.5)
                             )
 
                         VStack(spacing: 6) {
-                            Image(systemName: listener.isListening ? "waveform.circle.fill" : "hand.point.up.braille.fill")
+                            Image(systemName: listener.isRecording ? "waveform.circle.fill" : "hand.point.up.braille.fill")
                                 .font(.system(size: 34))
-                                .foregroundStyle(listener.isListening ? Theme.danger : xreal.palette.primary)
-                            Text(listener.isListening ? "LISTENING… DOUBLE-TAP OR TAP BUTTON TO SEND" : "EYES-FREE AR TRACKPAD")
+                                .foregroundStyle(listener.isRecording ? Theme.danger : xreal.palette.primary)
+                            Text(listener.isRecording ? "LISTENING… DOUBLE-TAP OR TAP BUTTON TO SEND" : "EYES-FREE AR TRACKPAD")
                                 .font(.caption.weight(.bold))
                                 .foregroundStyle(.white)
                             Text("Slide thumb to aim AR laser reticle · Double-tap pad to speak")
@@ -773,14 +773,14 @@ struct XRealCockpitView: View {
                     Button {
                         toggleVoice()
                     } label: {
-                        Label(listener.isListening ? "Send Voice" : "Talk to Jarvis",
-                              systemImage: listener.isListening ? "stop.circle.fill" : "mic.fill")
+                        Label(listener.isRecording ? "Send Voice" : "Talk to Jarvis",
+                              systemImage: listener.isRecording ? "stop.circle.fill" : "mic.fill")
                             .font(.subheadline.weight(.bold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(listener.isListening ? Theme.danger : xreal.palette.primary)
+                    .tint(listener.isRecording ? Theme.danger : xreal.palette.primary)
 
                     Button {
                         xreal.cycleCamera()
@@ -860,19 +860,15 @@ struct XRealCockpitView: View {
     }
 
     private func toggleVoice() {
-        if listener.isListening {
+        if listener.isRecording {
             let spoken = listener.stop().trimmingCharacters(in: .whitespacesAndNewlines)
             xreal.liveTranscript = ""
             guard !spoken.isEmpty else { return }
             sendToJarvis(spoken)
         } else {
             speaker.stop()
-            listener.start { finalSpeech in
-                let trimmed = finalSpeech.trimmingCharacters(in: .whitespacesAndNewlines)
-                xreal.liveTranscript = ""
-                guard !trimmed.isEmpty else { return }
-                sendToJarvis(trimmed)
-            }
+            if music.isPlaying { music.pause() }
+            Task { await listener.start() }
         }
     }
 
