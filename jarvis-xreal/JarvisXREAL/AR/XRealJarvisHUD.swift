@@ -1,8 +1,11 @@
-import ARKit
+import AVFoundation
 import Combine
+import CoreFoundation
 import CoreMotion
+import Darwin
 import SwiftUI
 import UIKit
+import Vision
 
 // MARK: - Live Homelab & Security Telemetry Store for XREAL HUD Wings
 
@@ -138,6 +141,443 @@ final class ARTelemetryStore: ObservableObject {
     }
 }
 
+// MARK: - Native XREAL USB-C HID IMU Driver (VID 0x3318, Interface 3, 1000Hz Gyro/Accel)
+
+private typealias IOHIDReportCallbackFn = @convention(c) (
+    UnsafeMutableRawPointer?,
+    Int32,
+    UnsafeMutableRawPointer?,
+    UInt32,
+    UInt32,
+    UnsafeMutablePointer<UInt8>,
+    CFIndex
+) -> Void
+
+private func xrealHIDReportBridge(
+    context: UnsafeMutableRawPointer?,
+    result: Int32,
+    sender: UnsafeMutableRawPointer?,
+    reportType: UInt32,
+    reportID: UInt32,
+    report: UnsafeMutablePointer<UInt8>,
+    reportLength: CFIndex
+) {
+    guard let context, reportLength > 0 else { return }
+    let driver = Unmanaged<XRealUSBHIDDriver>.fromOpaque(context).takeUnretainedValue()
+    driver.handleRawReport(bytes: report, length: Int(reportLength))
+}
+
+final class XRealUSBHIDDriver {
+    var onAnglesUpdated: ((Double, Double, Double) -> Void)?
+    var onStatusChanged: ((String, Bool) -> Void)?
+
+    private var iokitHandle: UnsafeMutableRawPointer?
+    private var hidManager: UnsafeMutableRawPointer?
+    private var reportBuffers: [UnsafeMutablePointer<UInt8>] = []
+    private var pollTimer: Timer?
+    private(set) var isStreamingIMU = false
+
+    // Integrated 3-DoF attitude from XREAL's internal ICM-20602 / Bosch IMU
+    private var lastTimestampNS: UInt64 = 0
+    private var integratedYaw: Double = 0
+    private var integratedPitch: Double = 0
+    private var integratedRoll: Double = 0
+
+    // Automatic stationary gyro bias learning (eliminates ~0.45°/s yaw drift)
+    private var biasGx: Double = 0
+    private var biasGy: Double = 0
+    private var biasGz: Double = 0
+    private var biasSamples: Int = 0
+    private var packetCounter: Int = 0
+
+    func start() {
+        attemptUSBAttach()
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self, !self.isStreamingIMU else { return }
+            self.attemptUSBAttach()
+        }
+    }
+
+    func resetAttitude() {
+        integratedYaw = 0
+        integratedPitch = 0
+        integratedRoll = 0
+    }
+
+    private func attemptUSBAttach() {
+        if iokitHandle == nil {
+            iokitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY)
+        }
+        guard let handle = iokitHandle else {
+            onStatusChanged?("IOKit unavailable on this iOS build", false)
+            return
+        }
+
+        typealias CreateFn = @convention(c) (UnsafeRawPointer?, UInt32) -> UnsafeMutableRawPointer?
+        typealias SetMatchingFn = @convention(c) (UnsafeMutableRawPointer, CFDictionary?) -> Void
+        typealias ScheduleFn = @convention(c) (UnsafeMutableRawPointer, CFRunLoop, CFString) -> Void
+        typealias OpenFn = @convention(c) (UnsafeMutableRawPointer, UInt32) -> Int32
+        typealias CopyDevicesFn = @convention(c) (UnsafeMutableRawPointer) -> Unmanaged<CFSet>?
+        typealias DevOpenFn = @convention(c) (UnsafeMutableRawPointer, UInt32) -> Int32
+        typealias DevScheduleFn = @convention(c) (UnsafeMutableRawPointer, CFRunLoop, CFString) -> Void
+        typealias DevSetReportFn = @convention(c) (UnsafeMutableRawPointer, UInt32, CFIndex, UnsafePointer<UInt8>, CFIndex) -> Int32
+        typealias DevRegCallbackFn = @convention(c) (UnsafeMutableRawPointer, UnsafeMutablePointer<UInt8>, CFIndex, IOHIDReportCallbackFn, UnsafeMutableRawPointer?) -> Void
+
+        guard let createSym = dlsym(handle, "IOHIDManagerCreate"),
+              let matchSym = dlsym(handle, "IOHIDManagerSetDeviceMatching"),
+              let schedSym = dlsym(handle, "IOHIDManagerScheduleWithRunLoop"),
+              let openSym = dlsym(handle, "IOHIDManagerOpen"),
+              let copySym = dlsym(handle, "IOHIDManagerCopyDevices"),
+              let devOpenSym = dlsym(handle, "IOHIDDeviceOpen"),
+              let devSchedSym = dlsym(handle, "IOHIDDeviceScheduleWithRunLoop"),
+              let devSetReportSym = dlsym(handle, "IOHIDDeviceSetReport"),
+              let devRegSym = dlsym(handle, "IOHIDDeviceRegisterInputReportCallback") else {
+            onStatusChanged?("IOHIDManager symbols restricted by iOS", false)
+            return
+        }
+
+        let create = unsafeBitCast(createSym, to: CreateFn.self)
+        let setMatching = unsafeBitCast(matchSym, to: SetMatchingFn.self)
+        let schedule = unsafeBitCast(schedSym, to: ScheduleFn.self)
+        let openMgr = unsafeBitCast(openSym, to: OpenFn.self)
+        let copyDevices = unsafeBitCast(copySym, to: CopyDevicesFn.self)
+        let devOpen = unsafeBitCast(devOpenSym, to: DevOpenFn.self)
+        let devSchedule = unsafeBitCast(devSchedSym, to: DevScheduleFn.self)
+        let devSetReport = unsafeBitCast(devSetReportSym, to: DevSetReportFn.self)
+        let devRegCallback = unsafeBitCast(devRegSym, to: DevRegCallbackFn.self)
+
+        if hidManager == nil {
+            guard let mgr = create(nil, 0) else { return }
+            let matching: [String: Any] = ["VendorID": 0x3318] // XREAL / Nreal USB Vendor ID
+            setMatching(mgr, matching as CFDictionary)
+            schedule(mgr, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            _ = openMgr(mgr, 0)
+            hidManager = mgr
+        }
+
+        guard let mgr = hidManager,
+              let unmanagedSet = copyDevices(mgr) else {
+            onStatusChanged?("iOS USB Sandbox hiding VID 0x3318 (using Vision Head/AirPods)", false)
+            return
+        }
+
+        let deviceSet = unmanagedSet.takeRetainedValue()
+        let count = CFSetGetCount(deviceSet)
+        guard count > 0 else {
+            onStatusChanged?("iOS USB Sandbox blocked direct HID 0x3318 (using Vision Head/AirPods)", false)
+            return
+        }
+
+        var rawPtrs = [UnsafeRawPointer?](repeating: nil, count: count)
+        CFSetGetValues(deviceSet, &rawPtrs)
+
+        let startIMUPacket = Self.buildXRealIMUStartPacket()
+        let mcuEnablePacket = Self.buildXRealMCUEnablePacket()
+        let selfOpaque = Unmanaged.passUnretained(self).toOpaque()
+
+        for ptr in rawPtrs {
+            guard let raw = ptr else { continue }
+            let dev = UnsafeMutableRawPointer(mutating: raw)
+            _ = devOpen(dev, 0)
+            devSchedule(dev, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+
+            let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 512)
+            buf.initialize(repeating: 0, count: 512)
+            reportBuffers.append(buf)
+
+            devRegCallback(dev, buf, 512, xrealHIDReportBridge, selfOpaque)
+
+            // Send XREAL IMU start command (0xAA ... msgid 0x19, payload 0x01) as Output (1) and Feature (2) report
+            startIMUPacket.withUnsafeBufferPointer { p in
+                guard let base = p.baseAddress else { return }
+                _ = devSetReport(dev, 1, 0, base, p.count)
+                _ = devSetReport(dev, 2, 0, base, p.count)
+            }
+            mcuEnablePacket.withUnsafeBufferPointer { p in
+                guard let base = p.baseAddress else { return }
+                _ = devSetReport(dev, 1, 0, base, p.count)
+            }
+        }
+
+        onStatusChanged?("XREAL USB HID (0x3318) opened (\(count) interfaces)", false)
+    }
+
+    fileprivate func handleRawReport(bytes: UnsafeMutablePointer<UInt8>, length: Int) {
+        // 1. Standard XREAL Air / Air 2 / Air 2 Pro 64-byte IMU packet: signature [0x01, 0x02]
+        if length >= 42 && bytes[0] == 0x01 && bytes[1] == 0x02 {
+            let ts = Self.readU64LE(bytes, 4)
+            let angMult = Double(Self.readU16LE(bytes, 12))
+            let angDiv = Double(Self.readU32LE(bytes, 14))
+            let gxRaw = Double(Self.readI24LE(bytes, 18))
+            let gyRaw = Double(Self.readI24LE(bytes, 21))
+            let gzRaw = Double(Self.readI24LE(bytes, 24))
+
+            let accMult = Double(Self.readU16LE(bytes, 27))
+            let accDiv = Double(Self.readU32LE(bytes, 29))
+            let axRaw = Double(Self.readI24LE(bytes, 33))
+            let ayRaw = Double(Self.readI24LE(bytes, 36))
+            let azRaw = Double(Self.readI24LE(bytes, 39))
+
+            guard angDiv > 0, accDiv > 0 else { return }
+            let hwGx = gxRaw * angMult / angDiv // deg/s
+            let hwGy = gyRaw * angMult / angDiv // deg/s
+            let hwGz = gzRaw * angMult / angDiv // deg/s
+
+            let hwAx = axRaw * accMult / accDiv // g
+            let hwAy = ayRaw * accMult / accDiv // g
+            let hwAz = azRaw * accMult / accDiv // g
+
+            integrateXRealIMU(timestampNS: ts, hwGx: hwGx, hwGy: hwGy, hwGz: hwGz, hwAx: hwAx, hwAy: hwAy, hwAz: hwAz)
+            return
+        }
+
+        // 2. XREAL Ultra / Light 0x11 float32 IMU packet
+        if length >= 33 && bytes[0] == 0x11 {
+            let ts = Self.readU64LE(bytes, 1)
+            let gxRad = Double(Self.readF32LE(bytes, 9))
+            let gyRad = Double(Self.readF32LE(bytes, 13))
+            let gzRad = Double(Self.readF32LE(bytes, 17))
+            let axM = Double(Self.readF32LE(bytes, 21)) / 9.81
+            let ayM = Double(Self.readF32LE(bytes, 25)) / 9.81
+            let azM = Double(Self.readF32LE(bytes, 29)) / 9.81
+
+            integrateXRealIMU(
+                timestampNS: ts,
+                hwGx: gxRad * 180.0 / .pi,
+                hwGy: gyRad * 180.0 / .pi,
+                hwGz: gzRad * 180.0 / .pi,
+                hwAx: axM,
+                hwAy: ayM,
+                hwAz: azM
+            )
+        }
+    }
+
+    private func integrateXRealIMU(
+        timestampNS: UInt64,
+        hwGx: Double,
+        hwGy: Double,
+        hwGz: Double,
+        hwAx: Double,
+        hwAy: Double,
+        hwAz: Double
+    ) {
+        let dt: Double
+        if lastTimestampNS > 0 && timestampNS > lastTimestampNS {
+            let rawDt = Double(timestampNS - lastTimestampNS) * 1e-9
+            dt = (rawDt > 0 && rawDt < 0.1) ? rawDt : 0.001
+        } else {
+            dt = 0.001
+        }
+        lastTimestampNS = timestampNS
+
+        // Learn stationary gyro bias when glasses are still (< 1.2 deg/s total angular velocity)
+        let magGyro = sqrt(hwGx * hwGx + hwGy * hwGy + hwGz * hwGz)
+        if magGyro < 1.2 && biasSamples < 600 {
+            let n = Double(biasSamples)
+            biasGx = (biasGx * n + hwGx) / (n + 1.0)
+            biasGy = (biasGy * n + hwGy) / (n + 1.0)
+            biasGz = (biasGz * n + hwGz) / (n + 1.0)
+            biasSamples += 1
+        }
+
+        let gx = hwGx - biasGx
+        let gy = hwGy - biasGy
+        let gz = hwGz - biasGz
+
+        // Measured XREAL Air / Air 2 canonical frame:
+        // Level worn: gravity = +hwZ; chin down: gravity moves onto +hwY -> canonical = (-hwX, hwZ, hwY)
+        let pitchRate = -gx
+        let yawRate = -gz
+        let rollRate = gy
+
+        integratedYaw += yawRate * dt
+        integratedPitch += pitchRate * dt
+        integratedRoll += rollRate * dt
+
+        // Complementary gravity fusion for pitch & roll stability
+        let accMag = sqrt(hwAx * hwAx + hwAy * hwAy + hwAz * hwAz)
+        if accMag > 0.7 && accMag < 1.35 {
+            let accelPitch = atan2(-hwAy, hwAz) * 180.0 / .pi
+            let accelRoll = atan2(-hwAx, sqrt(hwAy * hwAy + hwAz * hwAz)) * 180.0 / .pi
+            integratedPitch = 0.985 * integratedPitch + 0.015 * accelPitch
+            integratedRoll = 0.985 * integratedRoll + 0.015 * accelRoll
+        }
+
+        packetCounter += 1
+        // Throttle UI updates from ~1000Hz IMU down to ~60Hz for SwiftUI
+        if packetCounter % 15 == 0 {
+            let y = integratedYaw
+            let p = integratedPitch
+            let r = integratedRoll
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if !self.isStreamingIMU {
+                    self.isStreamingIMU = true
+                    self.onStatusChanged?("XREAL Glasses Internal USB IMU (1000Hz)", true)
+                }
+                self.onAnglesUpdated?(y, p, r)
+            }
+        }
+    }
+
+    // MARK: - XREAL Packet Framing & Little-Endian Helpers
+
+    /// Builds the 64-byte XREAL IMU start packet (`0xAA`, CRC32 over `[0x04, 0x00, 0x19, 0x01]`, length `4`, msgid `0x19`, data `0x01`).
+    private static func buildXRealIMUStartPacket() -> [UInt8] {
+        var packet = [UInt8](repeating: 0, count: 64)
+        let payload: [UInt8] = [0x04, 0x00, 0x19, 0x01]
+        let crc = crc32IEEE(payload)
+        packet[0] = 0xAA
+        packet[1] = UInt8(crc & 0xFF)
+        packet[2] = UInt8((crc >> 8) & 0xFF)
+        packet[3] = UInt8((crc >> 16) & 0xFF)
+        packet[4] = UInt8((crc >> 24) & 0xFF)
+        packet[5] = 0x04
+        packet[6] = 0x00
+        packet[7] = 0x19
+        packet[8] = 0x01
+        return packet
+    }
+
+    private static func buildXRealMCUEnablePacket() -> [UInt8] {
+        var packet = [UInt8](repeating: 0, count: 64)
+        var body = [UInt8](repeating: 0, count: 18)
+        body[0] = 18 // length u16 LE
+        body[1] = 0
+        body[10] = 0x19 // msgid u16 LE
+        body[11] = 0x00
+        body[17] = 0x01
+        let crc = crc32IEEE(body)
+        packet[0] = 0xFD
+        packet[1] = UInt8(crc & 0xFF)
+        packet[2] = UInt8((crc >> 8) & 0xFF)
+        packet[3] = UInt8((crc >> 16) & 0xFF)
+        packet[4] = UInt8((crc >> 24) & 0xFF)
+        for i in 0..<body.count {
+            packet[5 + i] = body[i]
+        }
+        return packet
+    }
+
+    private static func crc32IEEE(_ bytes: [UInt8]) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in bytes {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                if (crc & 1) != 0 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >>= 1
+                }
+            }
+        }
+        return ~crc
+    }
+
+    private static func readU16LE(_ p: UnsafePointer<UInt8>, _ offset: Int) -> UInt16 {
+        UInt16(p[offset]) | (UInt16(p[offset + 1]) << 8)
+    }
+
+    private static func readU32LE(_ p: UnsafePointer<UInt8>, _ offset: Int) -> UInt32 {
+        UInt32(p[offset])
+            | (UInt32(p[offset + 1]) << 8)
+            | (UInt32(p[offset + 2]) << 16)
+            | (UInt32(p[offset + 3]) << 24)
+    }
+
+    private static func readU64LE(_ p: UnsafePointer<UInt8>, _ offset: Int) -> UInt64 {
+        let lo = UInt64(readU32LE(p, offset))
+        let hi = UInt64(readU32LE(p, offset + 4))
+        return lo | (hi << 32)
+    }
+
+    private static func readI24LE(_ p: UnsafePointer<UInt8>, _ offset: Int) -> Int32 {
+        let b0 = Int32(p[offset])
+        let b1 = Int32(p[offset + 1]) << 8
+        let b2 = Int32(Int8(bitPattern: p[offset + 2])) << 16
+        return b0 | b1 | b2
+    }
+
+    private static func readF32LE(_ p: UnsafePointer<UInt8>, _ offset: Int) -> Float {
+        let bits = readU32LE(p, offset)
+        return Float(bitPattern: bits)
+    }
+}
+
+// MARK: - Sunglasses-Compatible Vision Front-Camera Head Pose Tracker
+
+final class VisionHeadPoseTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    var onHeadPose: ((Double, Double, Double) -> Void)?
+    private let captureSession = AVCaptureSession()
+    private let queue = DispatchQueue(label: "app.jarvis.xreal.visionhead", qos: .userInteractive)
+    private var isRunning = false
+
+    func start() {
+        guard !isRunning else { return }
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            guard granted, let self else { return }
+            self.queue.async {
+                self.configureSession()
+            }
+        }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        queue.async { [weak self] in
+            self?.captureSession.stopRunning()
+            self?.isRunning = false
+        }
+    }
+
+    private func configureSession() {
+        guard !isRunning else { return }
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
+              let input = try? AVCaptureDeviceInput(device: camera) else { return }
+
+        captureSession.beginConfiguration()
+        captureSession.sessionPreset = .vga640x480
+        if captureSession.canAddInput(input) {
+            captureSession.addInput(input)
+        }
+
+        let output = AVCaptureVideoDataOutput()
+        output.alwaysDiscardsLateVideoFrames = true
+        output.setSampleBufferDelegate(self, queue: queue)
+        if captureSession.canAddOutput(output) {
+            captureSession.addOutput(output)
+        }
+        captureSession.commitConfiguration()
+        captureSession.startRunning()
+        isRunning = true
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let request = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .leftMirrored, options: [:])
+        try? handler.perform([request])
+
+        guard let face = request.results?.first else { return }
+        let box = face.boundingBox
+
+        // Combine Vision head yaw/pitch/roll with head position in frame so it tracks smoothly even through dark XREAL lenses!
+        let visionYawDeg = (face.yaw?.doubleValue ?? 0) * 180.0 / .pi
+        let visionPitchDeg = (face.pitch?.doubleValue ?? 0) * 180.0 / .pi
+        let visionRollDeg = (face.roll?.doubleValue ?? 0) * 180.0 / .pi
+
+        let posYawDeg = Double(box.midX - 0.5) * -55.0
+        let posPitchDeg = Double(box.midY - 0.5) * 45.0
+
+        let fusedYaw = visionYawDeg != 0 ? (visionYawDeg * 0.7 + posYawDeg * 0.3) : posYawDeg
+        let fusedPitch = visionPitchDeg != 0 ? (visionPitchDeg * 0.65 + posPitchDeg * 0.35) : posPitchDeg
+
+        onHeadPose?(fusedYaw, fusedPitch, visionRollDeg)
+    }
+}
+
 // MARK: - XREAL Spatial 3-DoF Modes, Head Tracking Sources & Palettes
 
 enum XRealSpatialAnchorMode: String, CaseIterable, Identifiable {
@@ -150,10 +590,11 @@ enum XRealSpatialAnchorMode: String, CaseIterable, Identifiable {
 }
 
 enum XRealHeadTrackingSource: String, CaseIterable, Identifiable {
-    case auto = "Auto (AirPods + Face + IMU)"
-    case faceCamera = "Front Camera 3D Head"
-    case airpods = "AirPods Head Motion"
-    case deviceIMU = "iPhone Gyro IMU"
+    case xrealAuto = "XREAL Glasses + Head (No Phone Gyro)"
+    case xrealUSBOnly = "XREAL USB-C IMU (0x3318 Only)"
+    case airpods = "AirPods 3D Head IMU"
+    case visionCamera = "Front Camera Head Tracker"
+    case deviceIMU = "iPhone Gyro IMU (Manual)"
 
     var id: String { rawValue }
 }
@@ -202,26 +643,6 @@ enum XRealHUDPalette: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - ARKit Front Camera 3D Head Pose Delegate
-
-final class FacePoseTrackerDelegate: NSObject, ARSessionDelegate {
-    var onPoseUpdate: ((Double, Double, Double) -> Void)?
-
-    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        guard let face = anchors.compactMap({ $0 as? ARFaceAnchor }).first, face.isTracked else { return }
-        let m = face.transform
-        // Extract Euler yaw, pitch, roll in degrees from the 4x4 face transform matrix
-        let pitchRad = asin(-max(-1.0, min(1.0, m.columns.2.y)))
-        let yawRad = atan2(m.columns.2.x, m.columns.2.z)
-        let rollRad = atan2(m.columns.0.y, m.columns.1.y)
-
-        let yawDeg = Double(yawRad) * 180.0 / .pi
-        let pitchDeg = Double(pitchRad) * 180.0 / .pi
-        let rollDeg = Double(rollRad) * 180.0 / .pi
-        onPoseUpdate?(yawDeg, pitchDeg, rollDeg)
-    }
-}
-
 // MARK: - XREAL Display & 3-DoF Spatial Head Tracker Manager
 
 @MainActor
@@ -232,22 +653,23 @@ final class XRealDisplayManager: ObservableObject {
     @Published var externalResolution = "1920×1080"
     @Published var mode: XRealHUDMode = .tactical
     @Published var spatialMode: XRealSpatialAnchorMode = .worldAnchored
-    @Published var trackingSource: XRealHeadTrackingSource = .auto {
+    @Published var trackingSource: XRealHeadTrackingSource = .xrealAuto {
         didSet { reconfigureHeadTracking() }
     }
     @Published var palette: XRealHUDPalette = .cyan
     @Published var hudOpacity: Double = 0.94
     @Published var hudScale: Double = 0.94
-    @Published var spatialSensitivity: Double = 16.0 // Pixels per degree of head turn
+    @Published var spatialSensitivity: Double = 16.0
     @Published var activeCameraIndex = 0
     @Published var cursorPosition: CGPoint = CGPoint(x: 0.5, y: 0.5)
 
-    // Raw & Calibrated Relative 3-DoF Head Angles (Degrees)
-    @Published var headYaw: Double = 0       // - Left, + Right
-    @Published var headPitch: Double = 0     // + Up, - Down
-    @Published var headRoll: Double = 0      // Tilt
+    // Calibrated Relative 3-DoF Head Angles (Degrees)
+    @Published var headYaw: Double = 0
+    @Published var headPitch: Double = 0
+    @Published var headRoll: Double = 0
     @Published var compassHeading: Double = 0
-    @Published var activeTrackerLabel: String = "Initializing…"
+    @Published var activeTrackerLabel: String = "Probing XREAL USB 0x3318…"
+    @Published var usbHIDStatus: String = "Probing USB-C HID 0x3318…"
     @Published var activeGazeZone: XRealGazeZone = .centerCore
     @Published var liveTranscript: String = ""
 
@@ -264,14 +686,15 @@ final class XRealDisplayManager: ObservableObject {
     private var centerRollOffset: Double = 0
     private var hasInitialCenter = false
 
+    private var lastUSBIMUTimestamp: Date = .distantPast
     private var lastAirPodsTimestamp: Date = .distantPast
-    private var lastFaceTimestamp: Date = .distantPast
+    private var lastVisionTimestamp: Date = .distantPast
 
     private var externalWindow: UIWindow?
-    private let deviceMotion = CMMotionManager()
+    private let usbDriver = XRealUSBHIDDriver()
+    private let visionTracker = VisionHeadPoseTracker()
     private let headphoneMotion = CMHeadphoneMotionManager()
-    private var arSession: ARSession?
-    private let faceDelegate = FacePoseTrackerDelegate()
+    private let deviceMotion = CMMotionManager()
     private var observers: [NSObjectProtocol] = []
     private var cameraTimer: Timer?
     private var dwellTimer: Timer?
@@ -337,17 +760,40 @@ final class XRealDisplayManager: ObservableObject {
         externalWindow = window
     }
 
-    // MARK: - Multi-Source 60Hz 3-DoF Head Tracking (AirPods + TrueDepth Face + Device IMU)
+    // MARK: - Head Tracking Pipeline (XREAL USB 0x3318 -> AirPods Head IMU -> Vision Head Pose)
+    // NOTE: iPhone Gyro is NEVER used unless explicitly selected in the picker!
 
     private func startAllTrackers() {
-        // 1. AirPods / Beats Headphone IMU (Direct head tracking even with iPhone in pocket)
+        // 1. Direct XREAL USB-C HID IMU Driver (VID 0x3318, Interface 3)
+        usbDriver.onStatusChanged = { [weak self] status, streaming in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.usbHIDStatus = status
+                if streaming {
+                    self.activeTrackerLabel = "XREAL USB-C IMU (1000Hz)"
+                }
+            }
+        }
+        usbDriver.onAnglesUpdated = { [weak self] yaw, pitch, roll in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.lastUSBIMUTimestamp = Date()
+                guard self.trackingSource == .xrealAuto || self.trackingSource == .xrealUSBOnly else { return }
+                self.activeTrackerLabel = "XREAL Glasses USB IMU"
+                self.ingestHeadAngles(yaw: yaw, pitch: pitch, roll: roll)
+            }
+        }
+        usbDriver.start()
+
+        // 2. AirPods / Beats Headphone IMU (Direct head tracking on iOS)
         if headphoneMotion.isDeviceMotionAvailable {
             headphoneMotion.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
                 guard let motion else { return }
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.lastAirPodsTimestamp = Date()
-                    guard self.trackingSource == .auto || self.trackingSource == .airpods else { return }
+                    let usbActive = Date().timeIntervalSince(self.lastUSBIMUTimestamp) < 0.5
+                    guard self.trackingSource == .airpods || (self.trackingSource == .xrealAuto && !usbActive) else { return }
                     let yaw = -motion.attitude.yaw * 180.0 / .pi
                     let pitch = motion.attitude.pitch * 180.0 / .pi
                     let roll = motion.attitude.roll * 180.0 / .pi
@@ -357,10 +803,22 @@ final class XRealDisplayManager: ObservableObject {
             }
         }
 
-        // 2. ARKit TrueDepth Front Camera Head Pose (Tracks head rotation while looking near phone)
-        startFaceTrackingIfSupported()
+        // 3. Sunglasses-Compatible Front Camera Vision Head Tracker (works while wearing XREAL glasses!)
+        visionTracker.onHeadPose = { [weak self] yaw, pitch, roll in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.lastVisionTimestamp = Date()
+                let now = Date()
+                let usbActive = now.timeIntervalSince(self.lastUSBIMUTimestamp) < 0.5
+                let airpodsActive = now.timeIntervalSince(self.lastAirPodsTimestamp) < 0.5
+                guard self.trackingSource == .visionCamera || (self.trackingSource == .xrealAuto && !usbActive && !airpodsActive) else { return }
+                self.activeTrackerLabel = "Vision 3D Head Tracker"
+                self.ingestHeadAngles(yaw: yaw, pitch: pitch, roll: roll)
+            }
+        }
+        visionTracker.start()
 
-        // 3. Device Gyroscope & Magnetometer Attitude
+        // 4. iPhone Gyro IMU (ONLY used if user explicitly picks `.deviceIMU` in the menu; NEVER in Auto!)
         if deviceMotion.isDeviceMotionAvailable {
             deviceMotion.deviceMotionUpdateInterval = 1.0 / 60.0
             deviceMotion.startDeviceMotionUpdates(using: .xMagneticNorthZVertical, to: .main) { [weak self] data, _ in
@@ -370,22 +828,8 @@ final class XRealDisplayManager: ObservableObject {
                     let rawCompass = data.attitude.yaw * 180.0 / .pi
                     self.compassHeading = rawCompass < 0 ? rawCompass + 360.0 : rawCompass
 
-                    let now = Date()
-                    let airpodsActive = now.timeIntervalSince(self.lastAirPodsTimestamp) < 0.6
-                    let faceActive = now.timeIntervalSince(self.lastFaceTimestamp) < 0.6
-
-                    let useDeviceIMU: Bool
-                    switch self.trackingSource {
-                    case .deviceIMU:
-                        useDeviceIMU = true
-                    case .auto:
-                        useDeviceIMU = !airpodsActive && !faceActive
-                    case .airpods, .faceCamera:
-                        useDeviceIMU = false
-                    }
-
-                    guard useDeviceIMU else { return }
-                    self.activeTrackerLabel = "iPhone 60Hz Spatial IMU"
+                    guard self.trackingSource == .deviceIMU else { return }
+                    self.activeTrackerLabel = "iPhone Gyro IMU (Manual)"
                     let yaw = -data.attitude.yaw * 180.0 / .pi
                     let pitch = data.attitude.pitch * 180.0 / .pi
                     let roll = data.attitude.roll * 180.0 / .pi
@@ -395,39 +839,12 @@ final class XRealDisplayManager: ObservableObject {
         }
     }
 
-    private func startFaceTrackingIfSupported() {
-        guard ARFaceTrackingConfiguration.isSupported else { return }
-        guard trackingSource == .auto || trackingSource == .faceCamera else {
-            arSession?.pause()
-            return
-        }
-        if arSession == nil {
-            let session = ARSession()
-            faceDelegate.onPoseUpdate = { [weak self] yaw, pitch, roll in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.lastFaceTimestamp = Date()
-                    let airpodsActive = Date().timeIntervalSince(self.lastAirPodsTimestamp) < 0.6
-                    guard self.trackingSource == .faceCamera || (self.trackingSource == .auto && !airpodsActive) else { return }
-                    self.activeTrackerLabel = "TrueDepth 3D Head Pose"
-                    // Invert yaw so turning head right produces positive headYaw
-                    self.ingestHeadAngles(yaw: -yaw, pitch: -pitch, roll: roll)
-                }
-            }
-            session.delegate = faceDelegate
-            arSession = session
-        }
-        let config = ARFaceTrackingConfiguration()
-        config.isLightEstimationEnabled = false
-        arSession?.run(config, options: [.resetTracking])
-    }
-
     private func reconfigureHeadTracking() {
         hasInitialCenter = false
-        if trackingSource == .auto || trackingSource == .faceCamera {
-            startFaceTrackingIfSupported()
+        if trackingSource == .xrealAuto || trackingSource == .visionCamera {
+            visionTracker.start()
         } else {
-            arSession?.pause()
+            visionTracker.stop()
         }
     }
 
@@ -447,13 +864,11 @@ final class XRealDisplayManager: ObservableObject {
         let targetPitch = max(-65, min(65, pitch - centerPitchOffset))
         let targetRoll = max(-45, min(45, Self.normalizeAngle(roll - centerRollOffset)))
 
-        // Smooth low-pass filter so head motion is silky-smooth at 60fps without jitter
-        let alpha = 0.28
+        let alpha = 0.30
         headYaw = headYaw + alpha * (targetYaw - headYaw)
         headPitch = headPitch + alpha * (targetPitch - headPitch)
         headRoll = headRoll + alpha * (targetRoll - headRoll)
 
-        // Update active gaze zone based on where the user's head is pointing
         if headPitch > 15 {
             activeGazeZone = .overhead
         } else if headPitch < -13 {
@@ -469,6 +884,7 @@ final class XRealDisplayManager: ObservableObject {
 
     /// Re-centers the 3D HUD so the user's current head direction becomes (0° yaw, 0° pitch, 0° roll).
     func recenterHUD() {
+        usbDriver.resetAttitude()
         centerYawOffset = rawYaw
         centerPitchOffset = rawPitch
         centerRollOffset = rawRoll
@@ -487,7 +903,7 @@ final class XRealDisplayManager: ObservableObject {
         return a
     }
 
-    // MARK: - Gaze Dwell Selection Timer (Hands-Free Command Execution)
+    // MARK: - Gaze Dwell Selection Timer
 
     private func startDwellTimer() {
         dwellTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
@@ -498,9 +914,8 @@ final class XRealDisplayManager: ObservableObject {
                     self.dwellProgress = 0
                     return
                 }
-                // Map headYaw (-30° ... +30°) across the 4 dock buttons
                 let clamped = max(-28.0, min(28.0, self.headYaw))
-                let normalized = (clamped + 28.0) / 56.0 // 0.0 ... 1.0
+                let normalized = (clamped + 28.0) / 56.0
                 let idx = min(3, max(0, Int(normalized * 4.0)))
                 if self.dwellTargetIndex == idx {
                     self.dwellProgress += 0.08 / 1.4
@@ -556,11 +971,9 @@ struct XRealOpticalHUDView: View {
 
     private var glow: Color { xreal.palette.primary }
 
-    // Computed 3-DoF Spatial Shifts based on Head Yaw, Pitch, and Roll
     private var spatialOffsetX: CGFloat {
         switch xreal.spatialMode {
         case .worldAnchored:
-            // Panoramic world-locked canvas: turning head right shifts world-anchored canvas left
             return CGFloat(-xreal.headYaw * xreal.spatialSensitivity)
         case .smoothFollow:
             return CGFloat(-xreal.headYaw * (xreal.spatialSensitivity * 0.45))
@@ -587,15 +1000,12 @@ struct XRealOpticalHUDView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                // Pure #000000 black is completely unlit / transparent on XREAL Micro-OLED optics
                 Color.black.ignoresSafeArea()
 
-                // Subtle Helmet Artificial Horizon Pitch Ladder that tilts & shifts with your head
                 if xreal.spatialMode != .headLocked {
                     artificialHorizonOverlay(size: geo.size)
                 }
 
-                // Main Spatial Content
                 Group {
                     if xreal.spatialMode == .gazeSwitch {
                         gazeSwitchHUDLayout(size: geo.size)
@@ -628,12 +1038,10 @@ struct XRealOpticalHUDView: View {
                 .animation(.interpolatingSpring(stiffness: 140, damping: 19), value: xreal.headYaw)
                 .animation(.interpolatingSpring(stiffness: 140, damping: 19), value: xreal.headPitch)
 
-                // Pinned Visor Top Edge Indicator (shows which spatial wing you're looking at)
                 visorTopGazeIndicator
                     .frame(maxHeight: .infinity, alignment: .top)
                     .padding(.top, 6)
 
-                // Trackpad / Gaze Laser Reticle Cursor
                 Circle()
                     .strokeBorder(glow, lineWidth: 2)
                     .background(Circle().fill(glow.opacity(0.25)))
@@ -648,11 +1056,8 @@ struct XRealOpticalHUDView: View {
         .preferredColorScheme(.dark)
     }
 
-    // MARK: - Artificial Horizon & Sliding Compass Tape
-
     private func artificialHorizonOverlay(size: CGSize) -> some View {
         ZStack {
-            // Pitch ladder bars that shift vertically with headPitch and roll with headRoll
             ForEach([-20, -10, 0, 10, 20], id: \.self) { rung in
                 let yShift = CGFloat(Double(rung) - xreal.headPitch) * 6.5
                 HStack(spacing: 50) {
@@ -688,28 +1093,22 @@ struct XRealOpticalHUDView: View {
         .overlay(Capsule().stroke(glow.opacity(0.5), lineWidth: 1))
     }
 
-    // MARK: - 1A. Panoramic 3D World-Anchored HUD (Expands as You Turn Your Head Left / Right / Up / Down)
-
     private func panoramicWorldHUDLayout(size: CGSize) -> some View {
         let wingWidth = max(310, size.width * 0.44)
         let centerWidth = max(360, size.width * 0.46)
 
         return VStack(spacing: 18) {
-            // OVERHEAD CANOPY (Revealed / scales up when looking UP: headPitch > 12°)
             overheadCanopyBar(size: size)
                 .scaleEffect(xreal.activeGazeZone == .overhead ? 1.08 : 0.94)
                 .opacity(xreal.activeGazeZone == .overhead ? 1.0 : 0.65)
 
-            // 3-WING WIDE SPATIAL COCKPIT (Left Wing — Center Core — Right Wing)
             HStack(alignment: .center, spacing: 38) {
-                // LEFT SPATIAL WING (Swings into center view when you turn your head LEFT)
                 leftSystemsWing(isFocused: xreal.activeGazeZone == .leftWing)
                     .frame(width: wingWidth)
                     .scaleEffect(xreal.activeGazeZone == .leftWing ? 1.10 : 0.92)
                     .opacity(xreal.activeGazeZone == .leftWing ? 1.0 : 0.62)
                     .rotation3DEffect(.degrees(16), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
 
-                // CENTER CORE RETICLE (In front of you at 0° Yaw)
                 VStack(spacing: 12) {
                     topCompassRibbon
                     centerArcReticle
@@ -719,7 +1118,6 @@ struct XRealOpticalHUDView: View {
                 .scaleEffect(xreal.activeGazeZone == .centerCore ? 1.03 : 0.92)
                 .opacity(xreal.activeGazeZone == .centerCore ? 1.0 : 0.68)
 
-                // RIGHT SPATIAL WING (Swings into center view when you turn your head RIGHT)
                 rightOpticsWing(isFocused: xreal.activeGazeZone == .rightWing)
                     .frame(width: wingWidth)
                     .scaleEffect(xreal.activeGazeZone == .rightWing ? 1.10 : 0.92)
@@ -727,14 +1125,11 @@ struct XRealOpticalHUDView: View {
                     .rotation3DEffect(.degrees(-16), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
             }
 
-            // LOWER GAZE COMMAND DOCK (Rises into focus when looking DOWN: headPitch < -12°)
             lowerGazeCommandDock
                 .scaleEffect(xreal.activeGazeZone == .commandDock ? 1.10 : 0.90)
                 .opacity(xreal.activeGazeZone == .commandDock ? 1.0 : 0.55)
         }
     }
-
-    // MARK: - 1B. Gaze-Switch HUD Mode (Full-Screen Morph on Head Turn)
 
     private func gazeSwitchHUDLayout(size: CGSize) -> some View {
         VStack(spacing: 14) {
@@ -772,8 +1167,6 @@ struct XRealOpticalHUDView: View {
                 .padding(.bottom, 14)
         }
     }
-
-    // MARK: - Spatial Wing Views (Expand with Extra Details When Looked At)
 
     private func leftSystemsWing(isFocused: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -944,8 +1337,6 @@ struct XRealOpticalHUDView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(glow.opacity(0.55), lineWidth: 1))
     }
 
-    // MARK: 2. Minimal Walking / Driving HUD (Clear Center Vision)
-
     private func minimalWalkLayout(size: CGSize) -> some View {
         VStack {
             HStack {
@@ -983,8 +1374,6 @@ struct XRealOpticalHUDView: View {
         }
     }
 
-    // MARK: 3. Security Camera Overwatch HUD
-
     private func securityOverwatchLayout(size: CGSize) -> some View {
         VStack(spacing: 16) {
             topCompassRibbon.padding(.horizontal, 28).padding(.top, 12)
@@ -1012,8 +1401,6 @@ struct XRealOpticalHUDView: View {
         }
     }
 
-    // MARK: 4. Arc Reactor Audio & Voice Visualizer
-
     private func musicArcLayout(size: CGSize) -> some View {
         VStack(spacing: 22) {
             Spacer()
@@ -1031,8 +1418,6 @@ struct XRealOpticalHUDView: View {
         }
     }
 
-    // MARK: - HUD Sub-Components
-
     private var topCompassRibbon: some View {
         HStack(spacing: 16) {
             Text("J.A.R.V.I.S. // 3-DOF SPATIAL OPTICS")
@@ -1041,7 +1426,6 @@ struct XRealOpticalHUDView: View {
 
             Spacer()
 
-            // Sliding Compass Tape that shifts with Head Yaw
             HStack(spacing: 12) {
                 Text(String(format: "HDG %03.0f°", xreal.compassHeading))
                 Text(String(format: "YAW %+03.0f°", xreal.headYaw))
@@ -1123,7 +1507,7 @@ struct XRealOpticalHUDView: View {
             .foregroundStyle(glow)
             .lineLimit(1)
             Spacer()
-            Text(xreal.spatialMode.rawValue.uppercased())
+            Text(xreal.activeTrackerLabel.uppercased())
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(glow.opacity(0.8))
         }
@@ -1191,29 +1575,39 @@ struct XRealCockpitView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     // XREAL Connection & Live 3-DoF Head Tracker Status Banner
-                    HStack(spacing: 10) {
-                        Image(systemName: xreal.isExternalConnected ? "eyeglasses" : "gyroscope")
-                            .font(.title3)
-                            .foregroundStyle(xreal.palette.primary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(xreal.isExternalConnected
-                                 ? "XREAL Active (\(xreal.externalResolution)) · \(xreal.activeTrackerLabel)"
-                                 : "3-DoF Head Tracking Active · \(xreal.activeTrackerLabel)")
-                                .font(.subheadline.weight(.bold))
-                            Text(String(format: "Gaze: %@  |  Yaw %+03.0f° · Pitch %+02.0f° · Roll %+02.0f°",
-                                        xreal.activeGazeZone.rawValue, xreal.headYaw, xreal.headPitch, xreal.headRoll))
-                                .font(.caption2.monospaced())
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 10) {
+                            Image(systemName: xreal.isExternalConnected ? "eyeglasses" : "gyroscope")
+                                .font(.title3)
                                 .foregroundStyle(xreal.palette.primary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(xreal.isExternalConnected
+                                     ? "XREAL Connected (\(xreal.externalResolution))"
+                                     : "XREAL 3-DoF Cockpit")
+                                    .font(.subheadline.weight(.bold))
+                                Text("Active Tracker: \(xreal.activeTrackerLabel)")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(xreal.palette.primary)
+                            }
+                            Spacer()
+                            Button {
+                                xreal.recenterHUD()
+                            } label: {
+                                Label("Recenter", systemImage: "scope")
+                                    .font(.caption.weight(.bold))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(xreal.palette.primary)
                         }
-                        Spacer()
-                        Button {
-                            xreal.recenterHUD()
-                        } label: {
-                            Label("Recenter", systemImage: "scope")
-                                .font(.caption.weight(.bold))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(xreal.palette.primary)
+
+                        Text("USB Status: \(xreal.usbHIDStatus)")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(Theme.secondaryText)
+
+                        Text(String(format: "Zone: %@  |  Yaw %+03.0f° · Pitch %+02.0f° · Roll %+02.0f°",
+                                    xreal.activeGazeZone.rawValue, xreal.headYaw, xreal.headPitch, xreal.headRoll))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.white)
                     }
                     .padding(10)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
@@ -1256,11 +1650,11 @@ struct XRealCockpitView: View {
                         }
 
                         HStack {
-                            Text("Head Tracker")
+                            Text("Gyro / Head Source")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(Theme.secondaryText)
                             Spacer()
-                            Picker("Head Tracker", selection: $xreal.trackingSource) {
+                            Picker("Gyro / Head Source", selection: $xreal.trackingSource) {
                                 ForEach(XRealHeadTrackingSource.allCases) { ts in
                                     Text(ts.rawValue).tag(ts)
                                 }
