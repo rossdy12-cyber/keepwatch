@@ -5,6 +5,8 @@ struct OverviewView: View {
     @EnvironmentObject private var settings: ServiceSettings
     @EnvironmentObject private var store: TrueNASStore
     @EnvironmentObject private var router: AppRouter
+    @EnvironmentObject private var portal: PortalStore
+    @State private var openWeb: WebDestination?
 
     private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
 
@@ -20,6 +22,20 @@ struct OverviewView: View {
             .refreshable { await store.refresh(settings[.truenas]) }
             .navigationTitle(store.system?.hostname ?? "Overview")
             .keepwatchChrome()
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if let url = URL(string: settings[.truenas].baseURL).flatMap({ $0.host != nil ? $0 : nil }) ?? portal.trueNASURL {
+                        Button {
+                            openWeb = WebDestination(title: "TrueNAS", url: url)
+                        } label: {
+                            Label("Web UI", systemImage: "globe")
+                        }
+                    }
+                }
+            }
+            .fullScreenCover(item: $openWeb) { destination in
+                WebScreen(destination: destination, showsDone: true)
+            }
         }
         .task(id: settings[.truenas]) {
             // Pools, disks, alerts and apps refresh every 30 s; CPU, RAM and network stream live.

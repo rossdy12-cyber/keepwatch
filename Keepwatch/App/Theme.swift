@@ -12,6 +12,11 @@ enum Theme {
     static let warning = Color(red: 1.0, green: 0.72, blue: 0.2)
     static let danger = Color(red: 1.0, green: 0.36, blue: 0.36)
     static let download = Color(red: 0.36, green: 0.62, blue: 1.0)
+    static let userBubble = Color(red: 0.13, green: 0.40, blue: 0.62)
+    static let jarvisBlue = Color(red: 0.36, green: 0.78, blue: 1.0)
+    static let gothicCrimson = Color(red: 0.788, green: 0.094, blue: 0.290)
+    static let gothicPurple = Color(red: 0.616, green: 0.306, blue: 0.867)
+    static let paydaysGreen = Color(red: 0.24, green: 0.84, blue: 0.75)
 
     static func color(for service: Service) -> Color {
         switch service {

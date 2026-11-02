@@ -132,11 +132,67 @@ final class TrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate 
 
 let httpSession: URLSession = {
     let config = URLSessionConfiguration.default
-    config.timeoutIntervalForRequest = 20
+    config.timeoutIntervalForRequest = 120
     config.waitsForConnectivity = false
     config.requestCachePolicy = .reloadIgnoringLocalCacheData
     return URLSession(configuration: config, delegate: TrustDelegate.shared, delegateQueue: nil)
 }()
+
+enum JarvisError: LocalizedError {
+    case notConfigured
+    case invalidURL
+    case unauthorized
+    case cloudflareAccess
+    case cloudflare(Int)
+    case notFound(String)
+    case http(Int, String?)
+    case webPage
+    case emptyReply
+
+    var errorDescription: String? {
+        switch self {
+        case .notConfigured:
+            return "Add the Jarvis address in Settings first."
+        case .invalidURL:
+            return "That address doesn't look right. It should look like https://jarvis.nas-server.co.uk"
+        case .unauthorized:
+            return "Jarvis refused the access token. Check it in Settings."
+        case .cloudflareAccess:
+            return "Cloudflare Access is asking for a login. Add a Cloudflare Access service token in Settings, or add a bypass rule for this app."
+        case .cloudflare(let code):
+            return Self.cloudflareMessage(code)
+        case .notFound(let path):
+            return "Jarvis has no \(path) endpoint (HTTP 404). Check the connection type and chat path in Settings, or tap Test connection to detect them."
+        case .http(let code, let detail):
+            if let detail, !detail.isEmpty { return "Jarvis answered with an error (HTTP \(code)): \(detail)" }
+            return "Jarvis answered with an error (HTTP \(code))."
+        case .webPage:
+            return "Got a web page instead of an answer. The chat path is probably wrong, or a login page is in the way."
+        case .emptyReply:
+            return "Jarvis sent an empty reply."
+        }
+    }
+
+    private static func cloudflareMessage(_ code: Int) -> String {
+        let prefix = "Cloudflare couldn't get through to Jarvis on your NAS (error \(code)). "
+        switch code {
+        case 521:
+            return prefix + "The NAS refused the connection: is the Jarvis app running, and is Cloudflare pointing at the right port?"
+        case 522, 524:
+            return prefix + "The NAS didn't answer in time."
+        case 523:
+            return prefix + "Cloudflare can't reach the NAS at all. Check the DNS record or tunnel."
+        case 525:
+            return prefix + "The secure (SSL) handshake with the NAS failed. Usually this means Nginx Proxy Manager has no proxy host (and so no SSL certificate) for this hostname yet: add one in Nginx Proxy Manager that forwards to the Jarvis app's port, with an SSL certificate."
+        case 526:
+            return prefix + "The NAS's certificate isn't valid for this name. Use Cloudflare SSL mode Full (not Full strict), or install a Cloudflare Origin certificate on the NAS."
+        case 530:
+            return prefix + "The Cloudflare Tunnel is offline or not linked to this hostname. Check the cloudflared app on TrueNAS."
+        default:
+            return prefix + "Check that Jarvis is running on TrueNAS."
+        }
+    }
+}
 
 /// Sends a request and returns the parsed JSON body, mapping 401/403 to `.unauthorized`.
 func fetchJSON(_ request: URLRequest, service: String) async throws -> JSONValue {

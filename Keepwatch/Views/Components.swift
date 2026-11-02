@@ -208,4 +208,8 @@ extension View {
     func keepwatchChrome() -> some View {
         modifier(KeepwatchChrome())
     }
+
+    func portalChrome() -> some View {
+        modifier(KeepwatchChrome())
+    }
 }
