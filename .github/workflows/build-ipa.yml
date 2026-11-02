@@ -12,6 +12,8 @@ on:
       - "jarvis-voice/**"
       - "alexa/**"
       - ".github/workflows/build-nasportal-ipa.yml"
+      - "jarvis-xreal/**"
+      - ".github/workflows/build-jarvis-xreal-ipa.yml"
   workflow_dispatch:
 
 jobs:

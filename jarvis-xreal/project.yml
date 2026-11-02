@@ -1,0 +1,59 @@
+# XcodeGen project description for JarvisXREAL (standalone XREAL AR Glasses HUD & Pocket Controller).
+name: JarvisXREAL
+options:
+  bundleIdPrefix: app.jarvis
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  JarvisXREAL:
+    type: application
+    platform: iOS
+    sources:
+      - path: JarvisXREAL
+    settings:
+      base:
+        PRODUCT_NAME: JarvisXREAL
+        PRODUCT_BUNDLE_IDENTIFIER: app.jarvis.xreal
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+    info:
+      path: JarvisXREAL/Info.plist
+      properties:
+        CFBundleDisplayName: Jarvis AR
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UIBackgroundModes:
+          - audio
+        NSLocalNetworkUsageDescription: Jarvis AR connects to your Jarvis core and homelab on your local network or Tailscale.
+        NSMicrophoneUsageDescription: Jarvis AR listens while you use Push-to-Talk or Hands-Free mode so you can speak to Jarvis through your XREAL glasses.
+        NSSpeechRecognitionUsageDescription: Jarvis AR turns your speech into live HUD subtitles and sends commands to your Jarvis core.
+        NSMotionUsageDescription: Jarvis AR reads device pitch, roll, and compass heading for the tactical HUD horizon ribbon.
