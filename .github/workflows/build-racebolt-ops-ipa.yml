@@ -1,0 +1,62 @@
+name: Build RaceboltOps IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "racebolt-ops/**"
+      - ".github/workflows/build-racebolt-ops-ipa.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-racebolt-ops-ipa
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: racebolt-ops
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project RaceboltOps.xcodeproj \
+            -target RaceboltOps \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package Payload/RaceboltOps.app into RaceboltOps.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/RaceboltOps.app out/Payload/
+          cd out
+          zip -qry RaceboltOps.ipa Payload
+          ls -lh RaceboltOps.ipa
+
+      - name: Upload the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: RaceboltOps-ipa
+          path: racebolt-ops/out/RaceboltOps.ipa
+          retention-days: 30

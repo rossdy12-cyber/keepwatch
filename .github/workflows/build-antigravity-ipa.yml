@@ -1,0 +1,62 @@
+name: Build Antigravity IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "antigravity/**"
+      - ".github/workflows/build-antigravity-ipa.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-antigravity-ipa
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: antigravity
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Antigravity.xcodeproj \
+            -target Antigravity \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package Payload/Antigravity.app into Antigravity.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Antigravity.app out/Payload/
+          cd out
+          zip -qry Antigravity.ipa Payload
+          ls -lh Antigravity.ipa
+
+      - name: Upload the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Antigravity-ipa
+          path: antigravity/out/Antigravity.ipa
+          retention-days: 30

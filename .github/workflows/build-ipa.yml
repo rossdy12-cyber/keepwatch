@@ -14,6 +14,17 @@ on:
       - ".github/workflows/build-nasportal-ipa.yml"
       - "jarvis-xreal/**"
       - ".github/workflows/build-jarvis-xreal-ipa.yml"
+      - "antigravity/**"
+      - ".github/workflows/build-antigravity-ipa.yml"
+      - "aegis-mobile/**"
+      - ".github/workflows/build-aegis-mobile-ipa.yml"
+      - "sentrycam/**"
+      - ".github/workflows/build-sentrycam-ipa.yml"
+      - "aniimo-pilot/**"
+      - ".github/workflows/build-aniimo-pilot-ipa.yml"
+      - "racebolt-ops/**"
+      - ".github/workflows/build-racebolt-ops-ipa.yml"
+      - ".github/workflows/build-ipa.yml"
   workflow_dispatch:
 
 jobs:
