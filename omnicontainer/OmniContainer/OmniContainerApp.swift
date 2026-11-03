@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 import Network
 import UIKit
 
-struct OmniAppDescriptor: Identifiable, Hashable {
+struct OmniAppDescriptor: Identifiable {
     let id: String
     let title: String
     let subtitle: String
