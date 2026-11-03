@@ -1917,10 +1917,20 @@ struct MiniDeskSwitchModule: View {
 final class OmniAniimoStreamer: ObservableObject {
     static let shared = OmniAniimoStreamer()
     @Published var frameImage: UIImage? = nil
-    @Published var statusText: String = "Native Windows PC Streamer (:9095) Ready"
+    @Published var statusText: String = "Turbo 30+ FPS Windows PC Streamer (:9095) Ready"
     @Published var ghostMode: Bool = true
     @Published var isStreaming: Bool = true
     private var loopTask: Task<Void, Never>? = nil
+
+    private lazy var fastSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 1.2
+        cfg.timeoutIntervalForResource = 2.0
+        cfg.httpMaximumConnectionsPerHost = 4
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.urlCache = nil
+        return URLSession(configuration: cfg)
+    }()
 
     let baseURL = "http://100.102.4.54:9095"
 
@@ -1930,17 +1940,17 @@ final class OmniAniimoStreamer: ObservableObject {
             while !Task.isCancelled {
                 if isStreaming {
                     await fetchFrame()
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                } else {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
                 }
-                try? await Task.sleep(nanoseconds: 280_000_000)
             }
         }
     }
 
     func fetchFrame() async {
         guard let u = URL(string: "\(baseURL)/api/aniimo/frame.jpg?t=\(Date().timeIntervalSince1970)") else { return }
-        var req = URLRequest(url: u)
-        req.timeoutInterval = 2.0
-        if let (d, _) = try? await URLSession.shared.data(for: req),
+        if let (d, _) = try? await fastSession.data(from: u),
            let img = UIImage(data: d) {
             frameImage = img
         }
