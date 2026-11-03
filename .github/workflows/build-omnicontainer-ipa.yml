@@ -42,6 +42,9 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Build J.A.R.V.I.S. Wrist OS (Watch/OmniWatch.app + OmniWatchWidgets.appex)
+        run: bash build_watch_bundle.sh
+
       - name: Build OmniContainerPlugin.dylib & Patch zxPluginsInject.dylib for YouTube Plus
         run: |
           mkdir -p out

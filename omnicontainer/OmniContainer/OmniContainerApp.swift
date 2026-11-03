@@ -1398,13 +1398,71 @@ struct MiniNASPortalModule: View {
     }
 }
 
-// MARK: - SentryCam Module (Port 5000 + All 3 Cameras: tapo_c200, bike_camera, doorbell + PTZ!)
+// MARK: - SentryCam Module (Port 5000 + All 3 Cameras: tapo_c200, bike_camera, doorbell + PTZ + Flicker-Free Stream + AI Events!)
+struct SentryCamEventItem: Identifiable {
+    let id: String
+    let camera: String
+    let label: String
+    let score: Int
+    let startTime: Double
+}
+
+struct FlickerFreeCameraImage: View {
+    let host: String
+    let camID: String
+    let height: CGFloat
+    @State private var currentImage: UIImage? = nil
+    @State private var lastUpdated: String = "Connecting..."
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            if let img = currentImage {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white.opacity(0.06))
+                    .frame(height: height)
+                    .overlay(ProgressView().tint(.red))
+            }
+            Text(lastUpdated)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.black.opacity(0.65))
+                .cornerRadius(5)
+                .padding(6)
+        }
+        .task(id: camID) {
+            while !Task.isCancelled {
+                let ts = Int(Date().timeIntervalSince1970 * 1000)
+                if let u = URL(string: "http://\(host):5000/api/\(camID)/latest.jpg?h=\(Int(height))&t=\(ts)") {
+                    var req = URLRequest(url: u)
+                    req.timeoutInterval = 3.5
+                    req.cachePolicy = .reloadIgnoringLocalCacheData
+                    if let (data, resp) = try? await URLSession.shared.data(for: req),
+                       let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                       let decoded = UIImage(data: data) {
+                        currentImage = decoded
+                        let df = DateFormatter()
+                        df.dateFormat = "HH:mm:ss"
+                        lastUpdated = "LIVE • \(df.string(from: Date()))"
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+        }
+    }
+}
+
 struct MiniSentryCamModule: View {
     let host: String
     @State private var selectedCam = "tapo_c200"
     @State private var viewMode = 0
-    @State private var tick = Int(Date().timeIntervalSince1970)
-    @State private var status = "Connected to Frigate NVR (:5000)"
+    @State private var status = "Connected to Frigate NVR (:5000) • Live Feed Active"
+    @State private var events: [SentryCamEventItem] = []
 
     let cameras = [
         ("tapo_c200", "Tapo C200 (Garden/Porch)"),
@@ -1412,14 +1470,13 @@ struct MiniSentryCamModule: View {
         ("doorbell", "Front Doorbell")
     ]
 
-    let timer = Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()
-
     var body: some View {
         VStack(spacing: 0) {
             Picker("Mode", selection: $viewMode) {
-                Text("All 3 Cameras").tag(0)
+                Text("All 3 Live").tag(0)
                 Text("PTZ & Single").tag(1)
-                Text("Frigate UI").tag(2)
+                Text("AI Events").tag(2)
+                Text("Frigate UI").tag(3)
             }
             .pickerStyle(.segmented)
             .padding(8)
@@ -1433,23 +1490,14 @@ struct MiniSentryCamModule: View {
                                     Circle().fill(Color.green).frame(width: 8, height: 8)
                                     Text(cam.1).font(.caption.bold()).foregroundColor(.white)
                                     Spacer()
-                                    Text("LIVE").font(.system(size: 9, weight: .bold)).foregroundColor(.red)
+                                    Text("LIVE STREAM").font(.system(size: 9, weight: .bold)).foregroundColor(.red)
                                 }
-                                AsyncImage(url: URL(string: "http://\(host):5000/api/\(cam.0)/latest.jpg?h=480&t=\(tick)")) { phase in
-                                    if case .success(let img) = phase {
-                                        img.resizable().scaledToFit()
-                                    } else {
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .fill(Color.white.opacity(0.06))
-                                            .frame(height: 180)
-                                            .overlay(ProgressView().tint(.red))
+                                FlickerFreeCameraImage(host: host, camID: cam.0, height: 480)
+                                    .cornerRadius(10)
+                                    .onTapGesture {
+                                        selectedCam = cam.0
+                                        viewMode = 1
                                     }
-                                }
-                                .cornerRadius(10)
-                                .onTapGesture {
-                                    selectedCam = cam.0
-                                    viewMode = 1
-                                }
                             }
                             .padding(10)
                             .background(Color.white.opacity(0.05))
@@ -1468,41 +1516,92 @@ struct MiniSentryCamModule: View {
                         }
                         .pickerStyle(.segmented)
 
-                        AsyncImage(url: URL(string: "http://\(host):5000/api/\(selectedCam)/latest.jpg?h=720&t=\(tick)")) { phase in
-                            if case .success(let img) = phase {
-                                img.resizable().scaledToFit()
-                            } else {
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(Color.white.opacity(0.06))
-                                    .frame(height: 220)
-                                    .overlay(ProgressView().tint(.red))
-                            }
-                        }
-                        .cornerRadius(12)
+                        FlickerFreeCameraImage(host: host, camID: selectedCam, height: 720)
+                            .cornerRadius(12)
 
                         Text(status).font(.caption2).foregroundColor(.orange)
 
                         HStack(spacing: 12) {
                             ptzBtn("Start Patrol", cmd: "sudo docker start tapo-patrol")
                             ptzBtn("Stop Patrol", cmd: "sudo docker stop tapo-patrol")
-                            Button("Refresh") { tick = Int(Date().timeIntervalSince1970) }
-                                .font(.caption.bold())
-                                .padding(10)
-                                .background(Color.red)
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
                         }
                     }
                     .padding(12)
+                }
+            } else if viewMode == 2 {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        HStack {
+                            Text("Recent Frigate AI Detections")
+                                .font(.caption.bold())
+                                .foregroundColor(.white)
+                            Spacer()
+                            Button("Refresh") {
+                                Task { await loadEvents() }
+                            }
+                            .font(.caption2.bold())
+                            .foregroundColor(.red)
+                        }
+                        ForEach(events) { ev in
+                            HStack(spacing: 12) {
+                                AsyncImage(url: URL(string: "http://\(host):5000/api/events/\(ev.id)/thumbnail.jpg")) { img in
+                                    img.resizable().scaledToFill()
+                                } placeholder: {
+                                    Color.white.opacity(0.08)
+                                }
+                                .frame(width: 72, height: 52)
+                                .cornerRadius(8)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack {
+                                        Text(ev.label.capitalized)
+                                            .font(.subheadline.bold())
+                                            .foregroundColor(.white)
+                                        Text("\(ev.score)%")
+                                            .font(.caption2.bold())
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.red.opacity(0.25))
+                                            .foregroundColor(.red)
+                                            .cornerRadius(5)
+                                    }
+                                    Text("\(ev.camera) • \(Date(timeIntervalSince1970: ev.startTime).formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                }
+                                Spacer()
+                            }
+                            .padding(8)
+                            .background(Color.white.opacity(0.05))
+                            .cornerRadius(10)
+                        }
+                    }
+                    .padding(12)
+                }
+                .task {
+                    await loadEvents()
                 }
             } else {
                 FastCachedWebView(cacheKey: "frigate-ui", urlString: "https://frigate.nas-server.co.uk")
             }
         }
-        .onReceive(timer) { _ in
-            if viewMode != 2 {
-                tick = Int(Date().timeIntervalSince1970)
+    }
+
+    func loadEvents() async {
+        guard let u = URL(string: "http://\(host):5000/api/events?limit=25") else { return }
+        if let (data, _) = try? await URLSession.shared.data(from: u),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            var list: [SentryCamEventItem] = []
+            for item in arr {
+                if let id = item["id"] as? String {
+                    let c = (item["camera"] as? String) ?? "cam"
+                    let l = (item["label"] as? String) ?? "motion"
+                    let sc = Int(((item["top_score"] as? Double) ?? 0.85) * 100)
+                    let st = (item["start_time"] as? Double) ?? Date().timeIntervalSince1970
+                    list.append(SentryCamEventItem(id: id, camera: c, label: l, score: sc, startTime: st))
+                }
             }
+            events = list
         }
     }
 
@@ -1855,27 +1954,180 @@ struct MiniAegisModule: View {
 }
 
 struct MiniDeskSwitchModule: View {
-    @State private var status = "Ready to switch Windows / Bazzite displays & Steam"
+    @State private var status = "Ready: Work PC, Bazzite PC & Apple Watch Hub"
+    @State private var winPin: String = UserDefaults.standard.string(forKey: "omni_win_pin") ?? ""
+
     var body: some View {
         ScrollView {
-            VStack(spacing: 12) {
-                Text(status).font(.caption).foregroundColor(.orange)
-                HStack(spacing: 10) {
-                    btn("Monitor Only", flag: "/internal", color: .cyan)
-                    btn("TV Only", flag: "/external", color: .orange)
-                    btn("Extend All", flag: "/extend", color: .purple)
+            VStack(spacing: 14) {
+                Text(status)
+                    .font(.caption.bold())
+                    .foregroundColor(.cyan)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                // 1. Work PC & Bazzite PC Biometric / Watch Unlock Card
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "applewatch.watchface")
+                            .foregroundColor(.cyan)
+                        Text("Apple Watch & Phone PC Unlocker")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.white)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            Task { await unlockWorkPC() }
+                        } label: {
+                            Label("Unlock Work PC", systemImage: "lock.open.desktopcomputer")
+                                .font(.caption.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(12)
+                                .background(Color.cyan.opacity(0.25))
+                                .foregroundColor(.cyan)
+                                .cornerRadius(10)
+                        }
+
+                        Button {
+                            Task { await unlockBazzitePC() }
+                        } label: {
+                            Label("Unlock Bazzite", systemImage: "gamecontroller.fill")
+                                .font(.caption.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(12)
+                                .background(Color.purple.opacity(0.28))
+                                .foregroundColor(.purple)
+                                .cornerRadius(10)
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        TextField("Optional Work PC PIN (for Win+L Unlock)", text: $winPin)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                            .onChange(of: winPin) { _, v in
+                                UserDefaults.standard.set(v, forKey: "omni_win_pin")
+                            }
+
+                        Button("Unlock Lauren PC") {
+                            Task {
+                                if let u = URL(string: "http://100.102.4.54:9090/api/power/lauren/unlock") {
+                                    _ = try? await URLSession.shared.data(from: u)
+                                    status = "🔓 Sent Wake & Unlock to Lauren's PC"
+                                }
+                            }
+                        }
+                        .font(.caption2.bold())
+                        .padding(8)
+                        .background(Color.pink.opacity(0.22))
+                        .foregroundColor(.pink)
+                        .cornerRadius(8)
+                    }
                 }
-                HStack(spacing: 10) {
-                    cmdBtn("Steam Big Picture", cmd: "cmd.exe /c start steam://open/bigpicture", color: .blue)
-                    cmdBtn("Jellyfin TV", cmd: "cmd.exe /c start https://jellyfin.nas-server.co.uk", color: .pink)
+                .padding(12)
+                .background(Color.white.opacity(0.06))
+                .cornerRadius(14)
+
+                // 2. Display & Steam Controls
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Display & Power Controls")
+                        .font(.caption.bold())
+                        .foregroundColor(.gray)
+
+                    HStack(spacing: 10) {
+                        btn("Monitor Only", flag: "/internal", color: .cyan)
+                        btn("TV Only", flag: "/external", color: .orange)
+                        btn("Extend All", flag: "/extend", color: .purple)
+                    }
+                    HStack(spacing: 10) {
+                        cmdBtn("Steam Big Picture", cmd: "cmd.exe /c start steam://open/bigpicture", color: .blue)
+                        cmdBtn("Jellyfin TV", cmd: "cmd.exe /c start https://jellyfin.nas-server.co.uk", color: .pink)
+                    }
+                    HStack(spacing: 10) {
+                        cmdBtn("Sleep Work PC", cmd: "rundll32.exe powrprof.dll,SetSuspendState 0,1,0", color: .indigo)
+                        cmdBtn("Lock Work PC", cmd: "rundll32.exe user32.dll,LockWorkStation", color: .yellow)
+                        Button("Lock Bazzite") {
+                            Task {
+                                if let u = URL(string: "http://100.102.4.54:9090/api/power/bazzite/lock") {
+                                    _ = try? await URLSession.shared.data(from: u)
+                                    status = "🔒 Locked Bazzite PC"
+                                }
+                            }
+                        }
+                        .font(.caption.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(12)
+                        .background(Color.red.opacity(0.22))
+                        .foregroundColor(.red)
+                        .cornerRadius(10)
+                    }
                 }
-                HStack(spacing: 10) {
-                    cmdBtn("Sleep PC", cmd: "rundll32.exe powrprof.dll,SetSuspendState 0,1,0", color: .indigo)
-                    cmdBtn("Lock PC", cmd: "rundll32.exe user32.dll,LockWorkStation", color: .yellow)
+                .padding(12)
+                .background(Color.white.opacity(0.05))
+                .cornerRadius(14)
+
+                // 3. Native Apple Watch Face (.watchface) Pack Installer
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Install Custom Apple Watch Faces (.watchface)")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                    Text("J.A.R.V.I.S. Wrist OS is embedded inside OmniContainer.ipa (Watch/OmniWatch.app). You can also tap below to add native .watchface files directly to Apple's Watch app:")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+
+                    HStack(spacing: 8) {
+                        watchFaceLink("Stark HUD", file: "Stark_HUD.watchface", color: .cyan)
+                        watchFaceLink("007 Q-Branch", file: "GoldenEye_007.watchface", color: .orange)
+                        watchFaceLink("Pip-Boy 3000", file: "PipBoy_3000.watchface", color: .green)
+                    }
                 }
+                .padding(12)
+                .background(Color.white.opacity(0.05))
+                .cornerRadius(14)
             }
             .padding()
         }
+    }
+
+    func watchFaceLink(_ title: String, file: String, color: Color) -> some View {
+        Button(title) {
+            if let u = URL(string: "http://100.102.4.54:9090/api/watchface/\(file)") {
+                UIApplication.shared.open(u)
+            }
+        }
+        .font(.system(size: 11, weight: .bold))
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(color.opacity(0.22))
+        .foregroundColor(color)
+        .cornerRadius(8)
+    }
+
+    func unlockWorkPC() async {
+        let p = winPin.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        if let u = URL(string: "http://100.102.4.54:9090/api/power/unlock?pin=\(p)") {
+            _ = try? await URLSession.shared.data(from: u)
+        }
+        if let u2 = URL(string: "http://100.102.4.54:9095/wake") {
+            _ = try? await URLSession.shared.data(from: u2)
+        }
+        status = "🔓 Work PC Woken & Session Unlocked!"
+    }
+
+    func unlockBazzitePC() async {
+        let unlockCmd = "loginctl unlock-sessions; for s in $(loginctl list-sessions --no-legend | awk '{print $1}'); do loginctl unlock-session $s; done; DISPLAY=:0 xset dpms force on 2>/dev/null; qdbus org.freedesktop.ScreenSaver /ScreenSaver SetActive false 2>/dev/null; dbus-send --session --dest=org.freedesktop.ScreenSaver --type=method_call /ScreenSaver org.freedesktop.ScreenSaver.SetActive boolean:false 2>/dev/null; kscreen-doctor --dpms on 2>/dev/null"
+        if let bz = URL(string: "http://100.79.246.119:9091/api/antigravity/exec") {
+            var req = URLRequest(url: bz)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 4
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": unlockCmd, "timeout": 6])
+            _ = try? await URLSession.shared.data(for: req)
+        }
+        if let w = URL(string: "http://100.102.4.54:9090/api/power/bazzite/unlock") {
+            _ = try? await URLSession.shared.data(from: w)
+        }
+        status = "🔓 Bazzite PC WOL + Session Unlock Dispatched!"
     }
 
     func btn(_ label: String, flag: String, color: Color) -> some View {
