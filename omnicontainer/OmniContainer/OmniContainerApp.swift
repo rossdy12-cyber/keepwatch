@@ -1280,7 +1280,7 @@ struct MiniYouTubeProModule: View {
             if mode == 0 {
                 FastCachedWebView(cacheKey: "youtube-pro", urlString: "https://m.youtube.com", enableYouTubePro: true)
             } else {
-                FastCachedWebView(cacheKey: "metube-30094", urlString: "http://\(host):30094")
+                FastCachedWebView(cacheKey: "metube-30094", urlString: "https://metube.nas-server.co.uk")
             }
         }
     }
@@ -1294,7 +1294,7 @@ struct MiniKeepwatchModule: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("Section", selection: $tab) {
-                Text("Dashboard (:3000)").tag(0)
+                Text("Dashboard").tag(0)
                 Text("Sonarr").tag(1)
                 Text("Radarr").tag(2)
                 Text("Jellyseerr").tag(3)
@@ -1304,15 +1304,15 @@ struct MiniKeepwatchModule: View {
             .padding(8)
 
             if tab == 0 {
-                FastCachedWebView(cacheKey: "kw-homepage", urlString: "http://\(host):3000")
+                FastCachedWebView(cacheKey: "kw-homepage", urlString: "https://dashboard.nas-server.co.uk")
             } else if tab == 1 {
-                FastCachedWebView(cacheKey: "kw-sonarr", urlString: "http://\(host):30113")
+                FastCachedWebView(cacheKey: "kw-sonarr", urlString: "https://sonarr.nas-server.co.uk")
             } else if tab == 2 {
-                FastCachedWebView(cacheKey: "kw-radarr", urlString: "http://\(host):30025")
+                FastCachedWebView(cacheKey: "kw-radarr", urlString: "https://radarr.nas-server.co.uk")
             } else if tab == 3 {
-                FastCachedWebView(cacheKey: "kw-jellyseerr", urlString: "http://\(host):5055")
+                FastCachedWebView(cacheKey: "kw-jellyseerr", urlString: "https://jellyseerr.nas-server.co.uk")
             } else {
-                FastCachedWebView(cacheKey: "kw-portainer", urlString: "https://\(host):31015")
+                FastCachedWebView(cacheKey: "kw-portainer", urlString: "https://portainer.nas-server.co.uk")
             }
         }
     }
@@ -1326,7 +1326,7 @@ struct MiniJarvisModule: View {
             Picker("Jarvis", selection: $tab) {
                 Text("Jarvis Console").tag(0)
                 Text("Navidrome Music").tag(1)
-                Text("Paydays (:8450)").tag(2)
+                Text("Paydays").tag(2)
             }
             .pickerStyle(.segmented)
             .padding(8)
@@ -1334,9 +1334,9 @@ struct MiniJarvisModule: View {
             if tab == 0 {
                 FastCachedWebView(cacheKey: "jarvis-web", urlString: "https://jarvis.nas-server.co.uk")
             } else if tab == 1 {
-                FastCachedWebView(cacheKey: "navidrome-web", urlString: "http://\(host):30043")
+                FastCachedWebView(cacheKey: "navidrome-web", urlString: "https://navidrome.nas-server.co.uk")
             } else {
-                FastCachedWebView(cacheKey: "paydays-web", urlString: "http://\(host):8450")
+                FastCachedWebView(cacheKey: "paydays-web", urlString: "https://paydays.nas-server.co.uk")
             }
         }
     }
@@ -1349,21 +1349,21 @@ struct MiniNASPortalModule: View {
         VStack(spacing: 0) {
             Picker("Portal", selection: $tab) {
                 Text("Apps & 2FA").tag(0)
-                Text("TrueNAS UI").tag(1)
-                Text("Vaultwarden").tag(2)
+                Text("Vaultwarden").tag(1)
+                Text("TrueNAS UI").tag(2)
                 Text("NZBGet").tag(3)
             }
             .pickerStyle(.segmented)
             .padding(8)
 
             if tab == 0 {
-                FastCachedWebView(cacheKey: "np-hub", urlString: "http://\(host):8766/app/nasportal")
+                FastCachedWebView(cacheKey: "np-hub", urlString: "https://portal.nas-server.co.uk/app/nasportal")
             } else if tab == 1 {
-                FastCachedWebView(cacheKey: "np-truenas", urlString: "http://\(host):82")
+                FastCachedWebView(cacheKey: "np-vault", urlString: "https://vw.nas-server.co.uk")
             } else if tab == 2 {
-                FastCachedWebView(cacheKey: "np-vault", urlString: "http://\(host):8082")
+                FastCachedWebView(cacheKey: "np-truenas", urlString: "https://nas-server.co.uk")
             } else {
-                FastCachedWebView(cacheKey: "np-nzbget", urlString: "http://\(host):6789")
+                FastCachedWebView(cacheKey: "np-nzbget", urlString: "https://nzbget.nas-server.co.uk")
             }
         }
     }
@@ -1467,7 +1467,7 @@ struct MiniSentryCamModule: View {
                     .padding(12)
                 }
             } else {
-                FastCachedWebView(cacheKey: "frigate-ui", urlString: "http://\(host):5000")
+                FastCachedWebView(cacheKey: "frigate-ui", urlString: "https://frigate.nas-server.co.uk")
             }
         }
         .onReceive(timer) { _ in
@@ -1510,8 +1510,8 @@ struct MiniNetRadarModule: View {
         VStack(spacing: 0) {
             Picker("Mode", selection: $tab) {
                 Text("Native SpeedTest").tag(0)
-                Text("OpenSpeedTest (:30116)").tag(1)
-                Text("NPM (:30020)").tag(2)
+                Text("OpenSpeedTest (SSL)").tag(1)
+                Text("NPM (SSL)").tag(2)
             }
             .pickerStyle(.segmented)
             .padding(8)
@@ -1571,9 +1571,9 @@ struct MiniNetRadarModule: View {
                     .padding()
                 }
             } else if tab == 1 {
-                FastCachedWebView(cacheKey: "ost-30116", urlString: "http://\(host):30116")
+                FastCachedWebView(cacheKey: "ost-30116", urlString: "https://speedtest.nas-server.co.uk")
             } else {
-                FastCachedWebView(cacheKey: "npm-30020", urlString: "http://\(host):30020")
+                FastCachedWebView(cacheKey: "npm-30020", urlString: "https://npm.nas-server.co.uk")
             }
         }
     }
@@ -1612,7 +1612,7 @@ struct MiniPhotoPulseModule: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("Mode", selection: $tab) {
-                Text("Immich (:30041)").tag(0)
+                Text("Immich (SSL)").tag(0)
                 Text("ImmichFrame (:9180)").tag(1)
                 Text("Apple 2FA").tag(2)
             }
@@ -1620,7 +1620,7 @@ struct MiniPhotoPulseModule: View {
             .padding(8)
 
             if tab == 0 {
-                FastCachedWebView(cacheKey: "immich-main", urlString: "http://\(host):30041")
+                FastCachedWebView(cacheKey: "immich-main", urlString: "https://immich.nas-server.co.uk")
             } else if tab == 1 {
                 FastCachedWebView(cacheKey: "immich-frame", urlString: "http://\(host):9180")
             } else {
@@ -1670,16 +1670,16 @@ struct MiniSoulSeekrModule: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("Service", selection: $tab) {
-                Text("Hearr (:5070)").tag(0)
-                Text("slskd (:5030)").tag(1)
+                Text("Hearr (SSL)").tag(0)
+                Text("slskd (SSL)").tag(1)
             }
             .pickerStyle(.segmented)
             .padding(8)
 
             if tab == 0 {
-                FastCachedWebView(cacheKey: "hearr-5070", urlString: "http://\(host):5070")
+                FastCachedWebView(cacheKey: "hearr-5070", urlString: "https://hearr.nas-server.co.uk")
             } else {
-                FastCachedWebView(cacheKey: "slskd-5030", urlString: "http://\(host):5030")
+                FastCachedWebView(cacheKey: "slskd-5030", urlString: "https://slskd.nas-server.co.uk")
             }
         }
     }
