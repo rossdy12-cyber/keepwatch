@@ -434,9 +434,9 @@ class OmniWorkspaceStore: ObservableObject {
                 <key>PayloadDisplayName</key>
                 <string>\(item.title)</string>
                 <key>PayloadIdentifier</key>
-                <string>com.ross.omnicontainer.webclip.v3.\(item.id)</string>
+                <string>com.ross.omnicontainer.webclip.v5.\(item.id)</string>
                 <key>PayloadType</key>
-                <string>com.apple.webclip.managed</string>
+                <string>com.apple.webClip.managed</string>
                 <key>PayloadUUID</key>
                 <string>\(uuid)</string>
                 <key>PayloadVersion</key>
@@ -483,7 +483,7 @@ class OmniWorkspaceStore: ObservableObject {
     }
 
     func installClipAppToHomeScreen(key: String) {
-        if let u = URL(string: "http://127.0.0.1:8765/clip/\(key).mobileconfig") {
+        if let u = URL(string: "http://\(truenasHost):8766/clip/\(key).mobileconfig") {
             UIApplication.shared.open(u)
         }
     }
