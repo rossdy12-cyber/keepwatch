@@ -5,6 +5,7 @@ import Network
 import UIKit
 import Compression
 import AVFoundation
+import MediaPlayer
 
 struct OmniAppDescriptor: Identifiable {
     let id: String
@@ -152,25 +153,105 @@ enum IPAArchiveExtractor {
     }
 }
 
-// MARK: - Persistent WKWebView Cache with Built-In AdBlock & Background Audio (Zero Reload When Switching!)
+// MARK: - Native Background Audio & Lock-Screen Media Controller + Persistent WKWebView Cache
 @MainActor
 final class WebViewCache {
     static let shared = WebViewCache()
     private var views: [String: WKWebView] = [:]
     private var loadedURLs: [String: String] = [:]
+    private var silentPlayer: AVAudioPlayer?
+    private var bgTask: UIBackgroundTaskIdentifier = .invalid
+    private var isConfigured = false
 
-    // AdBlock + YouTube Sponsor/Ad Auto-Skipper Script
-    private let youtubeProScript = """
+    // Injected AT DOCUMENT START so YouTube never detects backgrounding or tab hiding!
+    private let youtubeDocumentStartScript = """
+    (function() {
+      try {
+        Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+        Object.defineProperty(document, 'webkitHidden', { get: function() { return false; }, configurable: true });
+        Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+        Object.defineProperty(document, 'webkitVisibilityState', { get: function() { return 'visible'; }, configurable: true });
+      } catch (e) {}
+
+      const blockedEvents = ['visibilitychange', 'webkitvisibilitychange', 'blur', 'pagehide', 'freeze'];
+      const origDocAdd = Document.prototype.addEventListener;
+      Document.prototype.addEventListener = function(type, listener, options) {
+        if (blockedEvents.indexOf(String(type).toLowerCase()) !== -1) { return; }
+        return origDocAdd.call(this, type, listener, options);
+      };
+      const origWinAdd = Window.prototype.addEventListener;
+      Window.prototype.addEventListener = function(type, listener, options) {
+        if (blockedEvents.indexOf(String(type).toLowerCase()) !== -1) { return; }
+        return origWinAdd.call(this, type, listener, options);
+      };
+
+      window.__omniBgTransitionUntil = 0;
+      window.__omniLastPlayingVideo = null;
+
+      const origPlay = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function() {
+        window.__omniLastPlayingVideo = this;
+        this.setAttribute('playsinline', '');
+        this.setAttribute('webkit-playsinline', '');
+        return origPlay.apply(this, arguments);
+      };
+
+      const origPause = HTMLMediaElement.prototype.pause;
+      HTMLMediaElement.prototype.pause = function() {
+        if (Date.now() < window.__omniBgTransitionUntil) {
+          return;
+        }
+        return origPause.apply(this, arguments);
+      };
+
+      window.__omniForceResumeMedia = function() {
+        window.__omniBgTransitionUntil = Date.now() + 5000;
+        const vids = document.querySelectorAll('video, audio');
+        vids.forEach(function(v) {
+          try {
+            v.setAttribute('playsinline', '');
+            v.setAttribute('webkit-playsinline', '');
+            origPlay.call(v).catch(function(){});
+          } catch(e) {}
+        });
+        if (window.__omniLastPlayingVideo) {
+          try { origPlay.call(window.__omniLastPlayingVideo).catch(function(){}); } catch(e) {}
+        }
+      };
+
+      window.__omniTogglePiP = function() {
+        const v = document.querySelector('video') || window.__omniLastPlayingVideo;
+        if (!v) return 'No active video found';
+        try {
+          if (v.webkitSupportsPresentationMode && typeof v.webkitSetPresentationMode === 'function') {
+            const nextMode = (v.webkitPresentationMode === 'picture-in-picture') ? 'inline' : 'picture-in-picture';
+            v.webkitSetPresentationMode(nextMode);
+            return 'PiP: ' + nextMode;
+          } else if (document.pictureInPictureEnabled && v.requestPictureInPicture) {
+            v.requestPictureInPicture();
+            return 'PiP requested';
+          }
+        } catch(e) { return 'PiP err: ' + e; }
+        return 'PiP unsupported on this element';
+      };
+    })();
+    """
+
+    // Injected AT DOCUMENT END for CSS Ad-Hiding, Sponsor Auto-Skip & Lock-Screen Metadata
+    private let youtubeDocumentEndScript = """
     (function() {
       const style = document.createElement('style');
       style.innerHTML = `
         ytm-promoted-sparkles-web-renderer, ytm-promoted-video-renderer,
         ytm-companion-ad-renderer, .ad-showing .video-ads, .ytp-ad-module,
-        .ytp-ad-overlay-container, ytd-ad-slot-renderer, ytm-ad-slot-renderer {
+        .ytp-ad-overlay-container, ytd-ad-slot-renderer, ytm-ad-slot-renderer,
+        ytm-mealbar-promo-renderer, ytm-statement-banner-renderer {
           display: none !important;
         }
       `;
-      document.documentElement.appendChild(style);
+      if (document.documentElement) {
+        document.documentElement.appendChild(style);
+      }
       setInterval(function() {
         const skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
         if (skipBtn) { skipBtn.click(); }
@@ -178,11 +259,138 @@ final class WebViewCache {
         if (adShowing && !isNaN(adShowing.duration) && adShowing.duration > 0) {
           adShowing.currentTime = adShowing.duration;
         }
+        const v = document.querySelector('video');
+        if (v && !v.paused) {
+          window.__omniLastPlayingVideo = v;
+        }
       }, 400);
     })();
     """
 
+    private func setupAudioAndBackgroundHooksIfNeeded() {
+        guard !isConfigured else { return }
+        isConfigured = true
+
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setActive(true)
+        } catch {}
+
+        // Build tiny 1-second silent WAV buffer so iOS kernel keeps OmniContainer's audio session & WebContent process alive
+        if silentPlayer == nil, let wavData = Self.makeSilentWAVData() {
+            if let player = try? AVAudioPlayer(data: wavData) {
+                player.numberOfLoops = -1
+                player.volume = 0.01
+                player.prepareToPlay()
+                player.play()
+                silentPlayer = player
+            }
+        }
+
+        // Configure iOS Lock Screen & Control Center Play/Pause Remote Controls
+        let cc = MPRemoteCommandCenter.shared()
+        cc.playCommand.isEnabled = true
+        cc.playCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.forceResumeAllWebViews() }
+            return .success
+        }
+        cc.pauseCommand.isEnabled = true
+        cc.pauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.pauseAllWebViews() }
+            return .success
+        }
+
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: "OmniContainer YouTube Pro",
+            MPMediaItemPropertyArtist: "Background Audio Active",
+            MPNowPlayingInfoPropertyPlaybackRate: 1.0
+        ]
+
+        NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleEnteringBackground()
+            }
+        }
+        NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleEnteringBackground()
+            }
+        }
+    }
+
+    private func handleEnteringBackground() {
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        if let player = silentPlayer, !player.isPlaying {
+            player.play()
+        }
+        if bgTask == .invalid {
+            bgTask = UIApplication.shared.beginBackgroundTask(withName: "OmniBackgroundAudio") { [weak self] in
+                if let t = self?.bgTask, t != .invalid {
+                    UIApplication.shared.endBackgroundTask(t)
+                    self?.bgTask = .invalid
+                }
+            }
+        }
+        // Multi-stage resume to beat WebKit's internal background pause hook
+        for delay in [0.05, 0.25, 0.6, 1.2, 2.2, 3.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.forceResumeAllWebViews()
+            }
+        }
+    }
+
+    func forceResumeAllWebViews() {
+        try? AVAudioSession.sharedInstance().setActive(true)
+        if let player = silentPlayer, !player.isPlaying {
+            player.play()
+        }
+        for (_, wv) in views {
+            wv.evaluateJavaScript("window.__omniForceResumeMedia && window.__omniForceResumeMedia();", completionHandler: nil)
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: "YouTube Pro (OmniContainer)",
+            MPMediaItemPropertyArtist: "Background Stream Active",
+            MPNowPlayingInfoPropertyPlaybackRate: 1.0
+        ]
+    }
+
+    func pauseAllWebViews() {
+        for (_, wv) in views {
+            wv.evaluateJavaScript("window.__omniBgTransitionUntil = 0; document.querySelectorAll('video,audio').forEach(v => v.pause());", completionHandler: nil)
+        }
+    }
+
+    func togglePiP(for key: String) {
+        views[key]?.evaluateJavaScript("window.__omniTogglePiP && window.__omniTogglePiP();", completionHandler: nil)
+    }
+
+    private static func makeSilentWAVData() -> Data? {
+        let sampleRate: UInt32 = 8000
+        let numSamples: UInt32 = 8000
+        let dataSize = numSamples * 2
+        let fileSize = 36 + dataSize
+        var d = Data()
+        d.append(contentsOf: [0x52, 0x49, 0x46, 0x46]) // "RIFF"
+        withUnsafeBytes(of: fileSize.littleEndian) { d.append(contentsOf: $0) }
+        d.append(contentsOf: [0x57, 0x41, 0x56, 0x45]) // "WAVE"
+        d.append(contentsOf: [0x66, 0x6D, 0x74, 0x20]) // "fmt "
+        withUnsafeBytes(of: UInt32(16).littleEndian) { d.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt16(1).littleEndian) { d.append(contentsOf: $0) }  // PCM
+        withUnsafeBytes(of: UInt16(1).littleEndian) { d.append(contentsOf: $0) }  // Mono
+        withUnsafeBytes(of: sampleRate.littleEndian) { d.append(contentsOf: $0) }
+        withUnsafeBytes(of: (sampleRate * 2).littleEndian) { d.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt16(2).littleEndian) { d.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt16(16).littleEndian) { d.append(contentsOf: $0) }
+        d.append(contentsOf: [0x64, 0x61, 0x74, 0x61]) // "data"
+        withUnsafeBytes(of: dataSize.littleEndian) { d.append(contentsOf: $0) }
+        d.append(Data(count: Int(dataSize)))
+        return d
+    }
+
     func webView(for key: String, urlString: String, enableYouTubePro: Bool = false) -> WKWebView {
+        setupAudioAndBackgroundHooksIfNeeded()
         if let existing = views[key] {
             if loadedURLs[key] != urlString, let u = URL(string: urlString) {
                 loadedURLs[key] = urlString
@@ -190,8 +398,6 @@ final class WebViewCache {
             }
             return existing
         }
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
 
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
@@ -199,8 +405,10 @@ final class WebViewCache {
         config.mediaTypesRequiringUserActionForPlayback = []
 
         if enableYouTubePro {
-            let script = WKUserScript(source: youtubeProScript, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
-            config.userContentController.addUserScript(script)
+            let startScript = WKUserScript(source: youtubeDocumentStartScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+            let endScript = WKUserScript(source: youtubeDocumentEndScript, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
+            config.userContentController.addUserScript(startScript)
+            config.userContentController.addUserScript(endScript)
         }
 
         let w = WKWebView(frame: .zero, configuration: config)
@@ -832,26 +1040,53 @@ struct EmbeddedLiveAppHost: View {
 struct MiniYouTubeProModule: View {
     let host: String
     @State private var mode = 0
-    @State private var grabStatus = "Ad-Block, Sponsor Auto-Skip & Background Audio Active"
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "play.rectangle.fill").foregroundColor(.red)
-                Text("YouTube Pro (Ad-Free + PiP)")
+                Text("YouTube Pro")
                     .font(.caption.bold())
                     .foregroundColor(.white)
+                Button {
+                    WebViewCache.shared.togglePiP(for: "youtube-pro")
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "pip.enter")
+                        Text("PiP")
+                    }
+                    .font(.system(size: 11, weight: .bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.red.opacity(0.28))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+                }
+                Button {
+                    WebViewCache.shared.forceResumeAllWebViews()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "speaker.wave.2.fill")
+                        Text("BG Audio")
+                    }
+                    .font(.system(size: 11, weight: .bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.green.opacity(0.25))
+                    .foregroundColor(.green)
+                    .cornerRadius(7)
+                }
                 Spacer()
                 Picker("View", selection: $mode) {
                     Text("YouTube").tag(0)
-                    Text("MeTube (:30094)").tag(1)
+                    Text("MeTube").tag(1)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 190)
+                .frame(width: 145)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.black.opacity(0.75))
+            .background(Color.black.opacity(0.85))
 
             if mode == 0 {
                 FastCachedWebView(cacheKey: "youtube-pro", urlString: "https://m.youtube.com", enableYouTubePro: true)

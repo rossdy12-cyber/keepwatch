@@ -63,4 +63,8 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        UIBackgroundModes:
+          - audio
+          - fetch
+          - processing
         NSLocalNetworkUsageDescription: "OmniContainer runs all your apps simultaneously in memory and serves Home Screen ClipApp profiles."
