@@ -22,6 +22,8 @@ on:
       - ".github/workflows/build-sentrycam-ipa.yml"
       - "aniimo-pilot/**"
       - ".github/workflows/build-aniimo-pilot-ipa.yml"
+      - "omnicontainer/**"
+      - ".github/workflows/build-omnicontainer-ipa.yml"
       - "photopulse/**"
       - ".github/workflows/build-photopulse-ipa.yml"
       - "netradar/**"

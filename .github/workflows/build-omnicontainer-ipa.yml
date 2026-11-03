@@ -1,0 +1,58 @@
+name: Build OmniContainer IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "omnicontainer/**"
+      - ".github/workflows/build-omnicontainer-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: omnicontainer
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build OmniContainer (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project OmniContainer.xcodeproj \
+            -target OmniContainer \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package Payload/OmniContainer.app into OmniContainer.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/OmniContainer.app out/Payload/
+          cd out
+          zip -qry OmniContainer.ipa Payload
+          ls -lh OmniContainer.ipa
+
+      - name: Upload OmniContainer.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniContainer-ipa
+          path: omnicontainer/out/OmniContainer.ipa
+          retention-days: 30
