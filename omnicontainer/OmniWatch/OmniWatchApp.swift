@@ -57,6 +57,9 @@ final class WristOSStore: ObservableObject {
 
     private var audioPlayer: AVAudioPlayer?
     private let healthStore = HKHealthStore()
+    private var extendedSession: WKExtendedRuntimeSession?
+    @Published var weatherSummary: String = "14°C CLEAR"
+    @Published var stayAwakePinned: Bool = true
 
     let faceNames = [
         "STARK ARC HUD",
@@ -69,6 +72,27 @@ final class WristOSStore: ObservableObject {
     init() {
         updateBattery()
         requestHealthKit()
+        startAlwaysOnWatchFaceSession()
+        Task { await fetchFreeWeather() }
+    }
+
+    func startAlwaysOnWatchFaceSession() {
+        let s = WKExtendedRuntimeSession()
+        s.start()
+        extendedSession = s
+        stayAwakePinned = true
+    }
+
+    func fetchFreeWeather() async {
+        guard let u = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=51.5074&longitude=-0.1278&current_weather=true") else { return }
+        if let (data, _) = try? await URLSession.shared.data(from: u),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let cw = obj["current_weather"] as? [String: Any],
+           let temp = cw["temperature"] as? Double {
+            let code = (cw["weathercode"] as? Int) ?? 0
+            let cond = code == 0 ? "CLEAR" : (code <= 3 ? "CLOUDY" : "RAIN")
+            weatherSummary = "\(Int(temp.rounded()))°C \(cond)"
+        }
     }
 
     func playHaptic(_ type: WKHapticType = .click) {
@@ -116,7 +140,7 @@ final class WristOSStore: ObservableObject {
         playHaptic(.notification)
         statusLine = "Unlocking Work PC..."
         let pinParam = windowsPin.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let u1 = URL(string: "http://\(workPCHost):9090/api/power/unlock?pin=\(pinParam)")
+        let u1 = URL(string: "http://\(workPCHost):9090/u")
         let u2 = URL(string: "http://\(workPCHost):9095/wake")
 
         var ok = false
@@ -166,7 +190,7 @@ final class WristOSStore: ObservableObject {
         }
 
         // Also trigger WOL + Unlock relay via Work PC Bridge & TrueNAS
-        if let wURL = URL(string: "http://\(workPCHost):9090/api/power/bazzite/unlock") {
+        if let wURL = URL(string: "http://\(workPCHost):9090/b") {
             var req = URLRequest(url: wURL)
             req.timeoutInterval = 4
             _ = try? await URLSession.shared.data(for: req)

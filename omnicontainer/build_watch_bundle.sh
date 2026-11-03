@@ -61,6 +61,12 @@ cat > "$APP_DIR/Info.plist" << 'EOF'
   <string>com.ross.omnicontainer</string>
   <key>WKRunsIndependentlyOfCompanionApp</key>
   <true/>
+  <key>WKBackgroundModes</key>
+  <array>
+    <string>self-care</string>
+    <string>mindfulness</string>
+    <string>workout-processing</string>
+  </array>
   <key>NSAppTransportSecurity</key>
   <dict>
     <key>NSAllowsArbitraryLoads</key>
