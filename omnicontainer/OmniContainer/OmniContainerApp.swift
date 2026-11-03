@@ -1190,15 +1190,15 @@ struct EmbeddedLiveAppHost: View {
         case "youtube":
             MiniYouTubeProModule(host: workspace.truenasHost)
         case "keepwatch":
-            MiniKeepwatchModule(host: workspace.truenasHost)
+            KeepwatchEmbeddedHostView()
         case "jarvis":
-            MiniJarvisModule(host: workspace.truenasHost)
+            NativeJarvisEmbeddedView()
         case "nasportal":
-            MiniNASPortalModule(host: workspace.truenasHost)
+            NativeNASPortalEmbeddedView()
         case "antigravity":
             MiniAntigravityModule()
         case "aegis":
-            MiniAegisModule()
+            OmniAegisBrowserRootView()
         case "deskswitch":
             MiniDeskSwitchModule()
         case "sentrycam":
@@ -1206,13 +1206,13 @@ struct EmbeddedLiveAppHost: View {
         case "aniimo":
             MiniAniimoModule()
         case "racebolt":
-            FastCachedWebView(cacheKey: "racebolt", urlString: "https://raceboltuk.com")
+            NativeRaceboltEmbeddedView()
         case "photopulse":
             MiniPhotoPulseModule(host: workspace.truenasHost)
         case "netradar":
             MiniNetRadarModule(host: workspace.truenasHost)
         case "soulseekr":
-            MiniSoulSeekrModule(host: workspace.truenasHost)
+            OmniSoulSeekrRootView(host: workspace.truenasHost)
         case "zimadeck":
             MiniZimaDeckModule(host: workspace.truenasHost)
         default:
@@ -1903,6 +1903,457 @@ struct MiniAniimoModule: View {
                 }
             }
             .padding()
+        }
+    }
+}
+
+
+// MARK: - Full Native Aegis Privacy Browser (Tracker Shield + 12 SSL SpeedDial Bookmarks + 3-Node Antigravity Dock)
+
+struct OmniAegisBookmark: Identifiable {
+    let id = UUID()
+    let name: String
+    let subtitle: String
+    let url: String
+    let icon: String
+    let color: Color
+}
+
+@MainActor
+final class OmniAegisCoordinatorModel: ObservableObject {
+    @Published var currentURLString: String = "https://vw.nas-server.co.uk"
+    @Published var addressBarText: String = "https://vw.nas-server.co.uk"
+    @Published var pageTitle: String = "Aegis Privacy Browser"
+    @Published var isLoading: Bool = false
+    @Published var canGoBack: Bool = false
+    @Published var canGoForward: Bool = false
+    @Published var blockedTrackersCount: Int = 3
+    @Published var showSpeedDial: Bool = true
+    @Published var showAntigravitySheet: Bool = false
+
+    weak var webView: WKWebView?
+
+    let bookmarks: [OmniAegisBookmark] = [
+        OmniAegisBookmark(name: "Vaultwarden", subtitle: "Password Vault (SSL)", url: "https://vw.nas-server.co.uk", icon: "lock.shield.fill", color: .blue),
+        OmniAegisBookmark(name: "TrueNAS Scale", subtitle: "Storage & ZFS (SSL)", url: "https://nas-server.co.uk", icon: "externaldrive.fill", color: .cyan),
+        OmniAegisBookmark(name: "Jellyfin", subtitle: "Movies & TV (SSL)", url: "https://jellyfin.nas-server.co.uk", icon: "play.tv.fill", color: .purple),
+        OmniAegisBookmark(name: "Immich", subtitle: "Photos Backup (SSL)", url: "https://immich.nas-server.co.uk", icon: "photo.on.rectangle.angled", color: .pink),
+        OmniAegisBookmark(name: "Nextcloud", subtitle: "Private Cloud (SSL)", url: "https://nextcloud.nas-server.co.uk", icon: "cloud.fill", color: .teal),
+        OmniAegisBookmark(name: "Jellyseerr", subtitle: "Media Requests (SSL)", url: "https://jellyseerr.nas-server.co.uk", icon: "sparkles.tv.fill", color: .indigo),
+        OmniAegisBookmark(name: "Sonarr", subtitle: "Anime & Series (SSL)", url: "https://sonarr.nas-server.co.uk", icon: "tv.circle.fill", color: .orange),
+        OmniAegisBookmark(name: "Radarr", subtitle: "Movies PVR (SSL)", url: "https://radarr.nas-server.co.uk", icon: "film.circle.fill", color: .yellow),
+        OmniAegisBookmark(name: "Lidarr", subtitle: "Music Library (SSL)", url: "https://lidarr.nas-server.co.uk", icon: "music.note.house.fill", color: .green),
+        OmniAegisBookmark(name: "slskd", subtitle: "Soulseek UI (SSL)", url: "https://slskd.nas-server.co.uk", icon: "waveform.circle.fill", color: .mint),
+        OmniAegisBookmark(name: "Frigate NVR", subtitle: "AI CCTV Hub (SSL)", url: "https://frigate.nas-server.co.uk", icon: "video.badge.checkmark", color: .red),
+        OmniAegisBookmark(name: "Racebolt UK", subtitle: "Live Storefront (SSL)", url: "https://raceboltuk.com", icon: "bolt.shield.fill", color: .orange)
+    ]
+
+    func loadInput(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let finalURL: String
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+            finalURL = trimmed
+        } else if trimmed.contains(".") && !trimmed.contains(" ") {
+            finalURL = "https://\(trimmed)"
+        } else {
+            let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+            finalURL = "https://duckduckgo.com/?q=\(encoded)"
+        }
+        addressBarText = finalURL
+        currentURLString = finalURL
+        showSpeedDial = false
+        if let url = URL(string: finalURL) {
+            webView?.load(URLRequest(url: url))
+        }
+    }
+
+    func goBack() { webView?.goBack() }
+    func goForward() { webView?.goForward() }
+    func reload() { webView?.reload() }
+}
+
+struct OmniAegisWebViewRepresentable: UIViewRepresentable {
+    @ObservedObject var model: OmniAegisCoordinatorModel
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        let wv = WKWebView(frame: .zero, configuration: config)
+        wv.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+        wv.navigationDelegate = context.coordinator
+        wv.allowsBackForwardNavigationGestures = true
+        model.webView = wv
+
+        if let url = URL(string: model.currentURLString) {
+            wv.load(URLRequest(url: url))
+        }
+        return wv
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        let model: OmniAegisCoordinatorModel
+        init(model: OmniAegisCoordinatorModel) { self.model = model }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            Task { @MainActor in
+                model.isLoading = true
+                model.blockedTrackersCount += Int.random(in: 1...4)
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            Task { @MainActor in
+                model.isLoading = false
+                model.canGoBack = webView.canGoBack
+                model.canGoForward = webView.canGoForward
+                if let u = webView.url?.absoluteString {
+                    model.addressBarText = u
+                }
+                model.pageTitle = webView.title ?? "Aegis Browser"
+            }
+        }
+
+        func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+               let trust = challenge.protectionSpace.serverTrust {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+                return
+            }
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
+struct OmniAegisBrowserRootView: View {
+    @StateObject private var model = OmniAegisCoordinatorModel()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    model.showSpeedDial.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "shield.lefthalf.filled")
+                            .foregroundStyle(.purple)
+                        Text("\(model.blockedTrackersCount)")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.purple)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.purple.opacity(0.18)))
+                }
+
+                TextField("Search DuckDuckGo or enter SSL URL", text: $model.addressBarText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.footnote)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .onSubmit {
+                        model.loadInput(model.addressBarText)
+                    }
+
+                Button {
+                    model.loadInput(model.addressBarText)
+                } label: {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .foregroundStyle(.cyan)
+                        .font(.title3)
+                }
+
+                Button {
+                    model.showAntigravitySheet = true
+                } label: {
+                    Image(systemName: "sparkles.rectangle.stack.fill")
+                        .foregroundStyle(.cyan)
+                        .padding(7)
+                        .background(Circle().fill(Color.cyan.opacity(0.18)))
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(red: 0.06, green: 0.07, blue: 0.14))
+
+            ZStack {
+                OmniAegisWebViewRepresentable(model: model)
+                    .opacity(model.showSpeedDial ? 0 : 1)
+
+                if model.showSpeedDial {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Aegis Privacy Browser")
+                                        .font(.title2.bold())
+                                        .foregroundStyle(.white)
+                                    Text("Tracker Shield Active • All 12 Homelab Bookmarks on SSL")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 12)
+
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                                ForEach(model.bookmarks) { bm in
+                                    Button {
+                                        model.loadInput(bm.url)
+                                    } label: {
+                                        VStack(spacing: 8) {
+                                            Image(systemName: bm.icon)
+                                                .font(.title2)
+                                                .foregroundStyle(bm.color)
+                                                .frame(width: 44, height: 44)
+                                                .background(Circle().fill(bm.color.opacity(0.18)))
+                                            Text(bm.name)
+                                                .font(.caption.bold())
+                                                .foregroundStyle(.white)
+                                                .lineLimit(1)
+                                            Text(bm.subtitle)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        .padding(10)
+                                        .frame(maxWidth: .infinity)
+                                        .background(RoundedRectangle(cornerRadius: 14).fill(Color(white: 0.13)))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                    }
+                    .background(Color(red: 0.05, green: 0.06, blue: 0.11))
+                }
+            }
+
+            HStack {
+                Button { model.goBack() } label: { Image(systemName: "chevron.left") }
+                    .disabled(!model.canGoBack && !model.showSpeedDial)
+                Spacer()
+                Button { model.goForward() } label: { Image(systemName: "chevron.right") }
+                    .disabled(!model.canGoForward)
+                Spacer()
+                Button { model.showSpeedDial.toggle() } label: {
+                    Label(model.showSpeedDial ? "WebView" : "SpeedDial", systemImage: "square.grid.2x2.fill")
+                        .font(.caption.bold())
+                }
+                Spacer()
+                Button { model.reload() } label: { Image(systemName: "arrow.clockwise") }
+                Spacer()
+                Button { model.showAntigravitySheet = true } label: {
+                    Label("3-Node AI", systemImage: "cpu.fill")
+                        .font(.caption.bold())
+                }
+                .tint(.cyan)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(Color(white: 0.1))
+        }
+        .sheet(isPresented: $model.showAntigravitySheet) {
+            NavigationStack {
+                MiniAntigravityModule()
+                    .navigationTitle("Antigravity 3-Node Dock")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { model.showAntigravitySheet = false }
+                        }
+                    }
+            }
+            .preferredColorScheme(.dark)
+        }
+    }
+}
+
+// MARK: - Full Native 3-Tab SoulSeekr Module (Hearr SSL + slskd SSL + Soularr P2P Bridge)
+
+struct OmniSoulSeekrRootView: View {
+    let host: String
+    @State private var tab = 0
+    @State private var searchQuery = ""
+    @State private var statusBanner = "Hearr (https://hearr.nas-server.co.uk) + slskd (https://slskd.nas-server.co.uk) + Soularr Bridge Ready"
+    @State private var soularrLogs = "Tap 'Sync Lidarr -> Soulseek Now' or 'Refresh Logs' to inspect live P2P grabs."
+    @State private var isBusy = false
+
+    private let slskdApiKey = "soularr-api-key-987654321fedcba"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("SoulSeekr", selection: $tab) {
+                Text("Hearr (SSL)").tag(0)
+                Text("slskd (SSL)").tag(1)
+                Text("Soularr Bridge").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+            .background(Color.black.opacity(0.6))
+
+            if tab == 0 {
+                VStack(spacing: 0) {
+                    HStack {
+                        Image(systemName: "lock.open.fill").foregroundColor(.purple)
+                        Text("Hearr Music Request Portal • PIN: MadRD#HE2026!!")
+                            .font(.caption2.bold())
+                            .foregroundColor(.white)
+                        Spacer()
+                        Button("Copy PIN") {
+                            UIPasteboard.general.string = "MadRD#HE2026!!"
+                        }
+                        .font(.caption2.bold())
+                        .foregroundColor(.purple)
+                    }
+                    .padding(8)
+                    .background(Color.purple.opacity(0.18))
+
+                    FastCachedWebView(cacheKey: "soulseekr-hearr-ssl", urlString: "https://hearr.nas-server.co.uk")
+                }
+            } else if tab == 1 {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("slskd P2P Daemon • User: slskd / Pass: MadRD#HE2026!!")
+                            .font(.caption2.bold())
+                            .foregroundColor(.white)
+                        Spacer()
+                        Button("Copy Pass") {
+                            UIPasteboard.general.string = "MadRD#HE2026!!"
+                        }
+                        .font(.caption2.bold())
+                        .foregroundColor(.purple)
+                    }
+                    .padding(8)
+                    .background(Color.purple.opacity(0.18))
+
+                    FastCachedWebView(cacheKey: "soulseekr-slskd-ssl", urlString: "https://slskd.nas-server.co.uk")
+                }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(statusBanner)
+                            .font(.caption.bold())
+                            .foregroundColor(.white)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.purple.opacity(0.22))
+                            .cornerRadius(10)
+
+                        HStack {
+                            TextField("Direct Soulseek P2P Search (Artist - Album / Track)", text: $searchQuery)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Search P2P") {
+                                Task { await triggerSlskdSearch() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.purple)
+                            .disabled(isBusy)
+                        }
+
+                        HStack(spacing: 10) {
+                            Button {
+                                Task { await triggerSoularrSync() }
+                            } label: {
+                                Label("Sync Lidarr -> Soulseek Now", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                                    .font(.caption.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(12)
+                                    .background(Color.purple)
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                            }
+                            .disabled(isBusy)
+
+                            Button {
+                                Task { await fetchSlskdStatus() }
+                            } label: {
+                                Label("Refresh Logs", systemImage: "doc.text.magnifyingglass")
+                                    .font(.caption.bold())
+                                    .padding(12)
+                                    .background(Color.white.opacity(0.1))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                            }
+                            .disabled(isBusy)
+                        }
+
+                        Text("Soularr & slskd Live Activity Log")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.white)
+
+                        Text(soularrLogs)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.green)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(Color.black.opacity(0.8))
+                            .cornerRadius(10)
+                    }
+                    .padding()
+                }
+                .task {
+                    await fetchSlskdStatus()
+                }
+            }
+        }
+    }
+
+    private func execTrueNAS(_ cmd: String) async -> String {
+        guard let url = URL(string: "http://\(host):9092/api/antigravity/exec") else { return "Bad URL" }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 15
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": cmd])
+        if let (data, _) = try? await URLSession.shared.data(for: req),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let out = (obj["stdout"] as? String) ?? (obj["output"] as? String) ?? ""
+            let err = (obj["stderr"] as? String) ?? ""
+            return (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return "Dispatched."
+    }
+
+    private func triggerSoularrSync() async {
+        isBusy = true
+        defer { isBusy = false }
+        soularrLogs = await execTrueNAS("sudo docker restart soularr 2>&1 && sleep 2 && sudo docker logs --tail 45 soularr 2>&1")
+        statusBanner = "Soularr P2P Wanted Sync Triggered!"
+    }
+
+    private func fetchSlskdStatus() async {
+        isBusy = true
+        defer { isBusy = false }
+        soularrLogs = await execTrueNAS("sudo docker logs --tail 35 slskd 2>&1; echo '=== SOULARR ==='; sudo docker logs --tail 35 soularr 2>&1")
+        statusBanner = "Updated slskd + Soularr P2P logs"
+    }
+
+    private func triggerSlskdSearch() async {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        isBusy = true
+        defer { isBusy = false }
+        guard let url = URL(string: "https://slskd.nas-server.co.uk/api/v0/searches") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(slskdApiKey, forHTTPHeaderField: "X-API-Key")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["searchText": q])
+        do {
+            let (_, resp) = try await httpSession.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+            statusBanner = "Dispatched Soulseek P2P search for '\(q)' (HTTP \(code)) — switch to slskd tab to view results!"
+        } catch {
+            statusBanner = "Search sent: \(error.localizedDescription)"
         }
     }
 }

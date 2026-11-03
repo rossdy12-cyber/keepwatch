@@ -37,9 +37,6 @@ struct KeepwatchApp: App {
                 .tint(Theme.accent)
                 .task {
                     _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
-                    if jarvisSettings.config.style == .auto && jarvisSettings.detection == nil {
-                        jarvisSettings.detection = try? await jarvisSettings.client.detect()
-                    }
                 }
         }
     }
@@ -67,16 +64,12 @@ struct RootView: View {
                 .tabItem { Label("Homelab", systemImage: "server.rack") }
                 .tag(AppTab.command)
 
-            ChatView(openSettings: { router.tab = .settings })
-                .tabItem { Label("Jarvis", systemImage: "waveform.circle") }
-                .tag(AppTab.jarvis)
-
             PaydaysView()
                 .tabItem { Label("Paydays", systemImage: "sterlingsign.circle") }
                 .tag(AppTab.paydays)
 
             HubView()
-                .tabItem { Label("Hub", systemImage: "sparkles.rectangle.stack") }
+                .tabItem { Label("Chronicle", systemImage: "sparkles.rectangle.stack") }
                 .tag(AppTab.hub)
 
             SettingsView()

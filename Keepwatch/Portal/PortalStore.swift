@@ -13,7 +13,7 @@ struct Site: Codable, Identifiable, Equatable, Hashable {
 /// Settings and shortcuts, saved on the phone.
 @MainActor
 final class PortalStore: ObservableObject {
-    private static let sitesKey = "portal.sites"
+    private static let sitesKey = "portal.sites.v2"
     private static let trueNASKey = "portal.truenas"
     private static let selfSignedKey = "portal.acceptSelfSigned"
 
@@ -62,19 +62,27 @@ final class PortalStore: ObservableObject {
     }
 
     static let defaultSites: [Site] = [
+        Site(name: "Vaultwarden", address: "https://vw.nas-server.co.uk", symbol: "lock.shield"),
         Site(name: "TrueNAS Web UI", address: "https://nas-server.co.uk", symbol: "server.rack"),
+        Site(name: "Immich Photos", address: "https://immich.nas-server.co.uk", symbol: "photo"),
         Site(name: "Paydays", address: "https://paydays.nas-server.co.uk", symbol: "sterlingsign.circle"),
         Site(name: "Jarvis", address: "https://jarvis.nas-server.co.uk", symbol: "waveform.circle"),
         Site(name: "Frigate", address: "https://frigate.nas-server.co.uk", symbol: "video"),
         Site(name: "Jellyfin", address: "https://jellyfin.nas-server.co.uk", symbol: "play.tv"),
+        Site(name: "Jellyseerr", address: "https://jellyseerr.nas-server.co.uk", symbol: "sparkles.tv"),
         Site(name: "Navidrome", address: "https://navidrome.nas-server.co.uk", symbol: "music.note"),
+        Site(name: "Hearr", address: "https://hearr.nas-server.co.uk", symbol: "music.mic"),
+        Site(name: "slskd", address: "https://slskd.nas-server.co.uk", symbol: "waveform.circle"),
         Site(name: "Sonarr", address: "https://sonarr.nas-server.co.uk", symbol: "tv"),
         Site(name: "Radarr", address: "https://radarr.nas-server.co.uk", symbol: "film"),
         Site(name: "Lidarr", address: "https://lidarr.nas-server.co.uk", symbol: "music.mic"),
+        Site(name: "Prowlarr", address: "https://prowlarr.nas-server.co.uk", symbol: "magnifyingglass.circle"),
         Site(name: "Bazarr", address: "https://bazarr.nas-server.co.uk", symbol: "captions.bubble"),
         Site(name: "NZBGet", address: "https://nzbget.nas-server.co.uk", symbol: "arrow.down.circle"),
+        Site(name: "MeTube", address: "https://metube.nas-server.co.uk", symbol: "play.rectangle"),
         Site(name: "Portainer", address: "https://portainer.nas-server.co.uk", symbol: "shippingbox"),
-        Site(name: "Nginx Proxy Manager", address: "https://npm.nas-server.co.uk", symbol: "arrow.triangle.branch")
+        Site(name: "Nginx Proxy Manager", address: "https://npm.nas-server.co.uk", symbol: "arrow.triangle.branch"),
+        Site(name: "OpenSpeedTest", address: "https://speedtest.nas-server.co.uk", symbol: "speedometer")
     ]
 
     static let symbolChoices = ["globe", "server.rack", "sterlingsign.circle", "waveform.circle", "video", "play.tv", "music.note", "tv", "film",
@@ -100,6 +108,6 @@ enum CertificatePolicy {
             }
         }
         if !host.contains(".") { return true }
-        return [".ts.net", ".local", ".lan", ".home.arpa", ".internal"].contains { host.hasSuffix($0) }
+        return [".nas-server.co.uk", "nas-server.co.uk", ".ts.net", ".local", ".lan", ".home.arpa", ".internal"].contains { host.hasSuffix($0) || host == $0 }
     }
 }

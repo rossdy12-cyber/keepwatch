@@ -11,6 +11,7 @@ struct HubView: View {
     @EnvironmentObject private var hub: HubStore
     @EnvironmentObject private var settings: ServiceSettings
     @EnvironmentObject private var router: AppRouter
+    var lockedSection: SectionTab? = nil
     @State private var section: SectionTab = .chronicle
     @State private var showingAddHandover = false
     @State private var showingAddPick = false
@@ -50,6 +51,7 @@ struct HubView: View {
                     .padding(.bottom, 24)
                 }
             }
+            .onAppear { if let locked = lockedSection { section = locked } }
             .navigationTitle(section.rawValue)
             .navigationBarTitleDisplayMode(.inline)
             .keepwatchChrome()

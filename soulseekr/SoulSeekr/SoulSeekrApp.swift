@@ -112,7 +112,7 @@ struct HearrPortalTab: View {
             .padding(8)
             .background(Color.purple.opacity(0.18))
 
-            SoulWebView(urlString: "http://\(store.host):5070")
+            SoulWebView(urlString: "https://hearr.nas-server.co.uk")
         }
     }
 }
@@ -134,7 +134,7 @@ struct SlskdWebTab: View {
             .padding(8)
             .background(Color.purple.opacity(0.18))
 
-            SoulWebView(urlString: "http://\(store.host):5030")
+            SoulWebView(urlString: "https://slskd.nas-server.co.uk")
         }
     }
 }

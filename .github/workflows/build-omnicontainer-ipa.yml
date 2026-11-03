@@ -47,19 +47,20 @@ jobs:
           mkdir -p out
           xcrun --sdk iphoneos clang \
             -arch arm64 \
-            -mios-version-min=16.0 \
+            -mios-version-min=17.0 \
             -fobjc-arc \
             -c Plugin/OmniPluginEntry.m \
             -o out/OmniPluginEntry.o
 
           xcrun --sdk iphoneos swiftc \
             -emit-library \
-            -target arm64-apple-ios16.0 \
+            -target arm64-apple-ios17.0 \
             -O \
             -D OMNI_DYLIB_PLUGIN \
             -module-name OmniContainerPlugin \
             -Xlinker -install_name -Xlinker @rpath/OmniContainerPlugin.dylib \
             OmniContainer/OmniContainerApp.swift \
+            $(find OmniContainer/KeepwatchCore -name '*.swift') \
             out/OmniPluginEntry.o \
             -o out/OmniContainerPlugin.dylib
 

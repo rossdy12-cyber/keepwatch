@@ -38,15 +38,15 @@ final class BrowserCoordinatorModel: ObservableObject {
     let bookmarks: [SpeedDialBookmark] = [
         SpeedDialBookmark(name: "Vaultwarden", subtitle: "Password Vault", url: "https://vw.nas-server.co.uk", icon: "lock.shield.fill", color: .blue),
         SpeedDialBookmark(name: "TrueNAS Scale", subtitle: "Storage & ZFS", url: "https://nas-server.co.uk", icon: "externaldrive.fill", color: .cyan),
-        SpeedDialBookmark(name: "Jellyfin", subtitle: "Movies & TV", url: "http://100.85.127.42:30013", icon: "play.tv.fill", color: .purple),
-        SpeedDialBookmark(name: "Immich", subtitle: "Photos Backup", url: "http://100.85.127.42:30041", icon: "photo.on.rectangle.angled", color: .pink),
+        SpeedDialBookmark(name: "Jellyfin", subtitle: "Movies & TV", url: "https://jellyfin.nas-server.co.uk", icon: "play.tv.fill", color: .purple),
+        SpeedDialBookmark(name: "Immich", subtitle: "Photos Backup", url: "https://immich.nas-server.co.uk", icon: "photo.on.rectangle.angled", color: .pink),
         SpeedDialBookmark(name: "Nextcloud", subtitle: "Private Cloud", url: "https://nextcloud.nas-server.co.uk", icon: "cloud.fill", color: .teal),
-        SpeedDialBookmark(name: "Jellyseerr", subtitle: "Media Requests", url: "http://100.85.127.42:5055", icon: "sparkles.tv.fill", color: .indigo),
-        SpeedDialBookmark(name: "Sonarr", subtitle: "Anime & Series", url: "http://100.85.127.42:30113", icon: "tv.circle.fill", color: .orange),
-        SpeedDialBookmark(name: "Radarr", subtitle: "Movies PVR", url: "http://100.85.127.42:30025", icon: "film.circle.fill", color: .yellow),
-        SpeedDialBookmark(name: "Lidarr", subtitle: "Music Library", url: "http://100.85.127.42:30071", icon: "music.note.house.fill", color: .green),
-        SpeedDialBookmark(name: "slskd", subtitle: "Soulseek UI", url: "http://100.85.127.42:5030", icon: "waveform.circle.fill", color: .mint),
-        SpeedDialBookmark(name: "Frigate NVR", subtitle: "AI CCTV Hub", url: "http://100.85.127.42:5000", icon: "video.badge.checkmark", color: .red),
+        SpeedDialBookmark(name: "Jellyseerr", subtitle: "Media Requests", url: "https://jellyseerr.nas-server.co.uk", icon: "sparkles.tv.fill", color: .indigo),
+        SpeedDialBookmark(name: "Sonarr", subtitle: "Anime & Series", url: "https://sonarr.nas-server.co.uk", icon: "tv.circle.fill", color: .orange),
+        SpeedDialBookmark(name: "Radarr", subtitle: "Movies PVR", url: "https://radarr.nas-server.co.uk", icon: "film.circle.fill", color: .yellow),
+        SpeedDialBookmark(name: "Lidarr", subtitle: "Music Library", url: "https://lidarr.nas-server.co.uk", icon: "music.note.house.fill", color: .green),
+        SpeedDialBookmark(name: "slskd", subtitle: "Soulseek UI", url: "https://slskd.nas-server.co.uk", icon: "waveform.circle.fill", color: .mint),
+        SpeedDialBookmark(name: "Frigate NVR", subtitle: "AI CCTV Hub", url: "https://frigate.nas-server.co.uk", icon: "video.badge.checkmark", color: .red),
         SpeedDialBookmark(name: "Racebolt UK", subtitle: "Live Storefront", url: "https://raceboltuk.com", icon: "bolt.shield.fill", color: .orange)
     ]
 

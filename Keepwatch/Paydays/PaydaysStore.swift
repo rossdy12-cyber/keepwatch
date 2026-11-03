@@ -1,7 +1,7 @@
 import Foundation
 
 struct PaydaysConfig: Codable, Equatable {
-    var address: String = "http://100.85.127.42:8450"
+    var address: String = "https://paydays.nas-server.co.uk"
     var password: String = ""
     /// Optional full `/hook/spend?token=...` URL or token so Siri / Action Button can log spending even behind Authelia.
     var hookURLOrToken: String = ""

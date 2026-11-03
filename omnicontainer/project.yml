@@ -2,13 +2,14 @@ name: OmniContainer
 options:
   bundleIdPrefix: com.ross
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "17.0"
   xcodeVersion: "16.0"
   generateEmptyDirectories: true
 
 settings:
   base:
-    SWIFT_VERSION: "5.9"
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
     TARGETED_DEVICE_FAMILY: "1,2"
     SUPPORTS_MACCATALYST: NO
     CODE_SIGNING_ALLOWED: NO
@@ -21,7 +22,7 @@ targets:
   OmniContainer:
     type: application
     platform: iOS
-    deploymentTarget: "16.0"
+    deploymentTarget: "17.0"
     sources:
       - path: OmniContainer
         excludes:
