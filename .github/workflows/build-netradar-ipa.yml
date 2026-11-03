@@ -1,0 +1,58 @@
+name: Build NetRadar IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "netradar/**"
+      - ".github/workflows/build-netradar-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: netradar
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build NetRadar (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project NetRadar.xcodeproj \
+            -target NetRadar \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package Payload/NetRadar.app into NetRadar.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/NetRadar.app out/Payload/
+          cd out
+          zip -qry NetRadar.ipa Payload
+          ls -lh NetRadar.ipa
+
+      - name: Upload NetRadar.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetRadar-ipa
+          path: netradar/out/NetRadar.ipa
+          retention-days: 30
