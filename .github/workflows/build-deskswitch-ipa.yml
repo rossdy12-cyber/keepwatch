@@ -1,0 +1,58 @@
+name: Build DeskSwitch IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "deskswitch/**"
+      - ".github/workflows/build-deskswitch-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: deskswitch
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build DeskSwitch (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DeskSwitch.xcodeproj \
+            -target DeskSwitch \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package Payload/DeskSwitch.app into DeskSwitch.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/DeskSwitch.app out/Payload/
+          cd out
+          zip -qry DeskSwitch.ipa Payload
+          ls -lh DeskSwitch.ipa
+
+      - name: Upload DeskSwitch.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeskSwitch-ipa
+          path: deskswitch/out/DeskSwitch.ipa
+          retention-days: 30

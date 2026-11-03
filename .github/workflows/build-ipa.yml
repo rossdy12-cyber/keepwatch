@@ -22,6 +22,8 @@ on:
       - ".github/workflows/build-sentrycam-ipa.yml"
       - "aniimo-pilot/**"
       - ".github/workflows/build-aniimo-pilot-ipa.yml"
+      - "deskswitch/**"
+      - ".github/workflows/build-deskswitch-ipa.yml"
       - "racebolt-ops/**"
       - ".github/workflows/build-racebolt-ops-ipa.yml"
       - ".github/workflows/build-ipa.yml"
