@@ -502,6 +502,11 @@ class OmniWorkspaceStore: ObservableObject {
     @Published var statusBanner: String = "Native YouTube 21.42.4 Plus + 13 OmniContainer Apps Integrated!"
     @Published var truenasHost: String = "100.85.127.42"
     @Published var routeLabel: String = "Tailscale"
+    @Published var floatingMiniAniimo: Bool = false {
+        didSet {
+            OmniOverlayController.shared.syncVisibility()
+        }
+    }
     @Published var isMinimizedToYouTube: Bool = true {
         didSet {
             OmniOverlayController.shared.syncVisibility()
@@ -641,6 +646,9 @@ final class OmniOverlayWindow: UIWindow {
     var passthroughMode: Bool = true
     weak var pillButton: UIButton?
 
+    var miniPiPRect: CGRect = .zero
+    var miniPiPActive: Bool = false
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if passthroughMode {
             if let btn = pillButton, !btn.isHidden {
@@ -648,6 +656,9 @@ final class OmniOverlayWindow: UIWindow {
                 if btn.bounds.insetBy(dx: -10, dy: -10).contains(ptInBtn) {
                     return btn
                 }
+            }
+            if miniPiPActive && miniPiPRect.insetBy(dx: -8, dy: -8).contains(point) {
+                return super.hitTest(point, with: event)
             }
             return nil
         }
@@ -750,12 +761,17 @@ final class OmniOverlayController: NSObject {
     func syncVisibility() {
         guard let win = overlayWindow, let host = hostingController, let btn = pillButton else { return }
         let minimized = workspace.isMinimizedToYouTube
+        let pip = workspace.floatingMiniAniimo
         win.passthroughMode = minimized
-        host.view.isHidden = minimized
+        win.miniPiPActive = minimized && pip
+        win.miniPiPRect = CGRect(x: 12, y: 104, width: 228, height: 168)
+        host.view.isHidden = minimized && !pip
+        host.view.backgroundColor = minimized ? .clear : UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
         btn.isHidden = !minimized
         if !minimized {
             win.bringSubviewToFront(host.view)
         } else {
+            win.bringSubviewToFront(host.view)
             win.bringSubviewToFront(btn)
         }
     }
@@ -798,6 +814,19 @@ struct OmniRootContainerView: View {
     @State private var showIPAFilePicker = false
 
     var body: some View {
+        ZStack(alignment: .topLeading) {
+            if !workspace.isMinimizedToYouTube {
+                mainWorkspaceContent
+            }
+            if workspace.floatingMiniAniimo {
+                FloatingMiniAniimoPiPView()
+                    .padding(.leading, 12)
+                    .padding(.top, workspace.isMinimizedToYouTube ? 104 : 58)
+            }
+        }
+    }
+
+    private var mainWorkspaceContent: some View {
         VStack(spacing: 0) {
             omniTopDockBar
 
@@ -1884,25 +1913,311 @@ struct MiniDeskSwitchModule: View {
     }
 }
 
-struct MiniAniimoModule: View {
-    @State private var tick = 0
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                AsyncImage(url: URL(string: "http://100.102.4.54:9090/api/antigravity/screen?t=\(tick)")) { img in
-                    img.resizable().scaledToFit()
-                } placeholder: {
-                    RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)).frame(height: 180)
-                }
-                .cornerRadius(10)
-                .onTapGesture { tick += 1 }
+@MainActor
+final class OmniAniimoStreamer: ObservableObject {
+    static let shared = OmniAniimoStreamer()
+    @Published var frameImage: UIImage? = nil
+    @Published var statusText: String = "Native Windows PC Streamer (:9095) Ready"
+    @Published var ghostMode: Bool = true
+    @Published var isStreaming: Bool = true
+    private var loopTask: Task<Void, Never>? = nil
 
-                HStack {
-                    Button("Refresh Game Screen") { tick += 1 }
-                        .buttonStyle(.borderedProminent)
+    let baseURL = "http://100.102.4.54:9095"
+
+    func startLoopIfNeeded() {
+        guard loopTask == nil else { return }
+        loopTask = Task {
+            while !Task.isCancelled {
+                if isStreaming {
+                    await fetchFrame()
+                }
+                try? await Task.sleep(nanoseconds: 280_000_000)
+            }
+        }
+    }
+
+    func fetchFrame() async {
+        guard let u = URL(string: "\(baseURL)/api/aniimo/frame.jpg?t=\(Date().timeIntervalSince1970)") else { return }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 2.0
+        if let (d, _) = try? await URLSession.shared.data(for: req),
+           let img = UIImage(data: d) {
+            frameImage = img
+        }
+    }
+
+    func sendControl(_ action: String) async {
+        guard let u = URL(string: "\(baseURL)/api/aniimo/control") else { return }
+        var req = URLRequest(url: u)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["action": action])
+        if let (d, _) = try? await URLSession.shared.data(for: req),
+           let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            if let s = obj["status"] as? String { statusText = s }
+            if let g = obj["ghost_mode"] as? Bool { ghostMode = g }
+        }
+    }
+
+    func sendTap(nx: Double, ny: Double) async {
+        guard let u = URL(string: "\(baseURL)/api/aniimo/touch") else { return }
+        var req = URLRequest(url: u)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["type": "tap", "nx": nx, "ny": ny])
+        _ = try? await URLSession.shared.data(for: req)
+        statusText = String(format: "Clicked (%.0f%%, %.0f%%) in Background Window", nx * 100, ny * 100)
+    }
+
+    func sendKey(_ key: String, holdMs: Int = 160) async {
+        guard let u = URL(string: "\(baseURL)/api/aniimo/touch") else { return }
+        var req = URLRequest(url: u)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["type": "key", "key": key, "hold_ms": holdMs])
+        _ = try? await URLSession.shared.data(for: req)
+        statusText = "Sent '\(key)' to Aniimo PC Window"
+    }
+}
+
+struct FloatingMiniAniimoPiPView: View {
+    @EnvironmentObject var workspace: OmniWorkspaceStore
+    @StateObject private var streamer = OmniAniimoStreamer.shared
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Circle().fill(Color.green).frame(width: 7, height: 7)
+                Text("Aniimo PiP (BG)")
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundColor(.white)
+                Spacer()
+                Button {
+                    Task { await streamer.sendKey("F") }
+                } label: {
+                    Text("F")
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.green)
+                        .foregroundColor(.black)
+                        .cornerRadius(4)
+                }
+                Button {
+                    workspace.isMinimizedToYouTube = false
+                    workspace.launchOrFocus("aniimo")
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.cyan)
+                }
+                Button {
+                    workspace.floatingMiniAniimo = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
                 }
             }
-            .padding()
+            .padding(.horizontal, 6)
+            .padding(.top, 4)
+
+            GeometryReader { geo in
+                ZStack {
+                    Color.black
+                    if let img = streamer.frameImage {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        ProgressView().tint(.green)
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onEnded { val in
+                            let nx = max(0, min(1, val.location.x / max(1, geo.size.width)))
+                            let ny = max(0, min(1, val.location.y / max(1, geo.size.height)))
+                            Task { await streamer.sendTap(nx: nx, ny: ny) }
+                        }
+                )
+            }
+            .frame(width: 216, height: 122)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(5)
+        .frame(width: 228, height: 162)
+        .background(Color(red: 0.05, green: 0.07, blue: 0.13).opacity(0.95))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.8), lineWidth: 1.5))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.7), radius: 8, x: 0, y: 4)
+        .onAppear {
+            streamer.startLoopIfNeeded()
+        }
+    }
+}
+
+struct MiniAniimoModule: View {
+    @EnvironmentObject var workspace: OmniWorkspaceStore
+    @StateObject private var streamer = OmniAniimoStreamer.shared
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Aniimo Pilot — Native Windows PC (Zero LDPlayer)")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.white)
+                        Text(streamer.statusText)
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        workspace.floatingMiniAniimo.toggle()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: workspace.floatingMiniAniimo ? "pip.exit" : "pip.enter")
+                            Text(workspace.floatingMiniAniimo ? "PiP Active" : "Float PiP")
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(workspace.floatingMiniAniimo ? Color.green : Color.cyan.opacity(0.25))
+                        .foregroundColor(workspace.floatingMiniAniimo ? .black : .cyan)
+                        .cornerRadius(8)
+                    }
+                }
+
+                // Live Interactive DirectX Game Window Viewport (Tap to Click, Drag to Move)
+                GeometryReader { geo in
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(Color.black)
+                        if let img = streamer.frameImage {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .clipped()
+                        } else {
+                            VStack(spacing: 8) {
+                                ProgressView().tint(.green)
+                                Text("Connecting to Windows PC Aniimo Streamer (:9095)...")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.green.opacity(0.45), lineWidth: 1))
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onEnded { val in
+                                let w = max(1, geo.size.width)
+                                let h = max(1, geo.size.height)
+                                let nx = max(0, min(1, val.location.x / w))
+                                let ny = max(0, min(1, val.location.y / h))
+                                Task { await streamer.sendTap(nx: nx, ny: ny) }
+                            }
+                    )
+                }
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+
+                // Background Ghost Mode vs Windowed Controls (Never Fullscreen!)
+                HStack(spacing: 8) {
+                    Button {
+                        Task { await streamer.sendControl("launch_ghost") }
+                    } label: {
+                        Label("Launch in BG Ghost Mode", systemImage: "play.fill")
+                            .font(.caption.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.green)
+                            .foregroundColor(.black)
+                            .cornerRadius(10)
+                    }
+
+                    Button {
+                        Task { await streamer.sendControl(streamer.ghostMode ? "ghost_off" : "ghost_on") }
+                    } label: {
+                        Label(streamer.ghostMode ? "Show on PC Monitor" : "Hide Off-Screen (Ghost)", systemImage: streamer.ghostMode ? "display" : "eye.slash.fill")
+                            .font(.caption.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.purple.opacity(0.3))
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                    }
+                }
+
+                // On-Screen PC Gamepad Bar (WASD + Space + F + Skills + Map + Esc)
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        keyBtn("W (Fwd)", key: "W", hold: 450, color: .cyan)
+                        keyBtn("A (Left)", key: "A", hold: 350, color: .cyan)
+                        keyBtn("S (Back)", key: "S", hold: 350, color: .cyan)
+                        keyBtn("D (Right)", key: "D", hold: 350, color: .cyan)
+                    }
+                    HStack(spacing: 8) {
+                        keyBtn("F (Interact)", key: "F", hold: 120, color: .green)
+                        keyBtn("Space (Jump)", key: "SPACE", hold: 120, color: .orange)
+                        keyBtn("E (Skill)", key: "E", hold: 120, color: .purple)
+                        keyBtn("Q (Ult)", key: "Q", hold: 120, color: .pink)
+                        keyBtn("M (Map)", key: "M", hold: 120, color: .yellow)
+                        keyBtn("Esc", key: "ESC", hold: 120, color: .red)
+                    }
+                }
+
+                // Official Windows PC Client Installers (Steam & Xbox/MS Store)
+                HStack(spacing: 8) {
+                    Button {
+                        Task { await streamer.sendControl("install_steam") }
+                    } label: {
+                        Label("Official Steam PC Client", systemImage: "arrow.down.circle.fill")
+                            .font(.caption2.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                    }
+
+                    Button {
+                        Task { await streamer.sendControl("install_msstore") }
+                    } label: {
+                        Label("Official Xbox/MS Store PC", systemImage: "pc")
+                            .font(.caption2.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                    }
+                }
+            }
+            .padding(12)
+        }
+        .onAppear {
+            streamer.startLoopIfNeeded()
+        }
+    }
+
+    private func keyBtn(_ label: String, key: String, hold: Int, color: Color) -> some View {
+        Button {
+            Task { await streamer.sendKey(key, holdMs: hold) }
+        } label: {
+            Text(label)
+                .font(.system(size: 10, weight: .bold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(color.opacity(0.22))
+                .foregroundColor(color)
+                .cornerRadius(8)
         }
     }
 }
