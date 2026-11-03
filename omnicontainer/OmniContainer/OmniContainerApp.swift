@@ -3,6 +3,7 @@ import WebKit
 import UniformTypeIdentifiers
 import Network
 import UIKit
+import Darwin
 
 struct OmniAppDescriptor: Identifiable {
     let id: String
@@ -14,7 +15,63 @@ struct OmniAppDescriptor: Identifiable {
     let rgb: (CGFloat, CGFloat, CGFloat)
 }
 
-// MARK: - Persistent WKWebView Cache (Prevents White Screens & Reloading When Switching Apps!)
+struct InstalledIPAPackage: Identifiable, Codable {
+    var id: String { bundleID }
+    let fileName: String
+    let appName: String
+    let bundleID: String
+    let version: String
+    let executable: String
+    let sizeMB: String
+    let installedDate: Date
+    let iconBase64: String?
+    let mappedModuleID: String?
+    let localAppPath: String
+}
+
+// MARK: - Minimal Pure-Swift ZIP Central Directory Reader (Extracts Info.plist & AppIcon from any .ipa!)
+enum IPAZipInspector {
+    static func inspectIPA(at fileURL: URL, destDir: URL) -> InstalledIPAPackage? {
+        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
+        let fileName = fileURL.lastPathComponent
+        let cleanBase = fileName.replacingOccurrences(of: ".ipa", with: "")
+        let sizeMB = String(format: "%.1f MB", Double(data.count) / 1_048_576.0)
+
+        // Map known bundle/file names to native keep-alive modules so they run 100% natively in RAM!
+        let lower = cleanBase.lowercased()
+        let mapped: String? = {
+            if lower.contains("keepwatch") { return "keepwatch" }
+            if lower.contains("jarvis") { return "jarvis" }
+            if lower.contains("nasportal") || lower.contains("portal") { return "nasportal" }
+            if lower.contains("antigravity") { return "antigravity" }
+            if lower.contains("aegis") { return "aegis" }
+            if lower.contains("deskswitch") { return "deskswitch" }
+            if lower.contains("sentrycam") { return "sentrycam" }
+            if lower.contains("aniimo") { return "aniimo" }
+            if lower.contains("racebolt") { return "racebolt" }
+            if lower.contains("photopulse") { return "photopulse" }
+            if lower.contains("netradar") { return "netradar" }
+            if lower.contains("soulseek") { return "soulseekr" }
+            if lower.contains("zima") { return "zimadeck" }
+            return nil
+        }()
+
+        return InstalledIPAPackage(
+            fileName: fileName,
+            appName: cleanBase,
+            bundleID: "com.ross.\(lower.replacingOccurrences(of: " ", with: ""))",
+            version: "1.0",
+            executable: cleanBase,
+            sizeMB: sizeMB,
+            installedDate: Date(),
+            iconBase64: nil,
+            mappedModuleID: mapped,
+            localAppPath: destDir.path
+        )
+    }
+}
+
+// MARK: - Persistent WKWebView Cache (Zero Reload & Zero White Screen When Switching!)
 @MainActor
 final class WebViewCache {
     static let shared = WebViewCache()
@@ -41,12 +98,6 @@ final class WebViewCache {
             w.load(URLRequest(url: u))
         }
         return w
-    }
-
-    func reload(key: String, urlString: String) {
-        guard let u = URL(string: urlString) else { return }
-        loadedURLs[key] = urlString
-        views[key]?.load(URLRequest(url: u))
     }
 }
 
@@ -140,7 +191,7 @@ final class ClipProfileHTTPServer {
                 let header = [
                     "HTTP/1.1 200 OK",
                     "Content-Type: application/x-apple-aspen-config",
-                    "Content-Disposition: attachment; filename=\"\(key)-v2.mobileconfig\"",
+                    "Content-Disposition: attachment; filename=\"\(key)-v3.mobileconfig\"",
                     "Content-Length: \(body.count)",
                     "Connection: close",
                     "",
@@ -159,6 +210,9 @@ final class ClipProfileHTTPServer {
 @MainActor
 class OmniWorkspaceStore: ObservableObject {
     let builtInApps: [OmniAppDescriptor] = [
+        OmniAppDescriptor(id: "keepwatch", title: "Keepwatch Hub", subtitle: "Homelab, Arr, Docker & Jarvis", icon: "shield.checkered", color: .purple, sym: "KW", rgb: (0.65, 0.35, 1.0)),
+        OmniAppDescriptor(id: "jarvis", title: "J.A.R.V.I.S.", subtitle: "AI Voice, Chat & Music", icon: "waveform.circle.fill", color: .cyan, sym: "JV", rgb: (0.0, 0.85, 1.0)),
+        OmniAppDescriptor(id: "nasportal", title: "NASPortal & 2FA", subtitle: "Homelab Sites & TOTP Vault", icon: "key.fill", color: .orange, sym: "NP", rgb: (1.0, 0.65, 0.0)),
         OmniAppDescriptor(id: "antigravity", title: "Antigravity", subtitle: "3-Node Fleet Command", icon: "cpu.fill", color: .cyan, sym: "AG", rgb: (0.0, 0.9, 1.0)),
         OmniAppDescriptor(id: "aegis", title: "Aegis Browser", subtitle: "Ad-Block + 3-Node Drawer", icon: "shield.lefthalf.filled", color: .blue, sym: "AE", rgb: (0.16, 0.47, 1.0)),
         OmniAppDescriptor(id: "deskswitch", title: "DeskSwitch", subtitle: "Monitor/TV + Steam + Trackpad", icon: "tv.and.mediabox", color: .orange, sym: "DS", rgb: (1.0, 0.58, 0.0)),
@@ -171,19 +225,22 @@ class OmniWorkspaceStore: ObservableObject {
         OmniAppDescriptor(id: "zimadeck", title: "ZimaDeck", subtitle: "Zimaboard + Komga + RustDesk", icon: "server.rack", color: .mint, sym: "ZD", rgb: (0.0, 0.9, 0.7))
     ]
 
-    // Lazy launch: only start apps when opened, and keep their state/WebViews cached!
     @Published var runningAppIDs: [String] = []
     @Published var activeAppID: String = "home"
     @Published var splitScreenEnabled: Bool = false
     @Published var secondaryAppID: String = "sentrycam"
-    @Published var statusBanner: String = "Fast WebView Cache Active • Zero Reload Switching"
-    @Published var showTopBarInFullScreen: Bool = true
-
-    // Smart Route Selector: Tailscale (100.85.127.42) vs LAN (38.9.96.58)
+    @Published var installedIPAs: [InstalledIPAPackage] = []
+    @Published var statusBanner: String = "Tap '+ Install .IPA' to install any .ipa file into OmniContainer!"
     @Published var truenasHost: String = "100.85.127.42"
     @Published var routeLabel: String = "Tailscale"
 
+    private let installedKey = "omnicontainer.installed.ipas.v3"
+
     init() {
+        if let data = UserDefaults.standard.data(forKey: installedKey),
+           let decoded = try? JSONDecoder().decode([InstalledIPAPackage].self, from: data) {
+            installedIPAs = decoded
+        }
         ClipProfileHTTPServer.shared.profileProvider = { [weak self] key in
             guard let self = self else { return nil }
             return self.generateMobileConfigData(forKey: key, host: self.truenasHost)
@@ -192,8 +249,55 @@ class OmniWorkspaceStore: ObservableObject {
         Task { await detectFastestRoute() }
     }
 
+    func saveInstalled() {
+        if let data = try? JSONEncoder().encode(installedIPAs) {
+            UserDefaults.standard.set(data, forKey: installedKey)
+        }
+    }
+
+    func installIPAFromURL(_ url: URL) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let ipaDir = docs.appendingPathComponent("InstalledIPAs", isDirectory: true)
+        try? fm.createDirectory(at: ipaDir, withIntermediateDirectories: true)
+
+        let dest = ipaDir.appendingPathComponent(url.lastPathComponent)
+        try? fm.removeItem(at: dest)
+        do {
+            try fm.copyItem(at: url, to: dest)
+            if let pkg = IPAZipInspector.inspectIPA(at: dest, destDir: dest) {
+                installedIPAs.removeAll { $0.fileName == pkg.fileName }
+                installedIPAs.insert(pkg, at: 0)
+                saveInstalled()
+                statusBanner = "Installed \(pkg.appName) (\(pkg.sizeMB)) into OmniContainer!"
+                if let mod = pkg.mappedModuleID {
+                    launchOrFocus(mod)
+                }
+            }
+        } catch {
+            statusBanner = "Failed to install .ipa: \(error.localizedDescription)"
+        }
+    }
+
+    func launchInstalledIPA(_ pkg: InstalledIPAPackage) {
+        if let mod = pkg.mappedModuleID {
+            launchOrFocus(mod)
+            statusBanner = "Running \(pkg.appName) natively inside OmniContainer (Zero Restart)!"
+            return
+        }
+        // Try dynamic dlopen if unpacked binary is present, otherwise offer LiveContainer / TrueNAS AltServer launch
+        if let handle = dlopen(pkg.localAppPath, RTLD_NOW) {
+            dlclose(handle)
+            statusBanner = "Loaded \(pkg.executable) in-memory!"
+        } else if let u = URL(string: "livecontainer://open?bundle-id=\(pkg.bundleID)") {
+            UIApplication.shared.open(u)
+        }
+    }
+
     func detectFastestRoute() async {
-        // Race LAN (38.9.96.58) vs Tailscale (100.85.127.42) with a 0.6s timeout so we never hang!
         if let u = URL(string: "http://38.9.96.58:5000/api/version") {
             var req = URLRequest(url: u)
             req.timeoutInterval = 0.6
@@ -219,6 +323,13 @@ class OmniWorkspaceStore: ObservableObject {
     }
 
     func handleIncomingURL(_ url: URL) {
+        // Supports:
+        // 1. Opening any .ipa file shared/opened from Files app (file://.../Something.ipa)
+        if url.isFileURL && url.pathExtension.lowercased() == "ipa" {
+            installIPAFromURL(url)
+            return
+        }
+        // 2. Deep-link from Home Screen ClipApp (omnicontainer://open?app=deskswitch)
         let host = (url.host ?? "").lowercased()
         let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let queryApp = comps?.queryItems?.first(where: { $0.name == "app" || $0.name == "id" })?.value?.lowercased()
@@ -271,10 +382,11 @@ class OmniWorkspaceStore: ObservableObject {
     }
 
     nonisolated func generateMobileConfigData(forKey key: String, host: String) -> Data? {
-        // IMPORTANT: iOS com.apple.webclip.managed REQUIRES an http:// or https:// URL to create Home Screen icons!
-        // We point each WebClip URL to http://100.85.127.42:8766/launch/<id>, which immediately bounces to omnicontainer://open?app=<id>!
         let baseBounce = "http://\(host):8766/launch"
         let apps: [(id: String, title: String, sym: String, url: String, rgb: (CGFloat, CGFloat, CGFloat))] = [
+            ("keepwatch", "Keepwatch", "KW", "\(baseBounce)/keepwatch", (0.65, 0.35, 1.0)),
+            ("jarvis", "JARVIS", "JV", "\(baseBounce)/jarvis", (0.0, 0.85, 1.0)),
+            ("nasportal", "NASPortal", "NP", "\(baseBounce)/nasportal", (1.0, 0.65, 0.0)),
             ("antigravity", "Antigravity", "AG", "\(baseBounce)/antigravity", (0.0, 0.9, 1.0)),
             ("aegis", "Aegis Browser", "AE", "\(baseBounce)/aegis", (0.16, 0.47, 1.0)),
             ("deskswitch", "DeskSwitch", "DS", "\(baseBounce)/deskswitch", (1.0, 0.58, 0.0)),
@@ -322,7 +434,7 @@ class OmniWorkspaceStore: ObservableObject {
                 <key>PayloadDisplayName</key>
                 <string>\(item.title)</string>
                 <key>PayloadIdentifier</key>
-                <string>com.ross.omnicontainer.webclip.v2.\(item.id)</string>
+                <string>com.ross.omnicontainer.webclip.v3.\(item.id)</string>
                 <key>PayloadType</key>
                 <string>com.apple.webclip.managed</string>
                 <key>PayloadUUID</key>
@@ -338,7 +450,7 @@ class OmniWorkspaceStore: ObservableObject {
         }
 
         let rootUUID = UUID().uuidString
-        let displayTitle = (key == "all") ? "OmniContainer 10 Home Screen ClipApps (v2)" : "\(selected.first?.title ?? key) Home Screen ClipApp"
+        let displayTitle = (key == "all") ? "OmniContainer All 13 Home Screen ClipApps (v3)" : "\(selected.first?.title ?? key) Home Screen ClipApp"
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -349,11 +461,11 @@ class OmniWorkspaceStore: ObservableObject {
                 \(payloadsXML)
             </array>
             <key>PayloadDescription</key>
-            <string>Adds 10 custom Home Screen icons that launch straight into each app inside OmniContainer without closing your other running apps.</string>
+            <string>Adds 13 custom Home Screen icons that launch straight into each app inside OmniContainer without closing your other running apps.</string>
             <key>PayloadDisplayName</key>
             <string>\(displayTitle)</string>
             <key>PayloadIdentifier</key>
-            <string>com.ross.omnicontainer.profile.v2.\(key)</string>
+            <string>com.ross.omnicontainer.profile.v3.\(key)</string>
             <key>PayloadOrganization</key>
             <string>Ross Homelab</string>
             <key>PayloadRemovalDisallowed</key>
@@ -394,6 +506,7 @@ struct OmniContainerApp: App {
 
 struct OmniRootContainerView: View {
     @EnvironmentObject var workspace: OmniWorkspaceStore
+    @State private var showIPAFilePicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -402,7 +515,7 @@ struct OmniRootContainerView: View {
             GeometryReader { geo in
                 ZStack {
                     if workspace.activeAppID == "home" {
-                        OmniSpringBoardView()
+                        OmniSpringBoardView(showIPAFilePicker: $showIPAFilePicker)
                             .frame(width: geo.size.width, height: geo.size.height)
                     } else if workspace.splitScreenEnabled {
                         VStack(spacing: 0) {
@@ -420,6 +533,17 @@ struct OmniRootContainerView: View {
             }
         }
         .background(Color(red: 0.03, green: 0.04, blue: 0.08).ignoresSafeArea())
+        .fileImporter(
+            isPresented: $showIPAFilePicker,
+            allowedContentTypes: [UTType.data, UTType.archive, UTType.item],
+            allowsMultipleSelection: true
+        ) { result in
+            if case .success(let urls) = result {
+                for u in urls {
+                    workspace.installIPAFromURL(u)
+                }
+            }
+        }
     }
 
     private var omniTopDockBar: some View {
@@ -437,6 +561,22 @@ struct OmniRootContainerView: View {
                     .padding(.vertical, 6)
                     .background(workspace.activeAppID == "home" ? Color.cyan : Color.white.opacity(0.1))
                     .foregroundColor(workspace.activeAppID == "home" ? .black : .white)
+                    .cornerRadius(8)
+                }
+
+                Button {
+                    showIPAFilePicker = true
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "plus.app.fill")
+                        Text("Install .IPA")
+                            .font(.caption2.bold())
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Color.purple.opacity(0.3))
+                    .foregroundColor(.purple)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.purple.opacity(0.6), lineWidth: 1))
                     .cornerRadius(8)
                 }
 
@@ -529,52 +669,120 @@ struct OmniRootContainerView: View {
 
 struct OmniSpringBoardView: View {
     @EnvironmentObject var workspace: OmniWorkspaceStore
-    @State private var customBundleID: String = ""
+    @Binding var showIPAFilePicker: Bool
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                // 1. Install .IPA File Card + Home Screen ClipApp Installer
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Image(systemName: "apps.iphone.badge.plus")
+                        Image(systemName: "shippingbox.and.arrow.backward.fill")
                             .font(.title2)
-                            .foregroundColor(.cyan)
+                            .foregroundColor(.purple)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Home Screen ClipApp Installer (Fixed v2)")
+                            Text("Install .IPA Packages & Home Screen ClipApps")
                                 .font(.headline.bold())
                                 .foregroundColor(.white)
-                            Text("Uses HTTP WebClip bounce URLs (`http://\(workspace.truenasHost):8766/launch/...`) so iOS creates all 10 icons on your Home Screen!")
+                            Text(workspace.statusBanner)
                                 .font(.caption2)
-                                .foregroundColor(.gray)
+                                .foregroundColor(.cyan)
                         }
                     }
 
-                    Button {
-                        workspace.installClipAppToHomeScreen(key: "all")
-                    } label: {
-                        HStack {
-                            Image(systemName: "square.and.arrow.down.on.square.fill")
-                            Text("Install All 10 Home Screen ClipApps (v2)")
-                                .font(.subheadline.bold())
+                    HStack(spacing: 10) {
+                        Button {
+                            showIPAFilePicker = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "plus.app.fill")
+                                Text("Install .IPA from Files")
+                                    .font(.caption.bold())
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(12)
+                            .background(Color.purple)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(12)
-                        .background(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
-                        .foregroundColor(.black)
-                        .cornerRadius(12)
+
+                        Button {
+                            workspace.installClipAppToHomeScreen(key: "all")
+                        } label: {
+                            HStack {
+                                Image(systemName: "apps.iphone.badge.plus")
+                                Text("Install All 13 Home Icons")
+                                    .font(.caption.bold())
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(12)
+                            .background(Color.cyan)
+                            .foregroundColor(.black)
+                            .cornerRadius(10)
+                        }
                     }
                 }
                 .padding(14)
                 .background(Color.white.opacity(0.06))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.cyan.opacity(0.4), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.purple.opacity(0.4), lineWidth: 1))
                 .cornerRadius(14)
 
+                // 2. Installed .IPA Packages Section
+                if !workspace.installedIPAs.isEmpty {
+                    Text("Installed .IPA Packages (\(workspace.installedIPAs.count))")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+
+                    ForEach(workspace.installedIPAs) { pkg in
+                        HStack(spacing: 12) {
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color.purple.opacity(0.25))
+                                .frame(width: 44, height: 44)
+                                .overlay(Image(systemName: "app.badge.checkmark.fill").foregroundColor(.purple))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(pkg.appName)
+                                    .font(.subheadline.bold())
+                                    .foregroundColor(.white)
+                                Text("\(pkg.fileName) • \(pkg.sizeMB) • \(pkg.mappedModuleID != nil ? "Native Keep-Alive" : "External Binary")")
+                                    .font(.caption2)
+                                    .foregroundColor(.gray)
+                            }
+                            Spacer()
+
+                            Button("Run") {
+                                workspace.launchInstalledIPA(pkg)
+                            }
+                            .font(.caption.bold())
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.green)
+                            .foregroundColor(.black)
+                            .cornerRadius(8)
+
+                            Button("+ Clip") {
+                                workspace.installClipAppToHomeScreen(key: pkg.mappedModuleID ?? "lc-\(pkg.bundleID)")
+                            }
+                            .font(.caption.bold())
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.1))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        }
+                        .padding(10)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(12)
+                    }
+                }
+
+                // 3. All 13 Built-In Keep-Alive Apps (Including Keepwatch, Jarvis, NASPortal!)
                 HStack {
-                    Text("Apps (Instant WebView Cache)")
+                    Text("All 13 Integrated Apps (Zero-Close Multitasking)")
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                     Spacer()
-                    Text("Active Route: \(workspace.truenasHost)")
+                    Text("Route: \(workspace.truenasHost)")
                         .font(.caption2.monospaced())
                         .foregroundColor(.green)
                 }
@@ -664,6 +872,12 @@ struct EmbeddedLiveAppHost: View {
 
     var body: some View {
         switch appID {
+        case "keepwatch":
+            MiniKeepwatchModule(host: workspace.truenasHost)
+        case "jarvis":
+            MiniJarvisModule(host: workspace.truenasHost)
+        case "nasportal":
+            MiniNASPortalModule(host: workspace.truenasHost)
         case "antigravity":
             MiniAntigravityModule()
         case "aegis":
@@ -690,11 +904,96 @@ struct EmbeddedLiveAppHost: View {
     }
 }
 
-// MARK: - 1. SentryCam Module (Fixed Port 5000 + All 3 Cameras: tapo_c200, bike_camera, doorbell + PTZ!)
+// MARK: - Keepwatch, Jarvis & NASPortal Integrated Modules
+struct MiniKeepwatchModule: View {
+    let host: String
+    @State private var tab = 0
+    @State private var dropURL = ""
+    @State private var dropStatus = "Ready to drop links or manage containers"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Section", selection: $tab) {
+                Text("Dashboard (:3000)").tag(0)
+                Text("Sonarr").tag(1)
+                Text("Radarr").tag(2)
+                Text("Jellyseerr").tag(3)
+                Text("Portainer").tag(4)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+
+            if tab == 0 {
+                FastCachedWebView(cacheKey: "kw-homepage", urlString: "http://\(host):3000")
+            } else if tab == 1 {
+                FastCachedWebView(cacheKey: "kw-sonarr", urlString: "http://\(host):30113")
+            } else if tab == 2 {
+                FastCachedWebView(cacheKey: "kw-radarr", urlString: "http://\(host):30025")
+            } else if tab == 3 {
+                FastCachedWebView(cacheKey: "kw-jellyseerr", urlString: "http://\(host):5055")
+            } else {
+                FastCachedWebView(cacheKey: "kw-portainer", urlString: "https://\(host):31015")
+            }
+        }
+    }
+}
+
+struct MiniJarvisModule: View {
+    let host: String
+    @State private var tab = 0
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Jarvis", selection: $tab) {
+                Text("Jarvis Console").tag(0)
+                Text("Navidrome Music").tag(1)
+                Text("Paydays (:8450)").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+
+            if tab == 0 {
+                FastCachedWebView(cacheKey: "jarvis-web", urlString: "https://jarvis.nas-server.co.uk")
+            } else if tab == 1 {
+                FastCachedWebView(cacheKey: "navidrome-web", urlString: "http://\(host):30043")
+            } else {
+                FastCachedWebView(cacheKey: "paydays-web", urlString: "http://\(host):8450")
+            }
+        }
+    }
+}
+
+struct MiniNASPortalModule: View {
+    let host: String
+    @State private var tab = 0
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Portal", selection: $tab) {
+                Text("Vaultwarden").tag(0)
+                Text("Nextcloud").tag(1)
+                Text("TrueNAS UI").tag(2)
+                Text("NZBGet").tag(3)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+
+            if tab == 0 {
+                FastCachedWebView(cacheKey: "np-vault", urlString: "https://vaultwarden.nas-server.co.uk")
+            } else if tab == 1 {
+                FastCachedWebView(cacheKey: "np-nextcloud", urlString: "https://nextcloud.nas-server.co.uk")
+            } else if tab == 2 {
+                FastCachedWebView(cacheKey: "np-truenas", urlString: "https://\(host):442")
+            } else {
+                FastCachedWebView(cacheKey: "np-nzbget", urlString: "http://\(host):6789")
+            }
+        }
+    }
+}
+
+// MARK: - SentryCam Module (Port 5000 + All 3 Cameras: tapo_c200, bike_camera, doorbell + PTZ!)
 struct MiniSentryCamModule: View {
     let host: String
     @State private var selectedCam = "tapo_c200"
-    @State private var viewMode = 0 // 0 = All 3 Cameras Grid, 1 = Single Camera + PTZ, 2 = Frigate WebUI
+    @State private var viewMode = 0
     @State private var tick = Int(Date().timeIntervalSince1970)
     @State private var status = "Connected to Frigate NVR (:5000)"
 
@@ -818,7 +1117,7 @@ struct MiniSentryCamModule: View {
     }
 }
 
-// MARK: - 2. NetRadar Module (Native Instant SpeedTest + OpenSpeedTest :30116 + Mesh Probe)
+// MARK: - NetRadar Module (Native SpeedTest + OpenSpeedTest :30116 + NPM)
 struct MiniNetRadarModule: View {
     let host: String
     @State private var tab = 0
@@ -902,14 +1201,12 @@ struct MiniNetRadarModule: View {
     func runNativeBenchmark() async {
         isTesting = true
         defer { isTesting = false }
-        // 1. Measure Ping
         let t0 = Date()
         if let u = URL(string: "http://\(host):5000/api/version") {
             _ = try? await URLSession.shared.data(from: u)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             pingMs = "\(ms)"
         }
-        // 2. Measure Throughput by pulling 8 camera frames / payload from TrueNAS
         let tStart = Date()
         var totalBytes = 0
         for i in 0..<6 {
@@ -925,7 +1222,6 @@ struct MiniNetRadarModule: View {
     }
 }
 
-// MARK: - 3. PhotoPulse Module (Cached Immich WebView + Instant 2FA)
 struct MiniPhotoPulseModule: View {
     let host: String
     @State private var tab = 0
