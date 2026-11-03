@@ -153,6 +153,19 @@ enum IPAArchiveExtractor {
     }
 }
 
+final class SelfSignedWebDelegate: NSObject, WKNavigationDelegate {
+    static let shared = SelfSignedWebDelegate()
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+            return
+        }
+        completionHandler(.performDefaultHandling, nil)
+    }
+}
+
 // MARK: - Native Background Audio & Lock-Screen Media Controller + Persistent WKWebView Cache
 @MainActor
 final class WebViewCache {
@@ -412,6 +425,7 @@ final class WebViewCache {
         }
 
         let w = WKWebView(frame: .zero, configuration: config)
+        w.navigationDelegate = SelfSignedWebDelegate.shared
         w.isOpaque = false
         w.backgroundColor = UIColor(red: 0.04, green: 0.05, blue: 0.09, alpha: 1.0)
         w.scrollView.backgroundColor = UIColor(red: 0.04, green: 0.05, blue: 0.09, alpha: 1.0)
@@ -1334,20 +1348,20 @@ struct MiniNASPortalModule: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("Portal", selection: $tab) {
-                Text("Vaultwarden").tag(0)
-                Text("Nextcloud").tag(1)
-                Text("TrueNAS UI").tag(2)
+                Text("Apps & 2FA").tag(0)
+                Text("TrueNAS UI").tag(1)
+                Text("Vaultwarden").tag(2)
                 Text("NZBGet").tag(3)
             }
             .pickerStyle(.segmented)
             .padding(8)
 
             if tab == 0 {
-                FastCachedWebView(cacheKey: "np-vault", urlString: "https://vaultwarden.nas-server.co.uk")
+                FastCachedWebView(cacheKey: "np-hub", urlString: "http://\(host):8766/app/nasportal")
             } else if tab == 1 {
-                FastCachedWebView(cacheKey: "np-nextcloud", urlString: "https://nextcloud.nas-server.co.uk")
+                FastCachedWebView(cacheKey: "np-truenas", urlString: "http://\(host):82")
             } else if tab == 2 {
-                FastCachedWebView(cacheKey: "np-truenas", urlString: "https://\(host):442")
+                FastCachedWebView(cacheKey: "np-vault", urlString: "http://\(host):8082")
             } else {
                 FastCachedWebView(cacheKey: "np-nzbget", urlString: "http://\(host):6789")
             }
