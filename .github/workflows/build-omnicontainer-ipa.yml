@@ -42,17 +42,52 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Build OmniContainerPlugin.dylib & Patch zxPluginsInject.dylib for YouTube Plus
+        run: |
+          mkdir -p out
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -mios-version-min=16.0 \
+            -fobjc-arc \
+            -c Plugin/OmniPluginEntry.m \
+            -o out/OmniPluginEntry.o
+
+          xcrun --sdk iphoneos swiftc \
+            -emit-library \
+            -target arm64-apple-ios16.0 \
+            -O \
+            -D OMNI_DYLIB_PLUGIN \
+            -module-name OmniContainerPlugin \
+            -Xlinker -install_name -Xlinker @rpath/OmniContainerPlugin.dylib \
+            OmniContainer/OmniContainerApp.swift \
+            out/OmniPluginEntry.o \
+            -o out/OmniContainerPlugin.dylib
+
+          rm -f out/OmniPluginEntry.o
+          codesign -f -s - out/OmniContainerPlugin.dylib
+          otool -L out/OmniContainerPlugin.dylib
+
+          cp Plugin/zxPluginsInject.dylib out/zxPluginsInject.dylib
+          codesign --remove-signature out/zxPluginsInject.dylib
+          python3 Plugin/patch_zx_dylib.py out/zxPluginsInject.dylib
+          codesign -f -s - out/zxPluginsInject.dylib
+          otool -L out/zxPluginsInject.dylib
+
       - name: Package Payload/OmniContainer.app into OmniContainer.ipa
         run: |
           mkdir -p out/Payload
           cp -R build/Release-iphoneos/OmniContainer.app out/Payload/
           cd out
           zip -qry OmniContainer.ipa Payload
-          ls -lh OmniContainer.ipa
+          rm -rf Payload
+          ls -lh
 
-      - name: Upload OmniContainer.ipa artifact
+      - name: Upload OmniContainer.ipa and Plugin Dylibs
         uses: actions/upload-artifact@v4
         with:
           name: OmniContainer-ipa
-          path: omnicontainer/out/OmniContainer.ipa
+          path: |
+            omnicontainer/out/OmniContainer.ipa
+            omnicontainer/out/OmniContainerPlugin.dylib
+            omnicontainer/out/zxPluginsInject.dylib
           retention-days: 30

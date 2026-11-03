@@ -485,9 +485,18 @@ class OmniWorkspaceStore: ObservableObject {
     @Published var splitScreenEnabled: Bool = false
     @Published var secondaryAppID: String = "sentrycam"
     @Published var installedIPAs: [InstalledIPAPackage] = []
-    @Published var statusBanner: String = "100% Standalone OmniContainer • Zero LiveContainer Dependency!"
+    @Published var statusBanner: String = "Native YouTube 21.42.4 Plus + 13 OmniContainer Apps Integrated!"
     @Published var truenasHost: String = "100.85.127.42"
     @Published var routeLabel: String = "Tailscale"
+    @Published var isMinimizedToYouTube: Bool = true {
+        didSet {
+            OmniOverlayController.shared.syncVisibility()
+        }
+    }
+
+    var isRunningInsideNativeYouTube: Bool {
+        NSClassFromString("YTSceneDelegate") != nil || Bundle.main.bundlePath.hasSuffix("YouTube.app")
+    }
 
     private let installedKey = "omnicontainer.installed.ipas.v4"
 
@@ -582,6 +591,11 @@ class OmniWorkspaceStore: ObservableObject {
     }
 
     func launchOrFocus(_ appID: String) {
+        if appID == "youtube" && isRunningInsideNativeYouTube {
+            isMinimizedToYouTube = true
+            return
+        }
+        isMinimizedToYouTube = false
         if !runningAppIDs.contains(appID) {
             runningAppIDs.append(appID)
         }
@@ -608,6 +622,132 @@ class OmniWorkspaceStore: ObservableObject {
     }
 }
 
+// MARK: - Passthrough UIWindow & Overlay Controller for Native YouTube 21.42.4 Plus Integration
+final class OmniOverlayWindow: UIWindow {
+    var passthroughMode: Bool = true
+    weak var pillButton: UIButton?
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if passthroughMode {
+            if let btn = pillButton, !btn.isHidden {
+                let ptInBtn = convert(point, to: btn)
+                if btn.bounds.insetBy(dx: -10, dy: -10).contains(ptInBtn) {
+                    return btn
+                }
+            }
+            return nil
+        }
+        return super.hitTest(point, with: event)
+    }
+}
+
+@MainActor
+final class OmniOverlayController: NSObject {
+    static let shared = OmniOverlayController()
+    lazy var workspace = OmniWorkspaceStore()
+    private var overlayWindow: OmniOverlayWindow?
+    private var hostingController: UIHostingController<AnyView>?
+    private var pillButton: UIButton?
+    private var pollTimer: Timer?
+
+    func start() {
+        guard pollTimer == nil else { return }
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.attachIfNeeded()
+                self?.syncVisibility()
+            }
+        }
+    }
+
+    func handleURLString(_ str: String) {
+        guard let u = URL(string: str) else { return }
+        attachIfNeeded()
+        workspace.handleIncomingURL(u)
+        syncVisibility()
+    }
+
+    func attachIfNeeded() {
+        guard overlayWindow == nil else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
+            return
+        }
+
+        let win = OmniOverlayWindow(windowScene: scene)
+        win.frame = scene.coordinateSpace.bounds
+        win.windowLevel = UIWindow.Level.statusBar + 50
+        win.backgroundColor = .clear
+
+        let rootView = AnyView(
+            OmniRootContainerView()
+                .environmentObject(workspace)
+                .preferredColorScheme(.dark)
+        )
+        let host = UIHostingController(rootView: rootView)
+        host.view.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
+        host.view.frame = win.bounds
+        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        win.rootViewController = host
+
+        let btn = UIButton(type: .system)
+        btn.frame = CGRect(x: max(16, win.bounds.width - 96), y: 58, width: 84, height: 34)
+        btn.setTitle("⚡ Omni", for: .normal)
+        btn.setTitleColor(.black, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .heavy)
+        btn.backgroundColor = UIColor(red: 0.0, green: 0.90, blue: 1.0, alpha: 0.92)
+        btn.layer.cornerRadius = 17
+        btn.layer.borderWidth = 1.5
+        btn.layer.borderColor = UIColor.white.withAlphaComponent(0.75).cgColor
+        btn.layer.shadowColor = UIColor.black.cgColor
+        btn.layer.shadowOpacity = 0.55
+        btn.layer.shadowRadius = 6
+        btn.layer.shadowOffset = CGSize(width: 0, height: 2)
+        btn.addTarget(self, action: #selector(didTapPill), for: .touchUpInside)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(didPanPill(_:)))
+        btn.addGestureRecognizer(pan)
+
+        win.addSubview(btn)
+        win.pillButton = btn
+        win.isHidden = false
+
+        self.overlayWindow = win
+        self.hostingController = host
+        self.pillButton = btn
+        syncVisibility()
+    }
+
+    @objc private func didTapPill() {
+        workspace.isMinimizedToYouTube = false
+        syncVisibility()
+    }
+
+    @objc private func didPanPill(_ gr: UIPanGestureRecognizer) {
+        guard let btn = pillButton, let win = overlayWindow else { return }
+        let trans = gr.translation(in: win)
+        var center = CGPoint(x: btn.center.x + trans.x, y: btn.center.y + trans.y)
+        center.x = max(48, min(win.bounds.width - 48, center.x))
+        center.y = max(52, min(win.bounds.height - 52, center.y))
+        btn.center = center
+        gr.setTranslation(.zero, in: win)
+    }
+
+    func syncVisibility() {
+        guard let win = overlayWindow, let host = hostingController, let btn = pillButton else { return }
+        let minimized = workspace.isMinimizedToYouTube
+        win.passthroughMode = minimized
+        host.view.isHidden = minimized
+        btn.isHidden = !minimized
+        if !minimized {
+            win.bringSubviewToFront(host.view)
+        } else {
+            win.bringSubviewToFront(btn)
+        }
+    }
+}
+
+#if !OMNI_DYLIB_PLUGIN
 @main
 struct OmniContainerApp: App {
     @StateObject private var workspace = OmniWorkspaceStore()
@@ -620,6 +760,22 @@ struct OmniContainerApp: App {
                     workspace.handleIncomingURL(url)
                 }
         }
+    }
+}
+#endif
+
+@_cdecl("OmniPluginInitialize")
+public func OmniPluginInitialize() {
+    Task { @MainActor in
+        OmniOverlayController.shared.start()
+    }
+}
+
+@_cdecl("OmniPluginHandleURLString")
+public func OmniPluginHandleURLString(_ cStr: UnsafePointer<CChar>) {
+    let str = String(cString: cStr)
+    Task { @MainActor in
+        OmniOverlayController.shared.handleURLString(str)
     }
 }
 
@@ -680,6 +836,25 @@ struct OmniRootContainerView: View {
                     .padding(.vertical, 6)
                     .background(workspace.activeAppID == "home" ? Color.cyan : Color.white.opacity(0.1))
                     .foregroundColor(workspace.activeAppID == "home" ? .black : .white)
+                    .cornerRadius(8)
+                }
+
+                Button {
+                    if workspace.isRunningInsideNativeYouTube {
+                        workspace.isMinimizedToYouTube = true
+                    } else {
+                        workspace.launchOrFocus("youtube")
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.rectangle.fill")
+                        Text("YouTube")
+                            .font(.caption.bold())
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(Color.red)
+                    .foregroundColor(.white)
                     .cornerRadius(8)
                 }
 
