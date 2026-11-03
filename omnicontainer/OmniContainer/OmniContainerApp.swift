@@ -10,24 +10,82 @@ struct OmniAppDescriptor: Identifiable, Hashable {
     let subtitle: String
     let icon: String
     let color: Color
-    let hexColor: String
-    let symbolText: String
-    let bundleID: String
+    let sym: String
+    let rgb: (CGFloat, CGFloat, CGFloat)
 }
 
-struct ImportedIPAItem: Identifiable, Codable {
-    var id: String = UUID().uuidString
-    let fileName: String
-    let bundleName: String
-    let bundleID: String
-    let version: String
-    let executableName: String
-    let fileSizeMB: String
-    let importedAt: Date
-    var targetScheme: String // "omnicontainer" or "livecontainer"
+// MARK: - Persistent WKWebView Cache (Prevents White Screens & Reloading When Switching Apps!)
+@MainActor
+final class WebViewCache {
+    static let shared = WebViewCache()
+    private var views: [String: WKWebView] = [:]
+    private var loadedURLs: [String: String] = [:]
+
+    func webView(for key: String, urlString: String) -> WKWebView {
+        if let existing = views[key] {
+            if loadedURLs[key] != urlString, let u = URL(string: urlString) {
+                loadedURLs[key] = urlString
+                existing.load(URLRequest(url: u))
+            }
+            return existing
+        }
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        let w = WKWebView(frame: .zero, configuration: config)
+        w.isOpaque = false
+        w.backgroundColor = UIColor(red: 0.04, green: 0.05, blue: 0.09, alpha: 1.0)
+        w.scrollView.backgroundColor = UIColor(red: 0.04, green: 0.05, blue: 0.09, alpha: 1.0)
+        views[key] = w
+        if let u = URL(string: urlString) {
+            loadedURLs[key] = urlString
+            w.load(URLRequest(url: u))
+        }
+        return w
+    }
+
+    func reload(key: String, urlString: String) {
+        guard let u = URL(string: urlString) else { return }
+        loadedURLs[key] = urlString
+        views[key]?.load(URLRequest(url: u))
+    }
 }
 
-// MARK: - Local Loopback HTTP Server (127.0.0.1:8765) to Install .mobileconfig Home Screen ClipApps directly in iOS Safari!
+struct FastCachedWebView: UIViewRepresentable {
+    let cacheKey: String
+    let urlString: String
+
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        container.backgroundColor = UIColor(red: 0.04, green: 0.05, blue: 0.09, alpha: 1.0)
+        let wv = WebViewCache.shared.webView(for: cacheKey, urlString: urlString)
+        wv.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(wv)
+        NSLayoutConstraint.activate([
+            wv.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            wv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            wv.topAnchor.constraint(equalTo: container.topAnchor),
+            wv.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        return container
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        let wv = WebViewCache.shared.webView(for: cacheKey, urlString: urlString)
+        if wv.superview !== uiView {
+            wv.removeFromSuperview()
+            wv.translatesAutoresizingMaskIntoConstraints = false
+            uiView.addSubview(wv)
+            NSLayoutConstraint.activate([
+                wv.leadingAnchor.constraint(equalTo: uiView.leadingAnchor),
+                wv.trailingAnchor.constraint(equalTo: uiView.trailingAnchor),
+                wv.topAnchor.constraint(equalTo: uiView.topAnchor),
+                wv.bottomAnchor.constraint(equalTo: uiView.bottomAnchor)
+            ])
+        }
+    }
+}
+
+// MARK: - Local Loopback HTTP Server (127.0.0.1:8765) for .mobileconfig & Instant Launch Redirects
 final class ClipProfileHTTPServer {
     static let shared = ClipProfileHTTPServer()
     private var listener: NWListener?
@@ -60,13 +118,29 @@ final class ClipProfileHTTPServer {
             let firstLine = req.components(separatedBy: "\r\n").first ?? ""
             let parts = firstLine.components(separatedBy: " ")
             let path = parts.count > 1 ? parts[1] : "/"
-            let key = path.replacingOccurrences(of: "/clip/", with: "").replacingOccurrences(of: ".mobileconfig", with: "")
 
+            if path.hasPrefix("/launch/") {
+                let appID = path.replacingOccurrences(of: "/launch/", with: "")
+                let scheme = appID.hasPrefix("lc-")
+                    ? "livecontainer://open?bundle-id=\(appID.replacingOccurrences(of: "lc-", with: ""))"
+                    : "omnicontainer://open?app=\(appID)"
+                let html = """
+                <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script>window.location.replace("\(scheme)");</script></head><body style="background:#060812;color:#fff;font-family:-apple-system,sans-serif;text-align:center;padding-top:40vh;"><a href="\(scheme)" style="color:#00e5ff;font-size:20px;font-weight:bold;">Launching \(appID.uppercased())...</a></body></html>
+                """
+                let body = Data(html.utf8)
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+                var payload = Data(header.utf8)
+                payload.append(body)
+                conn.send(content: payload, completion: .contentProcessed { _ in conn.cancel() })
+                return
+            }
+
+            let key = path.replacingOccurrences(of: "/clip/", with: "").replacingOccurrences(of: ".mobileconfig", with: "")
             if let body = self.profileProvider?(key) {
                 let header = [
                     "HTTP/1.1 200 OK",
                     "Content-Type: application/x-apple-aspen-config",
-                    "Content-Disposition: attachment; filename=\"\(key).mobileconfig\"",
+                    "Content-Disposition: attachment; filename=\"\(key)-v2.mobileconfig\"",
                     "Content-Length: \(body.count)",
                     "Connection: close",
                     "",
@@ -74,17 +148,9 @@ final class ClipProfileHTTPServer {
                 ].joined(separator: "\r\n")
                 var payload = Data(header.utf8)
                 payload.append(body)
-                conn.send(content: payload, completion: .contentProcessed { _ in
-                    conn.cancel()
-                })
+                conn.send(content: payload, completion: .contentProcessed { _ in conn.cancel() })
             } else {
-                let msg = Data("Profile not found".utf8)
-                let header = "HTTP/1.1 404 Not Found\r\nContent-Length: \(msg.count)\r\nConnection: close\r\n\r\n"
-                var payload = Data(header.utf8)
-                payload.append(msg)
-                conn.send(content: payload, completion: .contentProcessed { _ in
-                    conn.cancel()
-                })
+                conn.cancel()
             }
         }
     }
@@ -93,52 +159,72 @@ final class ClipProfileHTTPServer {
 @MainActor
 class OmniWorkspaceStore: ObservableObject {
     let builtInApps: [OmniAppDescriptor] = [
-        OmniAppDescriptor(id: "antigravity", title: "Antigravity", subtitle: "3-Node Fleet Command", icon: "cpu.fill", color: .cyan, hexColor: "#00E5FF", symbolText: "AG", bundleID: "com.ross.antigravity"),
-        OmniAppDescriptor(id: "aegis", title: "Aegis Browser", subtitle: "Ad-Block + 3-Node Drawer", icon: "shield.lefthalf.filled", color: .blue, hexColor: "#2979FF", symbolText: "AE", bundleID: "com.ross.aegismobile"),
-        OmniAppDescriptor(id: "deskswitch", title: "DeskSwitch", subtitle: "Monitor/TV + Steam + Trackpad", icon: "tv.and.mediabox", color: .orange, hexColor: "#FF9500", symbolText: "DS", bundleID: "com.ross.deskswitch"),
-        OmniAppDescriptor(id: "sentrycam", title: "SentryCam", subtitle: "Frigate AI CCTV + Tapo PTZ", icon: "video.fill", color: .red, hexColor: "#FF3B30", symbolText: "SC", bundleID: "com.ross.sentrycam"),
-        OmniAppDescriptor(id: "aniimo", title: "Aniimo Pilot", subtitle: "Live Game Stream & Farm Bot", icon: "gamecontroller.fill", color: .green, hexColor: "#00E676", symbolText: "AP", bundleID: "com.ross.aniimopilot"),
-        OmniAppDescriptor(id: "racebolt", title: "Racebolt Ops", subtitle: "SKU Stock Lookup & Audit", icon: "wrench.and.screwdriver.fill", color: .yellow, hexColor: "#FFCC00", symbolText: "RB", bundleID: "com.ross.raceboltops"),
-        OmniAppDescriptor(id: "photopulse", title: "PhotoPulse", subtitle: "iCloudPD 2FA & Immich Frames", icon: "photo.artframe", color: .pink, hexColor: "#FF4081", symbolText: "PP", bundleID: "com.ross.photopulse"),
-        OmniAppDescriptor(id: "netradar", title: "NetRadar", subtitle: "Tailscale Mesh & SSL Audit", icon: "network", color: .teal, hexColor: "#00E5FF", symbolText: "NR", bundleID: "com.ross.netradar"),
-        OmniAppDescriptor(id: "soulseekr", title: "SoulSeekr", subtitle: "slskd + Hearr + Soularr P2P", icon: "waveform.badge.magnifyingglass", color: .purple, hexColor: "#BA68C8", symbolText: "SS", bundleID: "com.ross.soulseekr"),
-        OmniAppDescriptor(id: "zimadeck", title: "ZimaDeck", subtitle: "Zimaboard + Komga + RustDesk", icon: "server.rack", color: .mint, hexColor: "#00E6B4", symbolText: "ZD", bundleID: "com.ross.zimadeck")
+        OmniAppDescriptor(id: "antigravity", title: "Antigravity", subtitle: "3-Node Fleet Command", icon: "cpu.fill", color: .cyan, sym: "AG", rgb: (0.0, 0.9, 1.0)),
+        OmniAppDescriptor(id: "aegis", title: "Aegis Browser", subtitle: "Ad-Block + 3-Node Drawer", icon: "shield.lefthalf.filled", color: .blue, sym: "AE", rgb: (0.16, 0.47, 1.0)),
+        OmniAppDescriptor(id: "deskswitch", title: "DeskSwitch", subtitle: "Monitor/TV + Steam + Trackpad", icon: "tv.and.mediabox", color: .orange, sym: "DS", rgb: (1.0, 0.58, 0.0)),
+        OmniAppDescriptor(id: "sentrycam", title: "SentryCam", subtitle: "Frigate AI CCTV + Tapo PTZ", icon: "video.fill", color: .red, sym: "SC", rgb: (1.0, 0.23, 0.19)),
+        OmniAppDescriptor(id: "aniimo", title: "Aniimo Pilot", subtitle: "Live Game Stream & Farm Bot", icon: "gamecontroller.fill", color: .green, sym: "AP", rgb: (0.0, 0.9, 0.46)),
+        OmniAppDescriptor(id: "racebolt", title: "Racebolt Ops", subtitle: "SKU Stock Lookup & Audit", icon: "wrench.and.screwdriver.fill", color: .yellow, sym: "RB", rgb: (1.0, 0.8, 0.0)),
+        OmniAppDescriptor(id: "photopulse", title: "PhotoPulse", subtitle: "iCloudPD 2FA & Immich Frames", icon: "photo.artframe", color: .pink, sym: "PP", rgb: (1.0, 0.25, 0.5)),
+        OmniAppDescriptor(id: "netradar", title: "NetRadar", subtitle: "SpeedTest + Mesh & SSL Audit", icon: "network", color: .teal, sym: "NR", rgb: (0.0, 0.85, 0.95)),
+        OmniAppDescriptor(id: "soulseekr", title: "SoulSeekr", subtitle: "slskd + Hearr + Soularr P2P", icon: "waveform.badge.magnifyingglass", color: .purple, sym: "SS", rgb: (0.73, 0.41, 0.78)),
+        OmniAppDescriptor(id: "zimadeck", title: "ZimaDeck", subtitle: "Zimaboard + Komga + RustDesk", icon: "server.rack", color: .mint, sym: "ZD", rgb: (0.0, 0.9, 0.7))
     ]
 
-    // Pre-keep all 10 apps warm or launch on demand; once in runningAppIDs, they NEVER close when switching!
-    @Published var runningAppIDs: [String] = ["antigravity", "deskswitch", "aegis", "sentrycam"]
+    // Lazy launch: only start apps when opened, and keep their state/WebViews cached!
+    @Published var runningAppIDs: [String] = []
     @Published var activeAppID: String = "home"
     @Published var splitScreenEnabled: Bool = false
     @Published var secondaryAppID: String = "sentrycam"
-    @Published var importedIPAs: [ImportedIPAItem] = []
-    @Published var statusBanner: String = "Tap any ClipApp on your iPhone Home Screen to jump straight into that app!"
+    @Published var statusBanner: String = "Fast WebView Cache Active • Zero Reload Switching"
     @Published var showTopBarInFullScreen: Bool = true
 
-    private let importedKey = "omnicontainer.imported.ipas.v2"
+    // Smart Route Selector: Tailscale (100.85.127.42) vs LAN (38.9.96.58)
+    @Published var truenasHost: String = "100.85.127.42"
+    @Published var routeLabel: String = "Tailscale"
 
     init() {
-        if let data = UserDefaults.standard.data(forKey: importedKey),
-           let decoded = try? JSONDecoder().decode([ImportedIPAItem].self, from: data) {
-            importedIPAs = decoded
-        }
         ClipProfileHTTPServer.shared.profileProvider = { [weak self] key in
             guard let self = self else { return nil }
-            return self.generateMobileConfigData(forKey: key)
+            return self.generateMobileConfigData(forKey: key, host: self.truenasHost)
         }
         ClipProfileHTTPServer.shared.start()
+        Task { await detectFastestRoute() }
+    }
+
+    func detectFastestRoute() async {
+        // Race LAN (38.9.96.58) vs Tailscale (100.85.127.42) with a 0.6s timeout so we never hang!
+        if let u = URL(string: "http://38.9.96.58:5000/api/version") {
+            var req = URLRequest(url: u)
+            req.timeoutInterval = 0.6
+            if let (_, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                truenasHost = "38.9.96.58"
+                routeLabel = "Direct LAN (Fast)"
+                return
+            }
+        }
+        truenasHost = "100.85.127.42"
+        routeLabel = "Tailscale"
+    }
+
+    func toggleRoute() {
+        if truenasHost == "100.85.127.42" {
+            truenasHost = "38.9.96.58"
+            routeLabel = "Direct LAN"
+        } else {
+            truenasHost = "100.85.127.42"
+            routeLabel = "Tailscale"
+        }
     }
 
     func handleIncomingURL(_ url: URL) {
-        // Supports:
-        // omnicontainer://open?app=deskswitch
-        // omnicontainer://deskswitch
         let host = (url.host ?? "").lowercased()
         let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let queryApp = comps?.queryItems?.first(where: { $0.name == "app" || $0.name == "id" })?.value?.lowercased()
         let target = queryApp ?? host
         if !target.isEmpty && target != "open" {
             launchOrFocus(target)
-            statusBanner = "Direct-launched \(target.uppercased()) from Home Screen ClipApp!"
         }
     }
 
@@ -156,75 +242,6 @@ class OmniWorkspaceStore: ObservableObject {
         }
     }
 
-    func saveImported() {
-        if let data = try? JSONEncoder().encode(importedIPAs) {
-            UserDefaults.standard.set(data, forKey: importedKey)
-        }
-    }
-
-    func importIPAFile(from url: URL) {
-        let accessed = url.startAccessingSecurityScopedResource()
-        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-
-        let fm = FileManager.default
-        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let ipaDir = docs.appendingPathComponent("ImportedIPAs", isDirectory: true)
-        try? fm.createDirectory(at: ipaDir, withIntermediateDirectories: true)
-
-        let fileName = url.lastPathComponent
-        let dest = ipaDir.appendingPathComponent(fileName)
-        try? fm.removeItem(at: dest)
-        do {
-            try fm.copyItem(at: url, to: dest)
-            let attrs = try? fm.attributesOfItem(atPath: dest.path)
-            let bytes = (attrs?[.size] as? Int64) ?? 0
-            let mb = String(format: "%.1f MB", Double(bytes) / 1_048_576.0)
-            let cleanName = fileName.replacingOccurrences(of: ".ipa", with: "")
-            let item = ImportedIPAItem(
-                fileName: fileName,
-                bundleName: cleanName,
-                bundleID: "com.ross.\(cleanName.lowercased())",
-                version: "1.0",
-                executableName: cleanName,
-                fileSizeMB: mb,
-                importedAt: Date(),
-                targetScheme: "omnicontainer"
-            )
-            importedIPAs.insert(item, at: 0)
-            saveImported()
-            statusBanner = "Imported \(fileName) (\(mb))!"
-        } catch {
-            statusBanner = "Import failed: \(error.localizedDescription)"
-        }
-    }
-
-    // MARK: - Home Screen ClipApp (.mobileconfig) Generator
-    func renderClipIconPNG(symbolText: String, hexColor: String) -> String {
-        let size = CGSize(width: 180, height: 180)
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let img = renderer.image { ctx in
-            let rect = CGRect(origin: .zero, size: size)
-            UIColor(red: 0.06, green: 0.08, blue: 0.14, alpha: 1.0).setFill()
-            ctx.fill(rect)
-
-            let circle = UIBezierPath(ovalIn: rect.insetBy(dx: 16, dy: 16))
-            UIColor.cyan.withAlphaComponent(0.25).setStroke()
-            circle.lineWidth = 4
-            circle.stroke()
-
-            let pStyle = NSMutableParagraphStyle()
-            pStyle.alignment = .center
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 64, weight: .heavy),
-                .foregroundColor: UIColor.white,
-                .paragraphStyle: pStyle
-            ]
-            let textRect = CGRect(x: 0, y: 50, width: 180, height: 80)
-            symbolText.draw(in: textRect, withAttributes: attrs)
-        }
-        return img.pngData()?.base64EncodedString() ?? ""
-    }
-
     nonisolated func makeIconBase64(sym: String, r: CGFloat, g: CGFloat, b: CGFloat) -> String {
         let size = CGSize(width: 180, height: 180)
         let renderer = UIGraphicsImageRenderer(size: size)
@@ -234,9 +251,9 @@ class OmniWorkspaceStore: ObservableObject {
             ctx.fill(rect)
 
             let circle = UIBezierPath(ovalIn: rect.insetBy(dx: 14, dy: 14))
-            UIColor(red: r, green: g, blue: b, alpha: 0.22).setFill()
+            UIColor(red: r, green: g, blue: b, alpha: 0.24).setFill()
             circle.fill()
-            UIColor(red: r, green: g, blue: b, alpha: 0.9).setStroke()
+            UIColor(red: r, green: g, blue: b, alpha: 0.95).setStroke()
             circle.lineWidth = 6
             circle.stroke()
 
@@ -253,19 +270,21 @@ class OmniWorkspaceStore: ObservableObject {
         return img.pngData()?.base64EncodedString() ?? ""
     }
 
-    nonisolated func generateMobileConfigData(forKey key: String) -> Data? {
-        // Build either a single WebClip or the All-10 ClipApps bundle!
+    nonisolated func generateMobileConfigData(forKey key: String, host: String) -> Data? {
+        // IMPORTANT: iOS com.apple.webclip.managed REQUIRES an http:// or https:// URL to create Home Screen icons!
+        // We point each WebClip URL to http://100.85.127.42:8766/launch/<id>, which immediately bounces to omnicontainer://open?app=<id>!
+        let baseBounce = "http://\(host):8766/launch"
         let apps: [(id: String, title: String, sym: String, url: String, rgb: (CGFloat, CGFloat, CGFloat))] = [
-            ("antigravity", "Antigravity", "AG", "omnicontainer://open?app=antigravity", (0.0, 0.9, 1.0)),
-            ("aegis", "Aegis Browser", "AE", "omnicontainer://open?app=aegis", (0.16, 0.47, 1.0)),
-            ("deskswitch", "DeskSwitch", "DS", "omnicontainer://open?app=deskswitch", (1.0, 0.58, 0.0)),
-            ("sentrycam", "SentryCam", "SC", "omnicontainer://open?app=sentrycam", (1.0, 0.23, 0.19)),
-            ("aniimo", "Aniimo Pilot", "AP", "omnicontainer://open?app=aniimo", (0.0, 0.9, 0.46)),
-            ("racebolt", "Racebolt Ops", "RB", "omnicontainer://open?app=racebolt", (1.0, 0.8, 0.0)),
-            ("photopulse", "PhotoPulse", "PP", "omnicontainer://open?app=photopulse", (1.0, 0.25, 0.5)),
-            ("netradar", "NetRadar", "NR", "omnicontainer://open?app=netradar", (0.0, 0.85, 0.95)),
-            ("soulseekr", "SoulSeekr", "SS", "omnicontainer://open?app=soulseekr", (0.73, 0.41, 0.78)),
-            ("zimadeck", "ZimaDeck", "ZD", "omnicontainer://open?app=zimadeck", (0.0, 0.9, 0.7))
+            ("antigravity", "Antigravity", "AG", "\(baseBounce)/antigravity", (0.0, 0.9, 1.0)),
+            ("aegis", "Aegis Browser", "AE", "\(baseBounce)/aegis", (0.16, 0.47, 1.0)),
+            ("deskswitch", "DeskSwitch", "DS", "\(baseBounce)/deskswitch", (1.0, 0.58, 0.0)),
+            ("sentrycam", "SentryCam", "SC", "\(baseBounce)/sentrycam", (1.0, 0.23, 0.19)),
+            ("aniimo", "Aniimo Pilot", "AP", "\(baseBounce)/aniimo", (0.0, 0.9, 0.46)),
+            ("racebolt", "Racebolt Ops", "RB", "\(baseBounce)/racebolt", (1.0, 0.8, 0.0)),
+            ("photopulse", "PhotoPulse", "PP", "\(baseBounce)/photopulse", (1.0, 0.25, 0.5)),
+            ("netradar", "NetRadar", "NR", "\(baseBounce)/netradar", (0.0, 0.85, 0.95)),
+            ("soulseekr", "SoulSeekr", "SS", "\(baseBounce)/soulseekr", (0.73, 0.41, 0.78)),
+            ("zimadeck", "ZimaDeck", "ZD", "\(baseBounce)/zimadeck", (0.0, 0.9, 0.7))
         ]
 
         let selected: [(id: String, title: String, sym: String, url: String, rgb: (CGFloat, CGFloat, CGFloat))]
@@ -275,11 +294,11 @@ class OmniWorkspaceStore: ObservableObject {
             let bid = key.replacingOccurrences(of: "lc-", with: "")
             let shortTitle = bid.components(separatedBy: ".").last?.capitalized ?? bid
             let sym = String(shortTitle.prefix(2)).uppercased()
-            selected = [(bid, shortTitle, sym, "livecontainer://open?bundle-id=\(bid)", (1.0, 0.58, 0.0))]
+            selected = [(bid, shortTitle, sym, "\(baseBounce)/lc-\(bid)", (1.0, 0.58, 0.0))]
         } else if let found = apps.first(where: { $0.id == key }) {
             selected = [found]
         } else {
-            selected = [(key, key.capitalized, "OC", "omnicontainer://open?app=\(key)", (0.0, 0.9, 1.0))]
+            selected = [(key, key.capitalized, "OC", "\(baseBounce)/\(key)", (0.0, 0.9, 1.0))]
         }
 
         var payloadsXML = ""
@@ -299,11 +318,11 @@ class OmniWorkspaceStore: ObservableObject {
                 <key>Label</key>
                 <string>\(item.title)</string>
                 <key>PayloadDescription</key>
-                <string>Direct Home Screen ClipApp Launcher for \(item.title)</string>
+                <string>Home Screen ClipApp Launcher for \(item.title)</string>
                 <key>PayloadDisplayName</key>
-                <string>\(item.title) ClipApp</string>
+                <string>\(item.title)</string>
                 <key>PayloadIdentifier</key>
-                <string>com.ross.omnicontainer.webclip.\(item.id)</string>
+                <string>com.ross.omnicontainer.webclip.v2.\(item.id)</string>
                 <key>PayloadType</key>
                 <string>com.apple.webclip.managed</string>
                 <key>PayloadUUID</key>
@@ -319,7 +338,7 @@ class OmniWorkspaceStore: ObservableObject {
         }
 
         let rootUUID = UUID().uuidString
-        let displayTitle = (key == "all") ? "OmniContainer All 10 Home Screen ClipApps" : "\(selected.first?.title ?? key) Home Screen ClipApp"
+        let displayTitle = (key == "all") ? "OmniContainer 10 Home Screen ClipApps (v2)" : "\(selected.first?.title ?? key) Home Screen ClipApp"
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -330,13 +349,13 @@ class OmniWorkspaceStore: ObservableObject {
                 \(payloadsXML)
             </array>
             <key>PayloadDescription</key>
-            <string>Adds instant-launch ClipApp icons to your iPhone Home Screen that open straight into each app inside OmniContainer without closing your other running apps.</string>
+            <string>Adds 10 custom Home Screen icons that launch straight into each app inside OmniContainer without closing your other running apps.</string>
             <key>PayloadDisplayName</key>
             <string>\(displayTitle)</string>
             <key>PayloadIdentifier</key>
-            <string>com.ross.omnicontainer.profile.\(key)</string>
+            <string>com.ross.omnicontainer.profile.v2.\(key)</string>
             <key>PayloadOrganization</key>
-            <string>Ross Homelab &amp; Antigravity</string>
+            <string>Ross Homelab</string>
             <key>PayloadRemovalDisallowed</key>
             <false/>
             <key>PayloadType</key>
@@ -354,7 +373,6 @@ class OmniWorkspaceStore: ObservableObject {
     func installClipAppToHomeScreen(key: String) {
         if let u = URL(string: "http://127.0.0.1:8765/clip/\(key).mobileconfig") {
             UIApplication.shared.open(u)
-            statusBanner = "Opened ClipApp installer in Safari — tap Allow, then Install in Settings!"
         }
     }
 }
@@ -376,103 +394,46 @@ struct OmniContainerApp: App {
 
 struct OmniRootContainerView: View {
     @EnvironmentObject var workspace: OmniWorkspaceStore
-    @State private var showFileImporter = false
 
     var body: some View {
         VStack(spacing: 0) {
-            if workspace.showTopBarInFullScreen || workspace.activeAppID == "home" {
-                omniTopDockBar
-            } else {
-                // Ultra-slim floating pill when inside a ClipApp so it feels 100% like a standalone native app!
-                HStack {
-                    Button {
-                        workspace.activeAppID = "home"
-                    } label: {
-                        Label("All Apps (\(workspace.runningAppIDs.count) Running)", systemImage: "square.grid.2x2.fill")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.cyan)
-                    }
-                    Spacer()
-                    Text(workspace.activeAppID.uppercased())
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(.gray)
-                    Spacer()
-                    Button {
-                        workspace.showTopBarInFullScreen = true
-                    } label: {
-                        Image(systemName: "Dock.rectangle")
-                            .font(.caption2)
-                            .foregroundColor(.white)
-                        Text("Show Dock")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.white)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 4)
-                .background(Color.black.opacity(0.85))
-            }
+            omniTopDockBar
 
             GeometryReader { geo in
                 ZStack {
-                    OmniSpringBoardView(showFileImporter: $showFileImporter)
-                        .opacity(workspace.activeAppID == "home" ? 1 : 0)
-                        .allowsHitTesting(workspace.activeAppID == "home")
-
-                    // Every running app stays alive in ZStack memory so switching via Home Screen ClipApps is 0.0s!
-                    ForEach(workspace.builtInApps) { app in
-                        if workspace.runningAppIDs.contains(app.id) {
-                            let isPrimary = (workspace.activeAppID == app.id)
-                            let isSecondary = (workspace.splitScreenEnabled && workspace.secondaryAppID == app.id && workspace.activeAppID != "home")
-
-                            if isPrimary && !workspace.splitScreenEnabled {
-                                EmbeddedLiveAppHost(appID: app.id)
-                                    .frame(width: geo.size.width, height: geo.size.height)
-                            } else if workspace.splitScreenEnabled && workspace.activeAppID != "home" && (isPrimary || isSecondary) {
-                                VStack(spacing: 0) {
-                                    if isPrimary {
-                                        EmbeddedLiveAppHost(appID: workspace.activeAppID)
-                                            .frame(width: geo.size.width, height: geo.size.height * 0.5)
-                                        Divider().background(Color.cyan)
-                                        EmbeddedLiveAppHost(appID: workspace.secondaryAppID)
-                                            .frame(width: geo.size.width, height: geo.size.height * 0.5)
-                                    }
-                                }
-                            } else {
-                                EmbeddedLiveAppHost(appID: app.id)
-                                    .frame(width: geo.size.width, height: geo.size.height)
-                                    .opacity(0.0001)
-                                    .allowsHitTesting(false)
-                            }
+                    if workspace.activeAppID == "home" {
+                        OmniSpringBoardView()
+                            .frame(width: geo.size.width, height: geo.size.height)
+                    } else if workspace.splitScreenEnabled {
+                        VStack(spacing: 0) {
+                            EmbeddedLiveAppHost(appID: workspace.activeAppID)
+                                .frame(width: geo.size.width, height: geo.size.height * 0.5)
+                            Divider().background(Color.cyan)
+                            EmbeddedLiveAppHost(appID: workspace.secondaryAppID)
+                                .frame(width: geo.size.width, height: geo.size.height * 0.5)
                         }
+                    } else {
+                        EmbeddedLiveAppHost(appID: workspace.activeAppID)
+                            .frame(width: geo.size.width, height: geo.size.height)
                     }
                 }
             }
         }
         .background(Color(red: 0.03, green: 0.04, blue: 0.08).ignoresSafeArea())
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: [UTType.data, UTType.archive, UTType.item],
-            allowsMultipleSelection: false
-        ) { result in
-            if case .success(let urls) = result, let first = urls.first {
-                workspace.importIPAFile(from: first)
-            }
-        }
     }
 
     private var omniTopDockBar: some View {
         VStack(spacing: 4) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Button {
                     workspace.activeAppID = "home"
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Image(systemName: "square.grid.3x3.fill")
-                        Text("ClipApps")
+                        Text("Apps")
                             .font(.caption.bold())
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 6)
                     .background(workspace.activeAppID == "home" ? Color.cyan : Color.white.opacity(0.1))
                     .foregroundColor(workspace.activeAppID == "home" ? .black : .white)
@@ -484,17 +445,14 @@ struct OmniRootContainerView: View {
                         ForEach(workspace.runningAppIDs, id: \.self) { id in
                             if let app = workspace.builtInApps.first(where: { $0.id == id }) {
                                 let isActive = (workspace.activeAppID == id)
-                                HStack(spacing: 5) {
+                                HStack(spacing: 4) {
                                     Button {
                                         workspace.launchOrFocus(id)
                                     } label: {
-                                        HStack(spacing: 5) {
+                                        HStack(spacing: 4) {
                                             Circle()
                                                 .fill(Color.green)
                                                 .frame(width: 6, height: 6)
-                                            Image(systemName: app.icon)
-                                                .font(.caption2)
-                                                .foregroundColor(app.color)
                                             Text(app.title)
                                                 .font(.caption2.bold())
                                                 .foregroundColor(.white)
@@ -504,11 +462,11 @@ struct OmniRootContainerView: View {
                                         workspace.closeRunningApp(id)
                                     } label: {
                                         Image(systemName: "xmark")
-                                            .font(.system(size: 9, weight: .bold))
+                                            .font(.system(size: 8, weight: .bold))
                                             .foregroundColor(.gray)
                                     }
                                 }
-                                .padding(.horizontal, 9)
+                                .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                                 .background(isActive ? app.color.opacity(0.32) : Color.white.opacity(0.07))
                                 .overlay(
@@ -522,24 +480,26 @@ struct OmniRootContainerView: View {
                 }
 
                 Button {
+                    workspace.toggleRoute()
+                } label: {
+                    Text(workspace.routeLabel)
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(Color.green.opacity(0.2))
+                        .foregroundColor(.green)
+                        .cornerRadius(6)
+                }
+
+                Button {
                     workspace.splitScreenEnabled.toggle()
                 } label: {
                     Image(systemName: workspace.splitScreenEnabled ? "rectangle.split.1x2.fill" : "rectangle.split.1x2")
                         .font(.caption.bold())
-                        .padding(7)
+                        .padding(6)
                         .background(workspace.splitScreenEnabled ? Color.orange : Color.white.opacity(0.1))
                         .foregroundColor(workspace.splitScreenEnabled ? .black : .white)
                         .cornerRadius(8)
-                }
-
-                if workspace.activeAppID != "home" {
-                    Button {
-                        workspace.showTopBarInFullScreen = false
-                    } label: {
-                        Image(systemName: "chevron.up.circle.fill")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                    }
                 }
             }
             .padding(.horizontal, 10)
@@ -547,7 +507,7 @@ struct OmniRootContainerView: View {
 
             if workspace.splitScreenEnabled && workspace.activeAppID != "home" {
                 HStack(spacing: 6) {
-                    Text("Bottom Split App:")
+                    Text("Bottom Split:")
                         .font(.caption2)
                         .foregroundColor(.orange)
                     Picker("Bottom App", selection: $workspace.secondaryAppID) {
@@ -563,29 +523,27 @@ struct OmniRootContainerView: View {
             }
         }
         .padding(.bottom, 6)
-        .background(Color.black.opacity(0.65))
+        .background(Color.black.opacity(0.75))
     }
 }
 
 struct OmniSpringBoardView: View {
     @EnvironmentObject var workspace: OmniWorkspaceStore
-    @Binding var showFileImporter: Bool
     @State private var customBundleID: String = ""
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                // 1-Tap Install All 10 Home Screen ClipApps Banner
+            VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Image(systemName: "apps.iphone.badge.plus")
                             .font(.title2)
                             .foregroundColor(.cyan)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Home Screen ClipApp Installer")
+                            Text("Home Screen ClipApp Installer (Fixed v2)")
                                 .font(.headline.bold())
                                 .foregroundColor(.white)
-                            Text("Add icons directly to your iPhone Home Screen that boot straight into each app (`omnicontainer://open?app=...`) without closing your other apps!")
+                            Text("Uses HTTP WebClip bounce URLs (`http://\(workspace.truenasHost):8766/launch/...`) so iOS creates all 10 icons on your Home Screen!")
                                 .font(.caption2)
                                 .foregroundColor(.gray)
                         }
@@ -596,7 +554,7 @@ struct OmniSpringBoardView: View {
                     } label: {
                         HStack {
                             Image(systemName: "square.and.arrow.down.on.square.fill")
-                            Text("Install All 10 Home Screen ClipApps in 1 Tap")
+                            Text("Install All 10 Home Screen ClipApps (v2)")
                                 .font(.subheadline.bold())
                         }
                         .frame(maxWidth: .infinity)
@@ -611,9 +569,15 @@ struct OmniSpringBoardView: View {
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.cyan.opacity(0.4), lineWidth: 1))
                 .cornerRadius(14)
 
-                Text("Tap Any App to Open (Or Tap '+ Clip' for Home Screen Icon)")
-                    .font(.subheadline.bold())
-                    .foregroundColor(.white)
+                HStack {
+                    Text("Apps (Instant WebView Cache)")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                    Spacer()
+                    Text("Active Route: \(workspace.truenasHost)")
+                        .font(.caption2.monospaced())
+                        .foregroundColor(.green)
+                }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                     ForEach(workspace.builtInApps) { app in
@@ -657,7 +621,7 @@ struct OmniSpringBoardView: View {
                                 Button {
                                     workspace.launchOrFocus(app.id)
                                 } label: {
-                                    Text(isRunning ? "Resume" : "Open")
+                                    Text(isRunning ? "Switch To" : "Open")
                                         .font(.system(size: 10, weight: .bold))
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 6)
@@ -669,7 +633,7 @@ struct OmniSpringBoardView: View {
                                 Button {
                                     workspace.installClipAppToHomeScreen(key: app.id)
                                 } label: {
-                                    Label("+ ClipApp", systemImage: "plus.square.on.square")
+                                    Text("+ Clip")
                                         .font(.system(size: 10, weight: .bold))
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 6)
@@ -688,59 +652,14 @@ struct OmniSpringBoardView: View {
                         .cornerRadius(14)
                     }
                 }
-
-                Divider().background(Color.white.opacity(0.15))
-
-                // Custom LiveContainer / External IPA ClipApp Builder
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Custom LiveContainer / External .IPA ClipApp Creator")
-                        .font(.subheadline.bold())
-                        .foregroundColor(.white)
-                    Text("Generate a Home Screen ClipApp for any app inside LiveContainer (`livecontainer://open?bundle-id=...`) or import an `.ipa` file:")
-                        .font(.caption2)
-                        .foregroundColor(.gray)
-
-                    HStack {
-                        TextField("Bundle ID (e.g. com.ross.keepwatch)", text: $customBundleID)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.caption)
-                        Button("Create ClipApp") {
-                            let bid = customBundleID.trimmingCharacters(in: .whitespaces)
-                            if !bid.isEmpty {
-                                workspace.installClipAppToHomeScreen(key: "lc-\(bid)")
-                            }
-                        }
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Color.orange)
-                        .foregroundColor(.black)
-                        .cornerRadius(8)
-                    }
-
-                    Button {
-                        showFileImporter = true
-                    } label: {
-                        Label("Import .IPA Package from Files", systemImage: "folder.fill.badge.plus")
-                            .font(.caption.bold())
-                            .frame(maxWidth: .infinity)
-                            .padding(10)
-                            .background(Color.white.opacity(0.08))
-                            .foregroundColor(.cyan)
-                            .cornerRadius(10)
-                    }
-                }
-                .padding(14)
-                .background(Color.white.opacity(0.05))
-                .cornerRadius(14)
             }
             .padding()
         }
     }
 }
 
-// MARK: - Full Embedded Live App Modules (Kept Alive in ZStack Memory Simultaneously!)
 struct EmbeddedLiveAppHost: View {
+    @EnvironmentObject var workspace: OmniWorkspaceStore
     let appID: String
 
     var body: some View {
@@ -752,73 +671,283 @@ struct EmbeddedLiveAppHost: View {
         case "deskswitch":
             MiniDeskSwitchModule()
         case "sentrycam":
-            MiniSentryCamModule()
+            MiniSentryCamModule(host: workspace.truenasHost)
         case "aniimo":
             MiniAniimoModule()
         case "racebolt":
-            MiniWebModule(title: "Racebolt UK Ops", url: "https://raceboltuk.com", accent: .yellow)
+            FastCachedWebView(cacheKey: "racebolt", urlString: "https://raceboltuk.com")
         case "photopulse":
-            MiniPhotoPulseModule()
+            MiniPhotoPulseModule(host: workspace.truenasHost)
         case "netradar":
-            MiniWebModule(title: "NetRadar OpenSpeedTest (:30116)", url: "http://100.85.127.42:30116", accent: .teal)
+            MiniNetRadarModule(host: workspace.truenasHost)
         case "soulseekr":
-            MiniWebModule(title: "SoulSeekr (Hearr :5070)", url: "http://100.85.127.42:5070", accent: .purple)
+            MiniSoulSeekrModule(host: workspace.truenasHost)
         case "zimadeck":
-            MiniWebModule(title: "ZimaDeck & Komga (:30048)", url: "http://100.85.127.42:30048", accent: .mint)
+            MiniZimaDeckModule(host: workspace.truenasHost)
         default:
-            MiniWebModule(title: "Homelab Dashboard", url: "http://100.85.127.42:3000", accent: .cyan)
+            FastCachedWebView(cacheKey: "home-dash", urlString: "http://\(workspace.truenasHost):3000")
         }
     }
 }
 
-struct PersistentWebView: UIViewRepresentable {
-    let urlString: String
-    func makeUIView(context: Context) -> WKWebView {
-        let w = WKWebView()
-        if let u = URL(string: urlString) { w.load(URLRequest(url: u)) }
-        return w
-    }
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
-}
+// MARK: - 1. SentryCam Module (Fixed Port 5000 + All 3 Cameras: tapo_c200, bike_camera, doorbell + PTZ!)
+struct MiniSentryCamModule: View {
+    let host: String
+    @State private var selectedCam = "tapo_c200"
+    @State private var viewMode = 0 // 0 = All 3 Cameras Grid, 1 = Single Camera + PTZ, 2 = Frigate WebUI
+    @State private var tick = Int(Date().timeIntervalSince1970)
+    @State private var status = "Connected to Frigate NVR (:5000)"
 
-struct MiniWebModule: View {
-    let title: String
-    let url: String
-    let accent: Color
+    let cameras = [
+        ("tapo_c200", "Tapo C200 (Garden/Porch)"),
+        ("bike_camera", "Bike Camera"),
+        ("doorbell", "Front Doorbell")
+    ]
+
+    let timer = Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(title).font(.caption.bold()).foregroundColor(accent)
-                Spacer()
-                Text(url).font(.caption2.monospaced()).foregroundColor(.gray)
+            Picker("Mode", selection: $viewMode) {
+                Text("All 3 Cameras").tag(0)
+                Text("PTZ & Single").tag(1)
+                Text("Frigate UI").tag(2)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.black.opacity(0.5))
+            .pickerStyle(.segmented)
+            .padding(8)
 
-            PersistentWebView(urlString: url)
+            if viewMode == 0 {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(cameras, id: \.0) { cam in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Circle().fill(Color.green).frame(width: 8, height: 8)
+                                    Text(cam.1).font(.caption.bold()).foregroundColor(.white)
+                                    Spacer()
+                                    Text("LIVE").font(.system(size: 9, weight: .bold)).foregroundColor(.red)
+                                }
+                                AsyncImage(url: URL(string: "http://\(host):5000/api/\(cam.0)/latest.jpg?h=480&t=\(tick)")) { phase in
+                                    if case .success(let img) = phase {
+                                        img.resizable().scaledToFit()
+                                    } else {
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .fill(Color.white.opacity(0.06))
+                                            .frame(height: 180)
+                                            .overlay(ProgressView().tint(.red))
+                                    }
+                                }
+                                .cornerRadius(10)
+                                .onTapGesture {
+                                    selectedCam = cam.0
+                                    viewMode = 1
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.white.opacity(0.05))
+                            .cornerRadius(12)
+                        }
+                    }
+                    .padding(12)
+                }
+            } else if viewMode == 1 {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        Picker("Camera", selection: $selectedCam) {
+                            ForEach(cameras, id: \.0) { c in
+                                Text(c.1).tag(c.0)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        AsyncImage(url: URL(string: "http://\(host):5000/api/\(selectedCam)/latest.jpg?h=720&t=\(tick)")) { phase in
+                            if case .success(let img) = phase {
+                                img.resizable().scaledToFit()
+                            } else {
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color.white.opacity(0.06))
+                                    .frame(height: 220)
+                                    .overlay(ProgressView().tint(.red))
+                            }
+                        }
+                        .cornerRadius(12)
+
+                        Text(status).font(.caption2).foregroundColor(.orange)
+
+                        HStack(spacing: 12) {
+                            ptzBtn("Start Patrol", cmd: "sudo docker start tapo-patrol")
+                            ptzBtn("Stop Patrol", cmd: "sudo docker stop tapo-patrol")
+                            Button("Refresh") { tick = Int(Date().timeIntervalSince1970) }
+                                .font(.caption.bold())
+                                .padding(10)
+                                .background(Color.red)
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                        }
+                    }
+                    .padding(12)
+                }
+            } else {
+                FastCachedWebView(cacheKey: "frigate-ui", urlString: "http://\(host):5000")
+            }
         }
+        .onReceive(timer) { _ in
+            if viewMode != 2 {
+                tick = Int(Date().timeIntervalSince1970)
+            }
+        }
+    }
+
+    func ptzBtn(_ title: String, cmd: String) -> some View {
+        Button(title) {
+            Task {
+                guard let u = URL(string: "http://\(host):9092/api/antigravity/exec") else { return }
+                var req = URLRequest(url: u)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": cmd])
+                _ = try? await URLSession.shared.data(for: req)
+                status = "Executed: \(title)"
+            }
+        }
+        .font(.caption.bold())
+        .padding(10)
+        .background(Color.white.opacity(0.1))
+        .foregroundColor(.white)
+        .cornerRadius(8)
     }
 }
 
-struct MiniPhotoPulseModule: View {
+// MARK: - 2. NetRadar Module (Native Instant SpeedTest + OpenSpeedTest :30116 + Mesh Probe)
+struct MiniNetRadarModule: View {
+    let host: String
     @State private var tab = 0
-    @State private var code = ""
-    @State private var container = "icloudpd"
-    @State private var status = "iCloudPD + ImmichFrame Ready"
+    @State private var pingMs: String = "--"
+    @State private var downMbps: String = "--"
+    @State private var isTesting = false
+    @State private var logText = "Tap 'Run Native SpeedTest' for instant TrueNAS bandwidth & latency measurement."
 
     var body: some View {
         VStack(spacing: 0) {
             Picker("Mode", selection: $tab) {
-                Text("2FA & Sync").tag(0)
-                Text("ImmichFrame (:9180)").tag(1)
-                Text("Immich (:30041)").tag(2)
+                Text("Native SpeedTest").tag(0)
+                Text("OpenSpeedTest (:30116)").tag(1)
+                Text("NPM (:30020)").tag(2)
             }
             .pickerStyle(.segmented)
             .padding(8)
 
             if tab == 0 {
+                ScrollView {
+                    VStack(spacing: 16) {
+                        HStack(spacing: 14) {
+                            VStack(spacing: 4) {
+                                Text("PING LATENCY")
+                                    .font(.caption2.bold()).foregroundColor(.gray)
+                                Text("\(pingMs) ms")
+                                    .font(.title.bold().monospacedDigit()).foregroundColor(.cyan)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(16)
+                            .background(Color.white.opacity(0.06))
+                            .cornerRadius(14)
+
+                            VStack(spacing: 4) {
+                                Text("DOWNLOAD SPEED")
+                                    .font(.caption2.bold()).foregroundColor(.gray)
+                                Text("\(downMbps) Mbps")
+                                    .font(.title.bold().monospacedDigit()).foregroundColor(.green)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(16)
+                            .background(Color.white.opacity(0.06))
+                            .cornerRadius(14)
+                        }
+
+                        Button {
+                            Task { await runNativeBenchmark() }
+                        } label: {
+                            HStack {
+                                if isTesting { ProgressView().tint(.black) }
+                                Image(systemName: "speedometer")
+                                Text(isTesting ? "Measuring Bandwidth..." : "Run Native SpeedTest to TrueNAS (\(host))")
+                                    .font(.subheadline.bold())
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(14)
+                            .background(Color.cyan)
+                            .foregroundColor(.black)
+                            .cornerRadius(12)
+                        }
+                        .disabled(isTesting)
+
+                        Text(logText)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.green)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(10)
+                    }
+                    .padding()
+                }
+            } else if tab == 1 {
+                FastCachedWebView(cacheKey: "ost-30116", urlString: "http://\(host):30116")
+            } else {
+                FastCachedWebView(cacheKey: "npm-30020", urlString: "http://\(host):30020")
+            }
+        }
+    }
+
+    func runNativeBenchmark() async {
+        isTesting = true
+        defer { isTesting = false }
+        // 1. Measure Ping
+        let t0 = Date()
+        if let u = URL(string: "http://\(host):5000/api/version") {
+            _ = try? await URLSession.shared.data(from: u)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            pingMs = "\(ms)"
+        }
+        // 2. Measure Throughput by pulling 8 camera frames / payload from TrueNAS
+        let tStart = Date()
+        var totalBytes = 0
+        for i in 0..<6 {
+            if let u = URL(string: "http://\(host):5000/api/tapo_c200/latest.jpg?h=1080&b=\(i)_\(Int.random(in: 1...99999))"),
+               let (d, _) = try? await URLSession.shared.data(from: u) {
+                totalBytes += d.count
+            }
+        }
+        let elapsed = max(Date().timeIntervalSince(tStart), 0.05)
+        let mbps = (Double(totalBytes * 8) / 1_000_000.0) / elapsed
+        downMbps = String(format: "%.1f", mbps)
+        logText = "Target: \(host)\nTransferred: \(totalBytes / 1024) KB in \(String(format: "%.2f", elapsed))s\nMeasured Speed: \(downMbps) Mbps • Ping: \(pingMs) ms"
+    }
+}
+
+// MARK: - 3. PhotoPulse Module (Cached Immich WebView + Instant 2FA)
+struct MiniPhotoPulseModule: View {
+    let host: String
+    @State private var tab = 0
+    @State private var code = ""
+    @State private var container = "icloudpd"
+    @State private var status = "Immich & iCloudPD Ready"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Mode", selection: $tab) {
+                Text("Immich (:30041)").tag(0)
+                Text("ImmichFrame (:9180)").tag(1)
+                Text("Apple 2FA").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+
+            if tab == 0 {
+                FastCachedWebView(cacheKey: "immich-main", urlString: "http://\(host):30041")
+            } else if tab == 1 {
+                FastCachedWebView(cacheKey: "immich-frame", urlString: "http://\(host):9180")
+            } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(status).font(.caption).foregroundColor(.pink)
@@ -843,16 +972,12 @@ struct MiniPhotoPulseModule: View {
                     }
                     .padding()
                 }
-            } else if tab == 1 {
-                PersistentWebView(urlString: "http://100.85.127.42:9180")
-            } else {
-                PersistentWebView(urlString: "http://100.85.127.42:30041")
             }
         }
     }
 
     func send2FA(_ c: String) async {
-        guard let u = URL(string: "http://100.85.127.42:9092/api/antigravity/exec") else { return }
+        guard let u = URL(string: "http://\(host):9092/api/antigravity/exec") else { return }
         var req = URLRequest(url: u)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -860,6 +985,51 @@ struct MiniPhotoPulseModule: View {
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": cmd])
         _ = try? await URLSession.shared.data(for: req)
         status = "Submitted 2FA code \(c) to \(container)"
+    }
+}
+
+struct MiniSoulSeekrModule: View {
+    let host: String
+    @State private var tab = 0
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Service", selection: $tab) {
+                Text("Hearr (:5070)").tag(0)
+                Text("slskd (:5030)").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+
+            if tab == 0 {
+                FastCachedWebView(cacheKey: "hearr-5070", urlString: "http://\(host):5070")
+            } else {
+                FastCachedWebView(cacheKey: "slskd-5030", urlString: "http://\(host):5030")
+            }
+        }
+    }
+}
+
+struct MiniZimaDeckModule: View {
+    let host: String
+    @State private var tab = 0
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Service", selection: $tab) {
+                Text("Komga (:30048)").tag(0)
+                Text("Zima Portainer").tag(1)
+                Text("Zima Immich").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+
+            if tab == 0 {
+                FastCachedWebView(cacheKey: "komga-30048", urlString: "http://\(host):30048")
+            } else if tab == 1 {
+                FastCachedWebView(cacheKey: "zima-port", urlString: "http://100.82.255.29:9000")
+            } else {
+                FastCachedWebView(cacheKey: "zima-immich", urlString: "http://100.82.255.29:2283")
+            }
+        }
     }
 }
 
@@ -891,7 +1061,7 @@ struct MiniAntigravityModule: View {
                     RoundedRectangle(cornerRadius: 10)
                         .fill(Color.white.opacity(0.05))
                         .frame(height: 160)
-                        .overlay(Text("Live Node Screen (\(selectedNode))").font(.caption).foregroundColor(.gray))
+                        .overlay(Text("Tap to refresh live screen (\(selectedNode))").font(.caption).foregroundColor(.gray))
                 }
                 .frame(maxHeight: 200)
                 .cornerRadius(10)
@@ -965,8 +1135,7 @@ struct MiniAegisModule: View {
             .padding(8)
             .background(Color.black.opacity(0.6))
 
-            PersistentWebView(urlString: activeURL)
-                .id(activeURL)
+            FastCachedWebView(cacheKey: "aegis-main", urlString: activeURL)
         }
     }
 
@@ -1036,34 +1205,6 @@ struct MiniDeskSwitchModule: View {
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": c])
         _ = try? await URLSession.shared.data(for: req)
         status = "Executed: \(c)"
-    }
-}
-
-struct MiniSentryCamModule: View {
-    @State private var cam = "tapo_c200"
-    @State private var tick = 0
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                Picker("Camera", selection: $cam) {
-                    Text("Tapo C200").tag("tapo_c200")
-                    Text("Ezviz / Bike").tag("ezviz")
-                }
-                .pickerStyle(.segmented)
-
-                AsyncImage(url: URL(string: "http://100.85.127.42:5000/api/\(cam)/latest.jpg?t=\(tick)")) { img in
-                    img.resizable().scaledToFit()
-                } placeholder: {
-                    RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)).frame(height: 180)
-                }
-                .cornerRadius(10)
-                .onTapGesture { tick += 1 }
-
-                Button("Refresh Live Snapshot") { tick += 1 }
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding()
-        }
     }
 }
 
