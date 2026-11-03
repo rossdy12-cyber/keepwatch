@@ -43,7 +43,10 @@ jobs:
             build
 
       - name: Build J.A.R.V.I.S. Wrist OS (Watch/OmniWatch.app + OmniWatchWidgets.appex)
-        run: bash build_watch_bundle.sh
+        run: |
+          tr -d '\r' < build_watch_bundle.sh > build_watch_bundle_lf.sh
+          bash build_watch_bundle_lf.sh
+          rm -f build_watch_bundle_lf.sh
 
       - name: Build OmniContainerPlugin.dylib & Patch zxPluginsInject.dylib for YouTube Plus
         run: |

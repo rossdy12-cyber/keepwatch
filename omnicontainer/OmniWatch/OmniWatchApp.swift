@@ -343,7 +343,6 @@ struct WristOSRootView: View {
             WatchSentryCamView(store: store)
             WatchOpsTelemetryView(store: store)
         }
-        .tabViewStyle(.page)
         .background(Color.black)
     }
 }
