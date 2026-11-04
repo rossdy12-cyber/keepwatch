@@ -21,7 +21,6 @@ use isideload::{
         app_ids::{AppIdsApi, Profile},
         certificates::DevelopmentCertificate,
         developer_session::{DeveloperDeviceType, DeveloperSession},
-        devices::DevicesApi,
         teams::TeamsApi,
     },
     sideload::{
@@ -31,7 +30,6 @@ use isideload::{
         sign,
     },
     util::keyring_storage::KeyringStorage,
-    SideloadError,
 };
 use rootcause::prelude::*;
 
@@ -57,6 +55,37 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Registers a device through Apple's newer v1 API. The old QH65B2 API has no watchos/ path, but the v1 API
+/// registers Apple Watches as IOS-platform devices (identified by their UDID), which is what Xcode does. Uses
+/// the session watchsign already authenticated (anisette headers + GrandSlam client), so no extra sign-in.
+async fn register_device_v1(dev: &mut DeveloperSession, team_id: &str, name: &str, udid: &str) -> Result<(), Report> {
+    let headers = dev.get_headers().await.context("Couldn't get Apple auth headers")?;
+    let body = format!(
+        r#"{{"data":{{"type":"devices","attributes":{{"name":"{name}","platform":"IOS","udid":"{udid}","teamId":"{team_id}"}}}}}}"#
+    );
+    let response = dev
+        .get_grandslam_client()
+        .post("https://developerservices2.apple.com/services/v1/devices")?
+        .headers(headers)
+        .header("Content-Type", "application/vnd.api+json")
+        .header("Accept", "application/vnd.api+json")
+        .body(body)
+        .send()
+        .await
+        .context("The v1 device-registration request failed")?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if status.is_success() {
+        return Ok(());
+    }
+    let lower = text.to_lowercase();
+    // 409 / "already exists" just means the Watch is already registered — that's fine.
+    if status.as_u16() == 409 || lower.contains("already") || lower.contains("duplicate") {
+        return Ok(());
+    }
+    bail!("Apple rejected the Watch registration (v1 {status}): {text}");
 }
 
 #[tokio::main]
@@ -137,24 +166,12 @@ async fn run() -> Result<(), Report> {
         .ok_or_else(|| report!("This Apple ID has no developer team. Sign in once at developer.apple.com and accept the agreement."))?;
     println!("Developer team: {} ({})", team.name.as_deref().unwrap_or("Personal Team"), team.team_id);
 
-    // ---- The Watch as a watchOS development device.
-    // listDevices has no watchos/ path (it 404s), so call addDevice directly and treat Apple's
-    // "already registered" (developer error 35) as success. This is what puts the Watch's UDID
-    // into the watchOS provisioning profile below.
-    match dev.add_device(&team, "Apple Watch", &watch_udid, DeveloperDeviceType::Watchos).await {
-        Ok(_) => println!("Watch {watch_udid} registered as a watchOS device."),
-        Err(error) => {
-            let already = error
-                .iter_reports()
-                .find_map(|node| node.downcast_current_context::<SideloadError>())
-                .is_some_and(|err| matches!(err, SideloadError::DeveloperError(35, _)));
-            if already {
-                println!("Watch {watch_udid} is already registered.");
-            } else {
-                Err::<(), _>(error).context("Couldn't register the Watch as a watchOS device")?;
-            }
-        }
-    }
+    // ---- Register the Watch via Apple's v1 API (the old QH65B2 API has no watchos/ path), so its UDID
+    // lands in the team provisioning profile below.
+    register_device_v1(&mut dev, &team.team_id, "Apple Watch", &watch_udid)
+        .await
+        .context("Couldn't register the Watch")?;
+    println!("Watch {watch_udid} registered.");
 
     // ---- A development certificate (kept in Windows Credential Manager, so the same one is reused)
     let cert_prompt = async |certs: Vec<DevelopmentCertificate>| {
@@ -200,13 +217,13 @@ async fn run() -> Result<(), Report> {
 
     // ---- watchOS provisioning profiles (these list the Watch)
     let main_profile = dev
-        .download_team_provisioning_profile(&team, &main_app_id, DeveloperDeviceType::Watchos)
+        .download_team_provisioning_profile(&team, &main_app_id, DeveloperDeviceType::Ios)
         .await
         .context("Couldn't get the watchOS provisioning profile")?;
     let mut profiles: Vec<(String, Profile, plist::Dictionary)> = Vec::new();
     for id in app_ids.iter().filter(|id| id.identifier != main_id) {
         let profile = dev
-            .download_team_provisioning_profile(&team, id, DeveloperDeviceType::Watchos)
+            .download_team_provisioning_profile(&team, id, DeveloperDeviceType::Ios)
             .await
             .context(format!("Couldn't get the profile for {}", id.identifier))?;
         let entitlements = ProvisioningProfile::parse(profile.encoded_profile.as_ref())?.entitlements().clone();
