@@ -61,31 +61,49 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
 /// registers Apple Watches as IOS-platform devices (identified by their UDID), which is what Xcode does. Uses
 /// the session watchsign already authenticated (anisette headers + GrandSlam client), so no extra sign-in.
 async fn register_device_v1(dev: &mut DeveloperSession, team_id: &str, name: &str, udid: &str) -> Result<(), Report> {
-    let headers = dev.get_headers().await.context("Couldn't get Apple auth headers")?;
-    let body = format!(
-        r#"{{"data":{{"type":"devices","attributes":{{"name":"{name}","platform":"IOS","udid":"{udid}","teamId":"{team_id}"}}}}}}"#
-    );
-    let response = dev
-        .get_grandslam_client()
-        .post("https://developerservices2.apple.com/services/v1/devices")?
-        .headers(headers)
-        .header("Content-Type", "application/vnd.api+json")
-        .header("Accept", "application/vnd.api+json")
-        .body(body)
-        .send()
-        .await
-        .context("The v1 device-registration request failed")?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if status.is_success() {
-        return Ok(());
+    // Try the plain App Store Connect shape first, then the developerservices2 variant with teamId.
+    let bodies = [
+        format!(r#"{{"data":{{"type":"devices","attributes":{{"name":"{name}","platform":"IOS","udid":"{udid}"}}}}}}"#),
+        format!(r#"{{"data":{{"type":"devices","attributes":{{"name":"{name}","platform":"IOS","udid":"{udid}","teamId":"{team_id}"}}}}}}"#),
+    ];
+    let mut last = String::new();
+    for body in bodies {
+        let headers = dev.get_headers().await.context("Couldn't get Apple auth headers")?;
+        let response = dev
+            .get_grandslam_client()
+            .post("https://developerservices2.apple.com/services/v1/devices")?
+            .headers(headers)
+            .header("Content-Type", "application/vnd.api+json")
+            .header("Accept", "application/vnd.api+json")
+            .body(body)
+            .send()
+            .await
+            .context("The v1 device-registration request failed")?;
+        let status = response.status();
+        let resp_headers = response.headers().clone();
+        let bytes = response.bytes().await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let lower = text.to_lowercase();
+        // Success, or "already registered" — either is fine.
+        if status.is_success() || status.as_u16() == 409 || lower.contains("already") || lower.contains("duplicate") {
+            return Ok(());
+        }
+        let hint = resp_headers
+            .iter()
+            .filter(|(k, _)| {
+                let k = k.as_str().to_ascii_lowercase();
+                k.contains("error") || k.contains("status") || k == "content-type" || k.contains("reason")
+            })
+            .map(|(k, v)| format!("{}={}", k, v.to_str().unwrap_or("?")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        last = format!(
+            "HTTP {status} | body: {} | headers: {}",
+            if text.is_empty() { "<empty>".to_string() } else { text },
+            if hint.is_empty() { "<none>".to_string() } else { hint }
+        );
     }
-    let lower = text.to_lowercase();
-    // 409 / "already exists" just means the Watch is already registered — that's fine.
-    if status.as_u16() == 409 || lower.contains("already") || lower.contains("duplicate") {
-        return Ok(());
-    }
-    bail!("Apple rejected the Watch registration (v1 {status}): {text}");
+    bail!("Apple rejected the Watch registration.\n  {last}");
 }
 
 #[tokio::main]
