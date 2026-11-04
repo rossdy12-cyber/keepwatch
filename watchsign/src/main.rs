@@ -31,6 +31,7 @@ use isideload::{
         sign,
     },
     util::keyring_storage::KeyringStorage,
+    SideloadError,
 };
 use rootcause::prelude::*;
 
@@ -136,11 +137,24 @@ async fn run() -> Result<(), Report> {
         .ok_or_else(|| report!("This Apple ID has no developer team. Sign in once at developer.apple.com and accept the agreement."))?;
     println!("Developer team: {} ({})", team.name.as_deref().unwrap_or("Personal Team"), team.team_id);
 
-    // ---- The Watch as a watchOS development device
-    dev.ensure_device_registered(&team, "Apple Watch", &watch_udid, DeveloperDeviceType::Ios)
-        .await
-        .context("Couldn't register the Watch")?;
-    println!("Watch {watch_udid} is registered.");
+    // ---- The Watch as a watchOS development device.
+    // listDevices has no watchos/ path (it 404s), so call addDevice directly and treat Apple's
+    // "already registered" (developer error 35) as success. This is what puts the Watch's UDID
+    // into the watchOS provisioning profile below.
+    match dev.add_device(&team, "Apple Watch", &watch_udid, DeveloperDeviceType::Watchos).await {
+        Ok(_) => println!("Watch {watch_udid} registered as a watchOS device."),
+        Err(error) => {
+            let already = error
+                .iter_reports()
+                .find_map(|node| node.downcast_current_context::<SideloadError>())
+                .is_some_and(|err| matches!(err, SideloadError::DeveloperError(35, _)));
+            if already {
+                println!("Watch {watch_udid} is already registered.");
+            } else {
+                Err::<(), _>(error).context("Couldn't register the Watch as a watchOS device")?;
+            }
+        }
+    }
 
     // ---- A development certificate (kept in Windows Credential Manager, so the same one is reused)
     let cert_prompt = async |certs: Vec<DevelopmentCertificate>| {
@@ -186,13 +200,13 @@ async fn run() -> Result<(), Report> {
 
     // ---- watchOS provisioning profiles (these list the Watch)
     let main_profile = dev
-        .download_team_provisioning_profile(&team, &main_app_id, DeveloperDeviceType::Ios)
+        .download_team_provisioning_profile(&team, &main_app_id, DeveloperDeviceType::Watchos)
         .await
         .context("Couldn't get the watchOS provisioning profile")?;
     let mut profiles: Vec<(String, Profile, plist::Dictionary)> = Vec::new();
     for id in app_ids.iter().filter(|id| id.identifier != main_id) {
         let profile = dev
-            .download_team_provisioning_profile(&team, id, DeveloperDeviceType::Ios)
+            .download_team_provisioning_profile(&team, id, DeveloperDeviceType::Watchos)
             .await
             .context(format!("Couldn't get the profile for {}", id.identifier))?;
         let entitlements = ProvisioningProfile::parse(profile.encoded_profile.as_ref())?.entitlements().clone();
