@@ -8,7 +8,8 @@ embedded = "".join("      " + line if line.strip() else "\n" for line in script.
 
 compose = """# Lumen AI upscaler: Real-ESRGAN on TrueNAS for the Lumen camera app.
 # TrueNAS: Apps -> Discover Apps -> (three dots) Install via YAML -> name it lumen-ai -> paste this file.
-# First start installs PyTorch (about 200 MB, once). The Logs then show the address and key for Lumen.
+# First start installs PyTorch (about 200 MB, once). The Logs then show the address and key for Lumen,
+# and the one command that adds your PC's graphics card as a GPU worker.
 # Generated from upscaler.py by build_compose.py.
 services:
   lumen-ai:
@@ -27,6 +28,9 @@ services:
       # Both give roughly a 16-megapixel result. Raise them if your NAS is quick.
       MAX_INPUT_MEGAPIXELS_2X: "4"
       MAX_INPUT_MEGAPIXELS_4X: "1"
+      # Limits when your PC's GPU worker is online (it's much faster). A GTX 970 handles these comfortably.
+      GPU_MAX_INPUT_MEGAPIXELS_2X: "12"
+      GPU_MAX_INPUT_MEGAPIXELS_4X: "4"
       # Processor threads to use (0 = all of them).
       THREADS: "0"
       TZ: Europe/London

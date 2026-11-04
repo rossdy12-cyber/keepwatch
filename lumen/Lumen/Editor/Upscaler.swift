@@ -91,6 +91,8 @@ struct UpscaleClient {
         var progress: Double
         var queuePosition: Int
         var error: String?
+        /// "GPU (DESKTOP-ABC)" or "NAS processor".
+        var processor: String?
     }
 
     func status(_ job: String) async throws -> Status {
@@ -99,7 +101,8 @@ struct UpscaleClient {
             throw UpscaleError.server(Self.errorText(data) ?? "Lost track of the upscale job.")
         }
         return Status(state: json["status"] as? String ?? "unknown", progress: json["progress"] as? Double ?? 0,
-                      queuePosition: json["queuePosition"] as? Int ?? 0, error: json["error"] as? String)
+                      queuePosition: json["queuePosition"] as? Int ?? 0, error: json["error"] as? String,
+                      processor: json["processor"] as? String)
     }
 
     func result(_ job: String) async throws -> Data {

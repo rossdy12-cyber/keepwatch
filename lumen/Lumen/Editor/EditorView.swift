@@ -244,7 +244,7 @@ struct EditorView: View {
                     }
                 }
                 .disabled(model.loading)
-                Text("Real-ESRGAN rebuilds fine detail as it enlarges. It runs on your NAS's processor, so it takes a few minutes; the result is about 16 megapixels. Your edits so far are included.")
+                Text("Real-ESRGAN rebuilds fine detail as it enlarges. With your PC's GPU worker online it takes seconds and allows bigger photos; otherwise the NAS's processor does it in a few minutes. Your edits so far are included.")
                     .font(.caption).foregroundStyle(.white.opacity(0.6))
             }
             DisclosureGroup(model.upscaler.isConfigured ? "Upscaler settings" : "Set up the upscaler") {

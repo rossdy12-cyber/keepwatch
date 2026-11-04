@@ -114,7 +114,7 @@ final class EditorModel: ObservableObject {
                 upscaleProgress = status.progress
                 upscaleStatus = status.state == "queued"
                     ? (status.queuePosition > 1 ? "Waiting (\(status.queuePosition - 1) ahead)…" : "Starting…")
-                    : "Upscaling \(scale)× on your NAS… \(Int(status.progress * 100))%"
+                    : "Upscaling \(scale)× on \(Self.processorName(status.processor))… \(Int(status.progress * 100))%"
                 try await Task.sleep(nanoseconds: 1_000_000_000)
                 status = try await client.status(job)
             }
@@ -136,6 +136,12 @@ final class EditorModel: ObservableObject {
         } catch {
             message = error.localizedDescription
         }
+    }
+
+    /// "GPU (DESKTOP-ABC)" -> "your PC's GPU (DESKTOP-ABC)"; anything else -> "your NAS".
+    private static func processorName(_ processor: String?) -> String {
+        guard let processor, processor.hasPrefix("GPU") else { return "your NAS" }
+        return "your PC's " + processor
     }
 
     private func renderJPEG(scale: CGFloat) async -> Data? {
