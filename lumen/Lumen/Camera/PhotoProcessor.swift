@@ -20,13 +20,16 @@ enum CaptureError: LocalizedError {
     }
 }
 
-/// Collects one capture (RAW and/or processed) and saves it to Photos as a single photo.
+/// Collects one capture (RAW and/or processed) and saves it to Photos as a single photo:
+/// cropped to the chosen shape, tagged with the location, then given the chosen look as a revertible edit.
 final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
+    private let options: SaveOptions
     private let completion: (Result<SavedPhoto, Error>) -> Void
     private var rawData: Data?
     private var processedData: Data?
 
-    init(completion: @escaping (Result<SavedPhoto, Error>) -> Void) {
+    init(options: SaveOptions, completion: @escaping (Result<SavedPhoto, Error>) -> Void) {
+        self.options = options
         self.completion = completion
     }
 
@@ -48,43 +51,37 @@ final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
     }
 
     private func save() {
-        let raw = rawData, processed = processedData
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-            guard status == .authorized || status == .limited else {
-                self.completion(.failure(CaptureError.noPhotosAccess))
-                return
+        let raw = rawData
+        let captured = processedData
+        let options = self.options
+        let completion = self.completion
+        Task.detached(priority: .userInitiated) {
+            var processed = captured
+            // RAW files keep the whole sensor; the HEIF/JPEG is cropped to the chosen shape.
+            if let data = processed, options.allowCrop { processed = PhotoSaver.crop(data, to: options.aspect) }
+            var resources: [(PHAssetResourceType, Data)] = []
+            if let processed {
+                resources.append((.photo, processed))
+                // RAW+HEIF: the RAW goes alongside, and the editor uses it.
+                if let raw { resources.append((.alternatePhoto, raw)) }
+            } else if let raw {
+                resources.append((.photo, raw))
             }
-            var placeholderID: String?
-            PHPhotoLibrary.shared().performChanges({
-                let request = PHAssetCreationRequest.forAsset()
-                if let processed {
-                    request.addResource(with: .photo, data: processed, options: nil)
-                    // RAW+HEIF: the RAW goes alongside, and the editor uses it.
-                    if let raw { request.addResource(with: .alternatePhoto, data: raw, options: nil) }
-                } else if let raw {
-                    request.addResource(with: .photo, data: raw, options: nil)
-                }
-                placeholderID = request.placeholderForCreatedAsset?.localIdentifier
-            }) { success, error in
-                if success {
-                    self.completion(.success(SavedPhoto(assetID: placeholderID, thumbnail: Self.thumbnail(processed: processed, raw: raw))))
-                } else {
-                    self.completion(.failure(error ?? CaptureError.failed("Couldn't save the photo.")))
-                }
+            do {
+                let id = try await PhotoSaver.savePhoto(resources, location: options.location)
+                let thumbnail = processed.flatMap { PhotoSaver.thumbnail($0, look: options.look) } ?? Self.rawThumbnail(raw)
+                completion(.success(SavedPhoto(assetID: id, thumbnail: thumbnail)))
+                if let id { await PhotoSaver.applyLook(options.look, toAsset: id) }
+            } catch {
+                completion(.failure(error))
             }
         }
     }
 
-    private static func thumbnail(processed: Data?, raw: Data?) -> UIImage? {
-        if let processed, let image = UIImage(data: processed) {
-            return image.preparingThumbnail(of: CGSize(width: 160, height: 160)) ?? image
-        }
-        if let raw, let filter = CIRAWFilter(imageData: raw, identifierHint: nil) {
-            filter.scaleFactor = 0.1
-            if let output = filter.outputImage, let cg = CIContext().createCGImage(output, from: output.extent) {
-                return UIImage(cgImage: cg)
-            }
-        }
-        return nil
+    private static func rawThumbnail(_ raw: Data?) -> UIImage? {
+        guard let raw, let filter = CIRAWFilter(imageData: raw, identifierHint: nil) else { return nil }
+        filter.scaleFactor = 0.1
+        guard let output = filter.outputImage, let cg = PhotoSaver.context.createCGImage(output, from: output.extent) else { return nil }
+        return UIImage(cgImage: cg)
     }
 }

@@ -39,6 +39,8 @@ final class EditorModel: ObservableObject {
     private var upscaleTask: Task<Void, Never>?
 
     private var source: PhotoSource?
+    /// The person cut-out recorded with Portrait photos (better than guessing).
+    private var portraitMatte: CIImage?
     private var analysis: AIAnalysis?
     private var previewScale: CGFloat = 1
     private var generation = 0
@@ -59,6 +61,7 @@ final class EditorModel: ObservableObject {
         }
         self.source = source
         isRAW = source.isRAW
+        portraitMatte = CIImage(data: data, options: [.auxiliaryPortraitEffectsMatte: true, .applyOrientationProperty: true])
         await prepare()
     }
 
@@ -175,8 +178,10 @@ final class EditorModel: ObservableObject {
                 continuation.resume(returning: AIAnalyser.analyse(placed, cgImage: PhotoRenderer.cgImage(placed), findSubject: true))
             }
         }
-        analysis = result
-        hasSubject = result.hasSubject
+        var found = result
+        if let portraitMatte { found.subjectMask = portraitMatte }
+        analysis = found
+        hasSubject = found.hasSubject
         analysing = false
         if recipe.autoEnhance > 0 || recipe.subjectPop > 0 || recipe.backgroundBlur > 0 { scheduleRender() }
     }

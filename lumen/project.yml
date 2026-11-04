@@ -53,6 +53,7 @@ targets:
         NSMicrophoneUsageDescription: Lumen records sound with your videos.
         NSPhotoLibraryAddUsageDescription: Lumen saves the photos you take and edit to your library.
         NSPhotoLibraryUsageDescription: Lumen opens photos from your library so you can edit them.
+        NSLocationWhenInUseUsageDescription: Lumen adds where you took a photo to it, if you turn on location tagging.
         NSLocalNetworkUsageDescription: Lumen sends photos to the AI upscaler on your own NAS.
         # The upscaler on the NAS is reached over plain http (Tailscale or home network).
         NSAppTransportSecurity:

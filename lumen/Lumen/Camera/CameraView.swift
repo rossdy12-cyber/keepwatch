@@ -15,16 +15,20 @@ struct CameraView: View {
     @StateObject private var level = LevelMonitor()
     @Environment(\.scenePhase) private var scenePhase
 
-    @AppStorage("lumen.grid") private var showGrid = true
+    @AppStorage("lumen.gridStyle") private var gridStyle: GridStyle = .thirds
     @AppStorage("lumen.histogram") private var showHistogram = true
     @AppStorage("lumen.level") private var showLevel = true
+    @AppStorage("lumen.hardwareShutter") private var hardwareShutter = true
     @State private var timer = 0
     @State private var countdown: Int?
     @State private var control: ProControl?
     @State private var focusPoint: CGPoint?
+    @State private var lockPoint: CGPoint?
     @State private var flashOverlay = false
     @State private var libraryItem: PhotosPickerItem?
     @State private var editing: EditSource?
+    @State private var showSettings = false
+    @State private var shutterHeld = false
 
     var body: some View {
         ZStack {
@@ -78,6 +82,9 @@ struct CameraView: View {
                 EditorView(source: source)
             }
         }
+        .sheet(isPresented: $showSettings) {
+            CameraSettingsSheet(camera: camera, hardwareShutter: $hardwareShutter)
+        }
     }
 
     // MARK: Layout
@@ -86,13 +93,25 @@ struct CameraView: View {
         VStack(spacing: 0) {
             topBar
             ZStack {
-                CameraPreview(camera: camera) { point in
+                CameraPreview(camera: camera, hardwareShutter: hardwareShutter && editing == nil && !showSettings) { point in
+                    lockPoint = nil
                     focusPoint = point
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         if focusPoint == point { focusPoint = nil }
                     }
+                } onLock: { point in
+                    focusPoint = nil
+                    lockPoint = point
+                } onHardwareButton: { phase in
+                    switch phase {
+                    case .began: shutterDown()
+                    case .ended: shutterUp()
+                    case .cancelled: if camera.isBursting { camera.stopBurst() }
+                    }
                 }
-                if showGrid { GridOverlay() }
+                OverlayImageView(feed: camera.overlay)
+                if gridStyle != .off { GridOverlay(style: gridStyle) }
+                if camera.mode == .photo && camera.aspect != .fourThree { AspectMask(aspect: camera.aspect) }
                 if showLevel { LevelOverlay(level: level) }
                 if let focusPoint {
                     RoundedRectangle(cornerRadius: 4)
@@ -101,47 +120,14 @@ struct CameraView: View {
                         .position(focusPoint)
                         .allowsHitTesting(false)
                 }
-                VStack {
-                    HStack(alignment: .top) {
-                        readout
-                        Spacer()
-                        if camera.isRecording, let started = camera.recordingStarted {
-                            TimelineView(.periodic(from: started, by: 1)) { context in
-                                let seconds = Int(context.date.timeIntervalSince(started))
-                                HStack(spacing: 6) {
-                                    Circle().fill(Color.red).frame(width: 8, height: 8)
-                                    Text(String(format: "%02d:%02d", seconds / 60, seconds % 60))
-                                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                                }
-                                .padding(.horizontal, 10).padding(.vertical, 4)
-                                .background(Color.red.opacity(0.35), in: Capsule())
-                            }
-                            Spacer()
-                        }
-                        if showHistogram && camera.mode == .photo { HistogramView(bins: camera.histogram) }
-                    }
-                    Spacer()
-                    if let countdown {
-                        Text("\(countdown)")
-                            .font(.system(size: 96, weight: .thin, design: .rounded))
-                            .shadow(radius: 8)
-                        Spacer()
-                    }
-                    if let message = camera.message {
-                        Text(message)
-                            .font(.footnote)
-                            .padding(8)
-                            .background(Color.black.opacity(0.6), in: Capsule())
-                            .onTapGesture { camera.message = nil }
-                    }
-                    if camera.zoom > 1.05 {
-                        Text(String(format: "%.1f×", camera.effectiveZoom))
-                            .font(.caption.weight(.semibold).monospacedDigit())
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(Color.black.opacity(0.5), in: Capsule())
-                    }
+                if camera.aeafLocked, let lockPoint {
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.yellow, lineWidth: 2)
+                        .frame(width: 84, height: 84)
+                        .position(lockPoint)
+                        .allowsHitTesting(false)
                 }
-                .padding(10)
+                viewfinderInfo
                 if flashOverlay {
                     Color.black.opacity(0.8).allowsHitTesting(false)
                 }
@@ -156,9 +142,120 @@ struct CameraView: View {
         }
     }
 
+    /// Readouts, badges, progress and messages over the viewfinder.
+    private var viewfinderInfo: some View {
+        VStack(spacing: 6) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    readout
+                    badges
+                    if camera.mode.usesMovieFile { AudioMeterView(meter: camera.audioMeter) }
+                }
+                Spacer()
+                if camera.isRecording, let started = camera.recordingStarted {
+                    TimelineView(.periodic(from: started, by: 1)) { context in
+                        let seconds = Int(context.date.timeIntervalSince(started))
+                        HStack(spacing: 6) {
+                            Circle().fill(Color.red).frame(width: 8, height: 8)
+                            Text(String(format: "%02d:%02d", seconds / 60, seconds % 60))
+                                .font(.subheadline.weight(.semibold).monospacedDigit())
+                            if camera.mode == .timeLapse {
+                                Text(String(format: "→ %.1fs", Double(camera.timeLapseFrames) / 30))
+                                    .font(.caption.weight(.semibold).monospacedDigit())
+                            }
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(Color.red.opacity(0.35), in: Capsule())
+                    }
+                    Spacer()
+                }
+                if showHistogram { HistogramView(bins: camera.histogram) }
+            }
+            Spacer()
+            if let countdown {
+                Text("\(countdown)")
+                    .font(.system(size: 96, weight: .thin, design: .rounded))
+                    .shadow(radius: 8)
+                Spacer()
+            }
+            if let progress = camera.stackProgress {
+                VStack(spacing: 6) {
+                    ProgressView(value: progress).tint(.yellow).frame(width: 160)
+                    Text(camera.drive == .hdr ? "Merging…" : "Hold still…").font(.caption.weight(.semibold))
+                }
+                .padding(10)
+                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+            }
+            if let message = camera.message {
+                Text(message)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .padding(8)
+                    .background(Color.black.opacity(0.6), in: Capsule())
+                    .onTapGesture { camera.message = nil }
+            }
+            HStack(alignment: .bottom) {
+                presetButtons
+                Spacer()
+                if abs(camera.effectiveZoom - camera.lensBase) > 0.05 || camera.zoom > 1.05 {
+                    Text(String(format: "%.1f×", camera.effectiveZoom))
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Color.black.opacity(0.5), in: Capsule())
+                }
+                Spacer()
+                Color.clear.frame(width: 34, height: 1).allowsHitTesting(false)
+            }
+        }
+        .padding(10)
+    }
+
+    private var badges: some View {
+        HStack(spacing: 6) {
+            if camera.aeafLocked { badge("AE/AF LOCK", highlighted: true) }
+            if camera.macroActive { badge("MACRO", highlighted: true) }
+            if camera.mode == .photo && camera.drive != .single { badge(camera.drive.rawValue.uppercased(), highlighted: false) }
+            if camera.isBursting { badge("\(camera.burstTaken)", highlighted: true) }
+            if camera.intervalRunning {
+                badge(camera.intervalShots > 0 ? "\(camera.intervalTaken)/\(camera.intervalShots)" : "\(camera.intervalTaken)", highlighted: true)
+            }
+            if camera.mode.isVideo && camera.auto180 { badge("180°", highlighted: false) }
+            if camera.mode.isVideo && !camera.activeFormatLabel.isEmpty { badge(camera.activeFormatLabel, highlighted: false) }
+            if camera.locationTagging { Image(systemName: "location.fill").font(.system(size: 9)) }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func badge(_ text: String, highlighted: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .heavy))
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(highlighted ? Color.yellow : Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 4))
+            .foregroundStyle(highlighted ? .black : .white)
+    }
+
+    private var presetButtons: some View {
+        VStack(spacing: 6) {
+            ForEach(1...3, id: \.self) { slot in
+                Text("C\(slot)")
+                    .font(.system(size: 11, weight: .heavy))
+                    .frame(width: 34, height: 24)
+                    .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(CameraPreset.load(slot) == nil ? 0.2 : 0.6), lineWidth: 1))
+                    .onTapGesture { camera.recallPreset(slot) }
+                    .onLongPressGesture(minimumDuration: 0.6) { camera.savePreset(slot) }
+                    .accessibilityLabel("Custom setting \(slot)")
+                    .accessibilityHint("Tap to load, long-press to save the current settings")
+            }
+        }
+    }
+
+    // MARK: Top bar
+
     private var topBar: some View {
-        HStack(spacing: 22) {
-            if camera.mode == .video {
+        HStack(spacing: 18) {
+            switch camera.mode {
+            case .video:
                 Menu {
                     ForEach(VideoQuality.allCases) { quality in
                         Button {
@@ -168,22 +265,52 @@ struct CameraView: View {
                         }
                     }
                 } label: {
-                    Text(camera.videoQuality.rawValue)
-                        .font(.caption.weight(.bold))
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white, lineWidth: 1))
+                    boxed(camera.videoQuality.rawValue)
                 }
                 .disabled(camera.isRecording)
-            }
-            if camera.flashAvailable && camera.mode == .photo {
-                Button { cycleFlash() } label: {
-                    Image(systemName: flashIcon)
-                        .foregroundStyle(camera.flash == .off ? .white : .yellow)
+            case .slowMo:
+                Menu {
+                    Picker("Frame rate", selection: $camera.slowMoRate) {
+                        ForEach(SlowMoRate.allCases) { Text("HD · \($0.label)").tag($0) }
+                    }
+                } label: {
+                    boxed("HD · \(camera.slowMoRate.rawValue)")
                 }
-                .accessibilityLabel("Flash")
+                .disabled(camera.isRecording)
+            case .timeLapse:
+                Menu {
+                    Picker("A frame every", selection: $camera.timeLapseInterval) {
+                        ForEach([0.25, 0.5, 1, 2, 5], id: \.self) { value in
+                            Text(value < 1 ? String(format: "Every %.2g s", value) : "Every \(Int(value)) s").tag(value)
+                        }
+                    }
+                } label: {
+                    boxed(camera.timeLapseInterval < 1 ? String(format: "%.2gs", camera.timeLapseInterval) : "\(Int(camera.timeLapseInterval))s")
+                }
+                .disabled(camera.isRecording)
+            case .photo:
+                photoTopItems
             }
-            if camera.mode == .photo {
-            Menu {
+            assistMenu
+            Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                .accessibilityLabel("Camera settings")
+        }
+        .font(.system(size: 18))
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var photoTopItems: some View {
+        if camera.flashAvailable {
+            Button { cycleFlash() } label: {
+                Image(systemName: flashIcon)
+                    .foregroundStyle(camera.flash == .off ? .white : .yellow)
+            }
+            .accessibilityLabel("Flash")
+        }
+        Menu {
+            Section("Format") {
                 ForEach(CaptureFormat.allCases) { format in
                     if (format != .raw && format != .rawPlusHEIF) || camera.rawAvailable {
                         Button {
@@ -193,34 +320,71 @@ struct CameraView: View {
                         }
                     }
                 }
-            } label: {
-                Text(camera.format == .raw && camera.proRAW ? "ProRAW" : camera.format.rawValue)
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white, lineWidth: 1))
             }
-            }
-            if camera.mode == .photo {
-            Button { timer = timer == 0 ? 3 : (timer == 3 ? 10 : 0) } label: {
-                HStack(spacing: 2) {
-                    Image(systemName: "timer")
-                    if timer > 0 { Text("\(timer)s").font(.caption.weight(.semibold)) }
+            Section("Shape") {
+                Picker("Shape", selection: $camera.aspect) {
+                    ForEach(CaptureAspect.allCases) { Text($0.rawValue).tag($0) }
                 }
-                .foregroundStyle(timer > 0 ? .yellow : .white)
             }
-            .accessibilityLabel("Self-timer")
-            }
-            Menu {
-                Toggle("Grid", isOn: $showGrid)
-                Toggle("Level", isOn: $showLevel)
-                Toggle("Histogram", isOn: $showHistogram)
-            } label: {
-                Image(systemName: "square.grid.3x3")
-            }
+        } label: {
+            boxed((camera.format == .raw && camera.proRAW ? "ProRAW" : camera.format.rawValue)
+                  + (camera.aspect == .fourThree ? "" : " · \(camera.aspect.rawValue)"))
         }
-        .font(.system(size: 18))
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
+        Menu {
+            Picker("Drive", selection: Binding(get: { camera.drive }, set: { camera.setDrive($0) })) {
+                ForEach(DriveMode.allCases) { Label($0.rawValue, systemImage: $0.icon).tag($0) }
+            }
+            Section { Text(camera.drive.help) }
+        } label: {
+            Image(systemName: camera.drive.icon)
+                .foregroundStyle(camera.drive == .single ? .white : .yellow)
+        }
+        .disabled(camera.intervalRunning || camera.isBursting)
+        .accessibilityLabel("Drive mode")
+        Button { timer = timer == 0 ? 3 : (timer == 3 ? 10 : 0) } label: {
+            HStack(spacing: 2) {
+                Image(systemName: "timer")
+                if timer > 0 { Text("\(timer)s").font(.caption.weight(.semibold)) }
+            }
+            .foregroundStyle(timer > 0 ? .yellow : .white)
+        }
+        .accessibilityLabel("Self-timer")
+        Menu {
+            Picker("Look", selection: $camera.look) {
+                ForEach(Look.all) { Text($0.name).tag($0.id) }
+            }
+            Section { Text("Shown live and added as an edit: Photos' Revert brings back the original.") }
+        } label: {
+            Image(systemName: "camera.filters")
+                .foregroundStyle(camera.look == Look.none.id ? .white : .yellow)
+        }
+        .accessibilityLabel("Look")
+    }
+
+    private var assistMenu: some View {
+        Menu {
+            Picker("Grid", selection: $gridStyle) {
+                ForEach(GridStyle.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Toggle("Level", isOn: $showLevel)
+            Toggle("Histogram", isOn: $showHistogram)
+            Section("Exposure and focus aids") {
+                Toggle("Focus peaking", isOn: $camera.peaking)
+                Toggle("Zebras", isOn: $camera.zebras)
+                Toggle("False colour", isOn: $camera.falseColour)
+            }
+        } label: {
+            Image(systemName: "square.grid.3x3")
+                .foregroundStyle(camera.peaking || camera.zebras || camera.falseColour ? .yellow : .white)
+        }
+        .accessibilityLabel("Viewfinder aids")
+    }
+
+    private func boxed(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.bold))
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white, lineWidth: 1))
     }
 
     /// The settings in use: what the camera chose in auto, or what you set.
@@ -237,12 +401,17 @@ struct CameraView: View {
         .allowsHitTesting(false)
     }
 
+    // MARK: Manual controls
+
     private var proControls: some View {
         VStack(spacing: 6) {
             if let control {
                 controlSlider(control)
                     .padding(.horizontal, 16)
                     .transition(.opacity)
+                if control == .focus && camera.manualFocusSupported {
+                    focusPullRow.padding(.horizontal, 16)
+                }
             }
             HStack(spacing: 6) {
                 ForEach(ProControl.allCases) { item in
@@ -260,6 +429,35 @@ struct CameraView: View {
             }
         }
         .padding(.top, 8)
+    }
+
+    /// Focus pull: mark two distances, then glide between them (for video).
+    private var focusPullRow: some View {
+        HStack(spacing: 10) {
+            markButton("A", value: camera.focusA) { camera.setFocusMark(0) }
+            markButton("B", value: camera.focusB) { camera.setFocusMark(1) }
+            Button {
+                camera.pullFocus()
+            } label: {
+                Label(camera.isPulling ? "Pulling…" : "Pull focus", systemImage: "arrow.left.and.right")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Color.white.opacity(0.15), in: Capsule())
+            }
+            .disabled(camera.focusA == nil || camera.focusB == nil || camera.isPulling)
+            Spacer()
+            Text("\(Int(camera.focusPullSeconds))s").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+    }
+
+    private func markButton(_ name: String, value: Float?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(value.map { String(format: "%@ %.0f%%", name, $0 * 100) } ?? "Set \(name)")
+                .font(.caption.weight(.bold))
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(value == nil ? Color.white.opacity(0.15) : Color.yellow.opacity(0.85), in: Capsule())
+                .foregroundStyle(value == nil ? .white : .black)
+        }
     }
 
     @ViewBuilder
@@ -280,13 +478,13 @@ struct CameraView: View {
             }
         case .iso:
             sliderRow(title: "ISO \(Int(camera.iso))", isAuto: camera.autoExposure, autoAction: { camera.setAutoExposure(true) }) {
-                Slider(value: Binding(get: { log2(Double(camera.iso)) }, set: { camera.setISO(Float(pow(2, $0))) }),
-                       in: log2(Double(camera.minISO))...log2(Double(camera.maxISO)))
+                Slider(value: Binding(get: { log2(Double(max(camera.iso, 1))) }, set: { camera.setISO(Float(pow(2, $0))) }),
+                       in: log2(Double(camera.minISO))...log2(Double(max(camera.maxISO, camera.minISO + 1))))
             }
         case .shutter:
             sliderRow(title: Self.shutterText(camera.shutter), isAuto: camera.autoExposure, autoAction: { camera.setAutoExposure(true) }) {
-                Slider(value: Binding(get: { log2(camera.shutter) }, set: { camera.setShutter(pow(2, $0)) }),
-                       in: log2(camera.minShutter)...log2(camera.maxShutter))
+                Slider(value: Binding(get: { log2(max(camera.shutter, 1e-6)) }, set: { camera.setShutter(pow(2, $0)) }),
+                       in: log2(camera.minShutter)...log2(max(camera.maxShutter, camera.minShutter * 2)))
             }
         case .whiteBalance:
             sliderRow(title: "\(Int(camera.temperature))K  \(camera.tint >= 0 ? "+" : "")\(Int(camera.tint))",
@@ -325,24 +523,43 @@ struct CameraView: View {
         }
     }
 
+    // MARK: Lenses and modes
+
     private var lensPicker: some View {
         HStack(spacing: 10) {
-            ForEach(zoomStops, id: \.label) { stop in
-                let active = abs(camera.effectiveZoom - stop.zoom) < 0.15
-                Button {
-                    if let lens = stop.lens {
-                        if camera.currentLensID == lens.id { camera.setZoom(1) } else { camera.selectLens(lens) }
-                    } else {
-                        camera.zoomPreset(stop.zoom)
+            if camera.drive == .portrait && camera.mode == .photo {
+                Text("PORTRAIT · depth for background blur")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.yellow)
+                    .frame(height: 40)
+            } else {
+                ForEach(zoomStops, id: \.label) { stop in
+                    let active = !camera.macroActive && abs(camera.effectiveZoom - stop.zoom) < 0.15
+                    Button {
+                        if let lens = stop.lens {
+                            if camera.currentLensID == lens.id && !camera.macroActive { camera.setZoom(1) } else { camera.selectLens(lens) }
+                        } else {
+                            camera.zoomPreset(stop.zoom)
+                        }
+                    } label: {
+                        Text(active ? stop.label : stop.label.replacingOccurrences(of: "×", with: ""))
+                            .font(.caption.weight(.bold))
+                            .frame(width: 40, height: 40)
+                            .background(Color.white.opacity(active ? 0.25 : 0.08), in: Circle())
+                            .foregroundStyle(active ? .yellow : .white)
                     }
-                } label: {
-                    Text(active ? stop.label : stop.label.replacingOccurrences(of: "×", with: ""))
-                        .font(.caption.weight(.bold))
-                        .frame(width: 40, height: 40)
-                        .background(Color.white.opacity(active ? 0.25 : 0.08), in: Circle())
-                        .foregroundStyle(active ? .yellow : .white)
+                    .disabled(camera.isRecording && stop.lens != nil)
                 }
-                .disabled(camera.isRecording && stop.lens != nil)
+                if camera.macroAvailable {
+                    Button { camera.setMacro(!camera.macroActive) } label: {
+                        Image(systemName: "camera.macro")
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(width: 40, height: 40)
+                            .background(Color.white.opacity(camera.macroActive ? 0.25 : 0.08), in: Circle())
+                            .foregroundStyle(camera.macroActive ? .yellow : .white)
+                    }
+                    .accessibilityLabel(camera.macroActive ? "Macro off" : "Macro on")
+                }
             }
         }
         .padding(.vertical, 10)
@@ -360,18 +577,20 @@ struct CameraView: View {
     }
 
     private var modePicker: some View {
-        HStack(spacing: 24) {
-            ForEach([CaptureMode.photo, CaptureMode.video], id: \.self) { item in
+        HStack(spacing: 20) {
+            ForEach(CaptureMode.allCases) { item in
                 Button { camera.setMode(item) } label: {
                     Text(item.rawValue)
                         .font(.caption.weight(.bold))
                         .foregroundStyle(camera.mode == item ? .yellow : .white.opacity(0.7))
                 }
-                .disabled(camera.isRecording)
+                .disabled(camera.isRecording || camera.intervalRunning || camera.isBursting)
             }
         }
         .padding(.bottom, 8)
     }
+
+    // MARK: Shutter row
 
     private var bottomBar: some View {
         HStack {
@@ -395,28 +614,7 @@ struct CameraView: View {
             .accessibilityLabel("Edit the last photo")
             .frame(maxWidth: .infinity)
 
-            Button {
-                if camera.mode == .video {
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    camera.toggleRecording()
-                } else {
-                    shoot()
-                }
-            } label: {
-                ZStack {
-                    Circle().stroke(Color.white, lineWidth: 4).frame(width: 76, height: 76)
-                    if camera.mode == .video {
-                        RoundedRectangle(cornerRadius: camera.isRecording ? 6 : 31)
-                            .fill(Color.red)
-                            .frame(width: camera.isRecording ? 30 : 62, height: camera.isRecording ? 30 : 62)
-                            .animation(.easeInOut(duration: 0.2), value: camera.isRecording)
-                    } else {
-                        Circle().fill(camera.isCapturing ? Color.gray : Color.white).frame(width: 62, height: 62)
-                    }
-                }
-            }
-            .disabled((camera.mode == .photo && camera.isCapturing) || countdown != nil)
-            .accessibilityLabel(camera.mode == .video ? (camera.isRecording ? "Stop recording" : "Record video") : "Take photo")
+            shutterButton
 
             HStack(spacing: 18) {
                 PhotosPicker(selection: $libraryItem, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
@@ -426,6 +624,7 @@ struct CameraView: View {
                 Button { flipCamera() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath.camera")
                 }
+                .disabled(camera.isRecording)
                 .accessibilityLabel("Switch camera")
             }
             .font(.title3)
@@ -435,7 +634,90 @@ struct CameraView: View {
         .padding(.top, 4)
     }
 
+    private var shutterBusy: Bool {
+        (camera.mode == .photo && camera.isCapturing && !camera.intervalRunning && !camera.isBursting) || countdown != nil
+    }
+
+    private var shutterButton: some View {
+        ZStack {
+            Circle().stroke(Color.white, lineWidth: 4).frame(width: 76, height: 76)
+            if camera.mode.isVideo {
+                RoundedRectangle(cornerRadius: camera.isRecording ? 6 : 31)
+                    .fill(Color.red)
+                    .frame(width: camera.isRecording ? 30 : 62, height: camera.isRecording ? 30 : 62)
+                    .animation(.easeInOut(duration: 0.2), value: camera.isRecording)
+            } else if camera.intervalRunning {
+                RoundedRectangle(cornerRadius: 6).fill(Color.yellow).frame(width: 30, height: 30)
+            } else {
+                Circle()
+                    .fill(shutterBusy ? Color.gray : (camera.isBursting ? Color.yellow : Color.white))
+                    .frame(width: camera.isBursting || shutterHeld ? 54 : 62, height: camera.isBursting || shutterHeld ? 54 : 62)
+                Image(systemName: camera.drive.icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.black.opacity(camera.drive == .single ? 0 : 0.6))
+            }
+        }
+        .frame(width: 80, height: 80)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !shutterHeld {
+                        shutterHeld = true
+                        shutterDown()
+                    }
+                }
+                .onEnded { _ in
+                    shutterHeld = false
+                    shutterUp()
+                }
+        )
+        .opacity(shutterBusy ? 0.6 : 1)
+        .accessibilityElement()
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(shutterLabel)
+        .accessibilityAction { shutterPressed() }
+    }
+
+    private var shutterLabel: String {
+        if camera.mode.isVideo { return camera.isRecording ? "Stop recording" : "Record" }
+        if camera.intervalRunning { return "Stop interval shooting" }
+        return "Take photo"
+    }
+
     // MARK: Actions
+
+    /// Shutter (or volume button / Camera Control) pressed down: in Burst, holding starts continuous shooting.
+    private func shutterDown() {
+        guard camera.mode == .photo, camera.drive == .burst, !shutterBusy else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if (shutterHeld || hardwareHeld) && !camera.isBursting { camera.startBurst() }
+        }
+        hardwareHeld = true
+    }
+
+    @State private var hardwareHeld = false
+
+    private func shutterUp() {
+        hardwareHeld = false
+        if camera.isBursting {
+            camera.stopBurst()
+            return
+        }
+        shutterPressed()
+    }
+
+    private func shutterPressed() {
+        if camera.mode.isVideo {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            camera.toggleRecording()
+        } else if camera.intervalRunning || camera.drive == .interval {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            if camera.intervalRunning { camera.toggleInterval() } else { shoot() }
+        } else if !shutterBusy {
+            shoot()
+        }
+    }
 
     private func shoot() {
         if timer > 0 {
@@ -455,12 +737,27 @@ struct CameraView: View {
 
     private func takePhoto() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        flashOverlay = true
-        withAnimation(.easeOut(duration: 0.25)) { flashOverlay = false }
+        if camera.drive != .interval {
+            flashOverlay = true
+            withAnimation(.easeOut(duration: 0.25)) { flashOverlay = false }
+        }
         camera.capture()
     }
 
     private func flipCamera() {
+        if camera.drive == .portrait && camera.mode == .photo {
+            // Portrait swaps between the back depth camera and the front TrueDepth camera.
+            camera.setDrive(.single)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                flipToOtherSide()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { camera.setDrive(.portrait) }
+            }
+            return
+        }
+        flipToOtherSide()
+    }
+
+    private func flipToOtherSide() {
         let current = camera.lenses.first { $0.id == camera.currentLensID }
         if current?.position == .front {
             if let main = camera.lenses.first(where: { $0.label == "1×" }) { camera.selectLens(main) }
