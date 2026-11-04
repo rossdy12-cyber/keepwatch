@@ -66,6 +66,7 @@ jobs:
             -module-name OmniContainerPlugin \
             -Xlinker -install_name -Xlinker @rpath/OmniContainerPlugin.dylib \
             OmniContainer/OmniContainerApp.swift \
+            OmniContainer/StoredSecrets.swift \
             $(find OmniContainer/KeepwatchCore -name '*.swift') \
             out/OmniPluginEntry.o \
             -o out/OmniContainerPlugin.dylib
