@@ -36,6 +36,10 @@ Jarvis core answered, and the spoken reply played on a simulated Pi. Not yet tri
 
 ## 2. Prepare the Pi
 
+> **Easier:** flash the ready-made [Jarvis Pi image](../jarvis-pi-image/README.md) and fill in `jarvis.txt` on the
+> card. No SSH or setup command needed. The steps below are the manual way.
+
+
 1. On your PC, install **Raspberry Pi Imager** (<https://www.raspberrypi.com/software/>).
    - Device: **Raspberry Pi 1**. OS: **Raspberry Pi OS (other) → Raspberry Pi OS Lite (32-bit)**.
    - When it asks about **OS customisation**, choose **Edit settings**:

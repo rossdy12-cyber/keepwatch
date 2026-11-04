@@ -1,0 +1,18 @@
+[Unit]
+Description=Jarvis voice speaker ("Hey Jarvis")
+After=network-online.target sound.target jarvis-setup.service
+Wants=network-online.target
+ConditionPathExists=/etc/jarvis-voice.env
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/jarvis-voice.env
+ExecStartPre=-/usr/local/sbin/jarvis-update-client
+ExecStartPre=/usr/local/sbin/jarvis-audio
+ExecStart=/usr/bin/python3 -u /opt/jarvis-voice/jarvis-pi.py
+Restart=always
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

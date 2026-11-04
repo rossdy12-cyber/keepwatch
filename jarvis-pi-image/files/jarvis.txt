@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------------------------
+#  Jarvis Pi settings
+#
+#  Fill these in after flashing the card (it shows up on your PC as a drive called "bootfs"),
+#  save, eject the card and put it in the Pi. The Pi reads this file every time it starts, so
+#  you can change the Wi-Fi or the NAS here later too. Once a password or key has been used it
+#  is replaced with (saved), so it isn't left lying on the card.
+#
+#  Lines starting with # are notes. Don't put quotes round the values.
+# ---------------------------------------------------------------------------------------------
+
+# Your Wi-Fi (leave empty if the Pi is on an Ethernet cable).
+WIFI_NAME=
+WIFI_PASSWORD=
+# Two-letter country code, for the Wi-Fi rules (GB for the UK).
+WIFI_COUNTRY=GB
+
+# Your NAS's local address (the 192.168.x.x one on the TrueNAS dashboard's Network card).
+HUB_ADDRESS=
+# The key from TrueNAS: Apps -> jarvis-voice -> Logs. It's the part after token= in the Pi command.
+HUB_KEY=
+
+# A login for SSH, if you ever need it (ssh jarvis@jarvis-pi.local). Leave the password empty
+# for no SSH logins at all.
+USERNAME=jarvis
+PASSWORD=
+
+# The Pi's name on your network.
+HOSTNAME=jarvis-pi
