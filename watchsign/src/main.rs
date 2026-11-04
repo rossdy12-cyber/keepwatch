@@ -72,7 +72,15 @@ async fn run() -> Result<(), Report> {
         .install_default()
         .map_err(|_| report!("Couldn't set up encryption"))?;
     isideload::init().map_err(|_| report!("Couldn't set up error reporting"))?;
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_target(false).init();
+    // INFO progress on the console; a detailed DEBUG log in watchsign.log to send me if something stalls.
+    match std::fs::File::create("watchsign.log") {
+        Ok(file) => tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        Err(_) => tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_target(false).init(),
+    }
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
@@ -101,7 +109,12 @@ async fn run() -> Result<(), Report> {
         Ok(match code.as_str() {
             "d" => TwoFactorCallbackResponse::SendToDevices,
             "r" if !params.unknown => TwoFactorCallbackResponse::ResendCode,
-            _ => TwoFactorCallbackResponse::SubmitCode(code),
+            _ => {
+                // Apple rate-limits sign-ins; this step can sit quietly for a minute or two while it retries.
+                println!("Checking the code and finishing sign-in — this can take a minute or two, please wait…");
+                io::stdout().flush().ok();
+                TwoFactorCallbackResponse::SubmitCode(code)
+            }
         })
     };
     println!("Signing in to Apple...");
@@ -110,6 +123,7 @@ async fn run() -> Result<(), Report> {
         .login(&password, two_factor)
         .await
         .context("Signing in to Apple failed")?;
+    println!("Signed in. Opening the developer account…");
     let mut dev = DeveloperSession::from_account(&mut account)
         .await
         .context("Couldn't open the free developer account")?;
