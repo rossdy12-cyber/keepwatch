@@ -45,3 +45,24 @@ jobs:
           name: watch-tools-windows
           path: out/watch-tools
           retention-days: 30
+
+  watchsign-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps (keyring uses libdbus)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdbus-1-dev pkg-config
+      - name: Build watchsign (Linux)
+        working-directory: watchsign
+        run: cargo build --release --locked
+      - name: Package watchsign with the Watch scripts
+        run: |
+          mkdir -p out/watch-tools-linux
+          cp watchsign/target/release/watchsign out/watch-tools-linux/
+          cp watch-devmode/*.py watch-devmode/README.md out/watch-tools-linux/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: watch-tools-linux
+          path: out/watch-tools-linux
+          retention-days: 30
