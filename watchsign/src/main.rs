@@ -137,7 +137,7 @@ async fn run() -> Result<(), Report> {
     println!("Developer team: {} ({})", team.name.as_deref().unwrap_or("Personal Team"), team.team_id);
 
     // ---- The Watch as a watchOS development device
-    dev.ensure_device_registered(&team, "Apple Watch", &watch_udid, DeveloperDeviceType::Watchos)
+    dev.ensure_device_registered(&team, "Apple Watch", &watch_udid, DeveloperDeviceType::Ios)
         .await
         .context("Couldn't register the Watch")?;
     println!("Watch {watch_udid} is registered.");
@@ -186,13 +186,13 @@ async fn run() -> Result<(), Report> {
 
     // ---- watchOS provisioning profiles (these list the Watch)
     let main_profile = dev
-        .download_team_provisioning_profile(&team, &main_app_id, DeveloperDeviceType::Watchos)
+        .download_team_provisioning_profile(&team, &main_app_id, DeveloperDeviceType::Ios)
         .await
         .context("Couldn't get the watchOS provisioning profile")?;
     let mut profiles: Vec<(String, Profile, plist::Dictionary)> = Vec::new();
     for id in app_ids.iter().filter(|id| id.identifier != main_id) {
         let profile = dev
-            .download_team_provisioning_profile(&team, id, DeveloperDeviceType::Watchos)
+            .download_team_provisioning_profile(&team, id, DeveloperDeviceType::Ios)
             .await
             .context(format!("Couldn't get the profile for {}", id.identifier))?;
         let entitlements = ProvisioningProfile::parse(profile.encoded_profile.as_ref())?.entitlements().clone();
