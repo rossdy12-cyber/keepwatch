@@ -777,24 +777,39 @@ struct CameraView: View {
 
     // MARK: Actions
 
-    /// Shutter (or volume button / Camera Control) pressed down: in Burst, holding starts continuous shooting.
+    /// Button (or volume button / Camera Control) pressed down. The photo is taken the instant you press,
+    /// so nothing moves between the press and the shot. Burst holds to shoot continuously; a quick tap in
+    /// Burst is handled on release.
     private func shutterDown() {
-        guard camera.mode == .photo, camera.drive == .burst, !shutterBusy else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            if (shutterHeld || hardwareHeld) && !camera.isBursting { camera.startBurst() }
-        }
+        guard !shutterBusy else { return }
         hardwareHeld = true
+        if camera.mode.isVideo {
+            shutterPressed()                                   // start / stop recording
+        } else if camera.drive == .interval || camera.intervalRunning {
+            shutterPressed()                                   // start / stop interval shooting
+        } else if camera.drive == .burst {
+            // Hold to burst; a quick tap (released quickly) takes one shot, in shutterUp().
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if (shutterHeld || hardwareHeld) && !camera.isBursting { camera.startBurst() }
+            }
+        } else if timer > 0 {
+            shoot()                                            // self-timer countdown
+        } else {
+            takePhoto()                                        // Single / Night / Long / HDR / Portrait: fire now
+        }
     }
 
     @State private var hardwareHeld = false
 
     private func shutterUp() {
         hardwareHeld = false
+        // Everything except Burst already fired on press; Burst decides tap-vs-hold here.
+        guard camera.mode == .photo, camera.drive == .burst else { return }
         if camera.isBursting {
             camera.stopBurst()
-            return
+        } else if !shutterBusy {
+            takePhoto()                                        // quick tap in Burst = a single shot
         }
-        shutterPressed()
     }
 
     private func shutterPressed() {
