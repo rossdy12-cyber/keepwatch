@@ -49,6 +49,11 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        NSCameraUsageDescription: Lumen uses the camera to take photos.
+        NSCameraUsageDescription: Lumen uses the camera to take photos and videos.
+        NSMicrophoneUsageDescription: Lumen records sound with your videos.
         NSPhotoLibraryAddUsageDescription: Lumen saves the photos you take and edit to your library.
         NSPhotoLibraryUsageDescription: Lumen opens photos from your library so you can edit them.
+        NSLocalNetworkUsageDescription: Lumen sends photos to the AI upscaler on your own NAS.
+        # The upscaler on the NAS is reached over plain http (Tailscale or home network).
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true

@@ -5,6 +5,7 @@ on:
     branches: [main, "claude/**"]
     paths-ignore:
       - "lumen/**"
+      - "lumen-ai/**"
       - ".github/workflows/build-lumen-ipa.yml"
       - "jarvis/**"
       - ".github/workflows/build-jarvis-ipa.yml"

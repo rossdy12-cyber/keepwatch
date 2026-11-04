@@ -29,6 +29,14 @@ final class EditorModel: ObservableObject {
     @Published var shareURL: URL?
     @Published private(set) var analysing = false
     @Published private(set) var hasSubject = false
+    @Published var upscaler = UpscalerSettings.load() {
+        didSet { upscaler.save() }
+    }
+    @Published private(set) var upscaling = false
+    @Published private(set) var upscaleStatus = ""
+    @Published private(set) var upscaleProgress: Double = 0
+    @Published private(set) var imageSize: CGSize = .zero
+    private var upscaleTask: Task<Void, Never>?
 
     private var source: PhotoSource?
     private var analysis: AIAnalysis?
@@ -51,7 +59,14 @@ final class EditorModel: ObservableObject {
         }
         self.source = source
         isRAW = source.isRAW
+        await prepare()
+    }
+
+    /// Previews, AI analysis and look thumbnails for the current source.
+    private func prepare() async {
+        guard let source else { return }
         let fullSize = await Self.extent(of: source)
+        imageSize = fullSize.size
         let longest = max(fullSize.width, fullSize.height)
         previewScale = longest > 0 ? min(1, 1800 / longest) : 1
         original = await renderImage(EditRecipe(), scale: previewScale)
@@ -59,6 +74,84 @@ final class EditorModel: ObservableObject {
         loading = false
         await analyse()
         await makeLookThumbnails()
+    }
+
+    // MARK: AI upscaling on the NAS
+
+    /// Sends the photo (with the edits so far) to the NAS, then carries on editing the bigger version.
+    func upscale(scale: Int) {
+        guard !upscaling, source != nil else { return }
+        upscaleTask = Task { await runUpscale(scale: scale) }
+    }
+
+    func cancelUpscale() {
+        upscaleTask?.cancel()
+        upscaleTask = nil
+        upscaling = false
+        upscaleStatus = ""
+    }
+
+    private func runUpscale(scale: Int) async {
+        let client = UpscaleClient(settings: upscaler)
+        upscaling = true
+        upscaleProgress = 0
+        upscaleStatus = "Preparing…"
+        defer {
+            upscaling = false
+            if !Task.isCancelled { upscaleStatus = "" }
+        }
+        do {
+            // Send it at the size the NAS will work at (it shrinks bigger photos anyway): a much smaller upload.
+            let limit = await client.inputLimit(scale: scale)
+            let megapixels = imageSize.width * imageSize.height / 1_000_000
+            let sendScale = megapixels > limit ? CGFloat((limit / megapixels).squareRoot()) : 1
+            guard let jpeg = await renderJPEG(scale: sendScale) else { throw UpscaleError.server("Couldn't prepare the photo.") }
+            upscaleStatus = "Uploading…"
+            let job = try await client.start(jpeg: jpeg, scale: scale)
+            var status = try await client.status(job)
+            while status.state == "queued" || status.state == "working" {
+                try Task.checkCancellation()
+                upscaleProgress = status.progress
+                upscaleStatus = status.state == "queued"
+                    ? (status.queuePosition > 1 ? "Waiting (\(status.queuePosition - 1) ahead)…" : "Starting…")
+                    : "Upscaling \(scale)× on your NAS… \(Int(status.progress * 100))%"
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                status = try await client.status(job)
+            }
+            guard status.state == "done" else { throw UpscaleError.server(status.error ?? "The upscale failed.") }
+            upscaleStatus = "Downloading…"
+            let data = try await client.result(job)
+            guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
+                throw UpscaleError.server("The upscaled photo couldn't be opened.")
+            }
+            // The edits are now part of the photo: carry on from the bigger version with fresh sliders.
+            source = .image(image)
+            isRAW = false
+            analysis = nil
+            recipe = EditRecipe()
+            await prepare()
+            message = "Upscaled to \(Int(image.extent.width)) × \(Int(image.extent.height)). Tap Save to keep it."
+        } catch is CancellationError {
+            message = "Upscale cancelled."
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    private func renderJPEG(scale: CGFloat) async -> Data? {
+        guard let source else { return nil }
+        let recipe = self.recipe
+        let analysis = self.analysis
+        return await withCheckedContinuation { continuation in
+            renderQueue.async {
+                guard let image = PhotoRenderer.render(source, recipe: recipe, scale: scale, analysis: analysis),
+                      let cg = PhotoRenderer.cgImage(image) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: UIImage(cgImage: cg).jpegData(compressionQuality: 0.95))
+            }
+        }
     }
 
     /// Runs the on-device AI once: Apple's auto-enhance analysis and the subject outline.

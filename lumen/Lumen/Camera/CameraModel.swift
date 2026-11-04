@@ -21,8 +21,27 @@ struct Lens: Identifiable, Equatable {
 
 /// Which manual control the slider is adjusting.
 enum ProControl: String, CaseIterable, Identifiable {
-    case ev = "EV", iso = "ISO", shutter = "S", whiteBalance = "WB", focus = "F"
+    case zoom = "Z", ev = "EV", iso = "ISO", shutter = "S", whiteBalance = "WB", focus = "F"
     var id: String { rawValue }
+}
+
+enum CaptureMode: String {
+    case photo = "PHOTO", video = "VIDEO"
+}
+
+/// Video resolution and frame rate.
+enum VideoQuality: String, CaseIterable, Identifiable {
+    case uhd24 = "4K · 24", uhd30 = "4K · 30", uhd60 = "4K · 60", hd30 = "HD · 30", hd60 = "HD · 60"
+    var id: String { rawValue }
+    var width: Int32 { self == .hd30 || self == .hd60 ? 1920 : 3840 }
+    var height: Int32 { self == .hd30 || self == .hd60 ? 1080 : 2160 }
+    var fps: Double {
+        switch self {
+        case .uhd24: return 24
+        case .uhd30, .hd30: return 30
+        case .uhd60, .hd60: return 60
+        }
+    }
 }
 
 /// The camera: lenses, manual controls, capture and saving.
@@ -33,6 +52,10 @@ final class CameraModel: NSObject, ObservableObject {
     private let videoQueue = DispatchQueue(label: "lumen.camera.frames")
     private let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let movieOutput = AVCaptureMovieFileOutput()
+    private var audioInput: AVCaptureDeviceInput?
+    /// The mode the session is set up for (only touched on the session queue).
+    private var sessionMode: CaptureMode = .photo
     private var device: AVCaptureDevice?
     private var input: AVCaptureDeviceInput?
     private var processors: [Int64: PhotoProcessor] = [:]
@@ -73,6 +96,15 @@ final class CameraModel: NSObject, ObservableObject {
 
     @Published var zoom: CGFloat = 1
     @Published var maxZoom: CGFloat = 10
+    /// How zoomed-in the current lens is compared with the main one (0.5 for ultra wide, 1, 3, 5…).
+    @Published var lensBase: Double = 1
+
+    @Published var mode: CaptureMode = .photo
+    @Published var videoQuality: VideoQuality = .uhd30
+    @Published var isRecording = false
+    @Published var recordingStarted: Date?
+    @Published var lastVideoURL: URL?
+    @Published var lastWasVideo = false
 
     @Published var histogram: [Float] = Array(repeating: 0, count: 64)
     @Published var lastThumbnail: UIImage?
@@ -196,6 +228,8 @@ final class CameraModel: NSObject, ObservableObject {
         if photoOutput.isAppleProRAWSupported { photoOutput.isAppleProRAWEnabled = true }
         session.commitConfiguration()
         makeRotationCoordinator()
+        if sessionMode == .video { applyVideoFormat(announce: false) }
+        let base = lenses(matching: camera.uniqueID)
 
         let rawFormats = photoOutput.availableRawPhotoPixelFormatTypes
         let proRAW = rawFormats.contains { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }
@@ -224,12 +258,20 @@ final class CameraModel: NSObject, ObservableObject {
             self.rawAvailable = anyRAW
             if !anyRAW && (self.format == .raw || self.format == .rawPlusHEIF) { self.format = .heif }
             self.zoom = 1
+            self.lensBase = base
             // A new camera starts in auto; manual values are per-camera.
             self.autoExposure = true
             self.autoWhiteBalance = true
             self.autoFocus = true
             self.exposureBias = 0
         }
+    }
+
+    /// The zoom of a lens relative to the main camera, from the discovered list.
+    private func lenses(matching id: String) -> Double {
+        let found = Self.discoverLenses().first { $0.id == id }
+        guard let found else { return 1 }
+        return found.position == .front ? 1 : found.order
     }
 
     private func makeRotationCoordinator() {
@@ -372,11 +414,148 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    /// Zoom as people think of it (0.5×, 1×, 2×…), whichever lens is in use.
+    var effectiveZoom: Double { lensBase * Double(zoom) }
+
+    func setEffectiveZoom(_ value: Double) {
+        setZoom(CGFloat(value / max(lensBase, 0.01)))
+    }
+
+    /// 2× on the main camera: a crop of its high-resolution sensor (what Apple's Camera does on iPhones without a 2× lens).
+    func zoomPreset(_ effective: Double) {
+        if let main = lenses.first(where: { $0.label == "1×" }), currentLensID != main.id {
+            selectLens(main)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.setEffectiveZoom(effective) }
+        } else {
+            setEffectiveZoom(effective)
+        }
+    }
+
     func setZoom(_ factor: CGFloat) {
         let clamped = max(1, min(maxZoom, factor))
         zoom = clamped
         configureDevice { device in
             device.videoZoomFactor = max(device.minAvailableVideoZoomFactor, min(device.maxAvailableVideoZoomFactor, clamped))
+        }
+    }
+
+    // MARK: Video
+
+    func setMode(_ newMode: CaptureMode) {
+        guard newMode != mode, !isRecording else { return }
+        mode = newMode
+        if newMode == .video && AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                self.sessionQueue.async { self.applyMode(newMode) }
+            }
+        } else {
+            sessionQueue.async { self.applyMode(newMode) }
+        }
+    }
+
+    func setVideoQuality(_ quality: VideoQuality) {
+        videoQuality = quality
+        sessionQueue.async { self.applyVideoFormat(announce: true) }
+    }
+
+    /// Call on the session queue.
+    private func applyMode(_ newMode: CaptureMode) {
+        sessionMode = newMode
+        session.beginConfiguration()
+        if newMode == .video {
+            // The histogram feed is swapped for the movie recorder.
+            if session.outputs.contains(videoOutput) { session.removeOutput(videoOutput) }
+            if !session.outputs.contains(movieOutput), session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
+            if audioInput == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+               let mic = AVCaptureDevice.default(for: .audio), let micInput = try? AVCaptureDeviceInput(device: mic),
+               session.canAddInput(micInput) {
+                session.addInput(micInput)
+                audioInput = micInput
+            }
+            session.commitConfiguration()
+            applyVideoFormat(announce: false)
+        } else {
+            if session.outputs.contains(movieOutput) { session.removeOutput(movieOutput) }
+            if let audioInput { session.removeInput(audioInput) }
+            audioInput = nil
+            if !session.outputs.contains(videoOutput), session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
+            session.sessionPreset = .photo
+            session.commitConfiguration()
+            if let device { use(device) }
+        }
+    }
+
+    /// Picks the camera format for the chosen resolution and frame rate. Call on the session queue.
+    private func applyVideoFormat(announce: Bool) {
+        guard let device else { return }
+        let wanted = DispatchQueue.main.sync { self.videoQuality }
+        let qualities = [wanted] + VideoQuality.allCases.filter { $0 != wanted }
+        for quality in qualities {
+            let candidates = device.formats.filter { format in
+                let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                return dims.width == quality.width && dims.height == quality.height
+                    && format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= quality.fps }
+            }
+            // Prefer full-range 8-bit, which every iPhone records.
+            let chosen = candidates.first { CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange }
+                ?? candidates.first
+            guard let format = chosen else { continue }
+            session.beginConfiguration()
+            session.sessionPreset = .inputPriority
+            do {
+                try device.lockForConfiguration()
+                device.activeFormat = format
+                let frame = CMTime(value: 1, timescale: CMTimeScale(quality.fps))
+                device.activeVideoMinFrameDuration = frame
+                device.activeVideoMaxFrameDuration = frame
+                device.unlockForConfiguration()
+            } catch {
+                session.commitConfiguration()
+                continue
+            }
+            session.commitConfiguration()
+            if let connection = movieOutput.connection(with: .video) {
+                if connection.isVideoStabilizationSupported { connection.preferredVideoStabilizationMode = .auto }
+                if movieOutput.availableVideoCodecTypes.contains(.hevc) {
+                    movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
+                }
+            }
+            let iso = (format.minISO, format.maxISO)
+            let shutter = (max(format.minExposureDuration.seconds, 1.0 / 16000), min(format.maxExposureDuration.seconds, 1.0 / quality.fps))
+            let maxZoom = min(format.videoMaxZoomFactor, 15)
+            DispatchQueue.main.async {
+                self.minISO = iso.0
+                self.maxISO = iso.1
+                self.minShutter = shutter.0
+                self.maxShutter = shutter.1
+                self.maxZoom = maxZoom
+                if quality != wanted {
+                    self.videoQuality = quality
+                    if announce { self.message = "This camera can't do \(wanted.rawValue); using \(quality.rawValue)." }
+                }
+            }
+            return
+        }
+        publishMessage("This camera can't record video in these formats.")
+    }
+
+    func toggleRecording() {
+        sessionQueue.async {
+            if self.movieOutput.isRecording {
+                self.movieOutput.stopRecording()
+                return
+            }
+            guard self.sessionMode == .video else { return }
+            if let connection = self.movieOutput.connection(with: .video), let coordinator = self.rotationCoordinator {
+                let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+                if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
+            }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("Lumen-\(UUID().uuidString).mov")
+            self.movieOutput.startRecording(to: url, recordingDelegate: self)
+            DispatchQueue.main.async {
+                self.isRecording = true
+                self.recordingStarted = Date()
+            }
         }
     }
 
@@ -403,6 +582,7 @@ final class CameraModel: NSObject, ObservableObject {
                     case .success(let saved):
                         self.lastThumbnail = saved.thumbnail
                         self.lastAssetID = saved.assetID
+                        self.lastWasVideo = false
                     case .failure(let error):
                         self.message = error.localizedDescription
                     }
@@ -447,6 +627,50 @@ final class CameraModel: NSObject, ObservableObject {
 
     private func publishMessage(_ text: String) {
         DispatchQueue.main.async { self.message = text }
+    }
+}
+
+extension CameraModel: AVCaptureFileOutputRecordingDelegate {
+    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
+                    from connections: [AVCaptureConnection], error: Error?) {
+        DispatchQueue.main.async {
+            self.isRecording = false
+            self.recordingStarted = nil
+        }
+        // A recording that hit a limit (storage, length) can still have finished properly.
+        if let error = error as NSError?,
+           (error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) != true {
+            publishMessage("Recording failed: \(error.localizedDescription)")
+            return
+        }
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else {
+                self.publishMessage(CaptureError.noPhotosAccess.localizedDescription)
+                return
+            }
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: outputFileURL, options: nil)
+            }) { success, error in
+                let thumbnail = Self.videoThumbnail(outputFileURL)
+                DispatchQueue.main.async {
+                    if success {
+                        self.lastVideoURL = outputFileURL
+                        self.lastThumbnail = thumbnail
+                        self.lastWasVideo = true
+                    } else {
+                        self.message = "Couldn't save the video: \(error?.localizedDescription ?? "unknown error")"
+                    }
+                }
+            }
+        }
+    }
+
+    private static func videoThumbnail(_ url: URL) -> UIImage? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 200, height: 200)
+        guard let image = try? generator.copyCGImage(at: .zero, actualTime: nil) else { return nil }
+        return UIImage(cgImage: image)
     }
 }
 

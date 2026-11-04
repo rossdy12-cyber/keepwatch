@@ -3,6 +3,13 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// A button in the zoom row: a lens, or a zoom on the main camera.
+struct ZoomStop {
+    let label: String
+    let zoom: Double
+    let lens: Lens?
+}
+
 struct CameraView: View {
     @StateObject private var camera = CameraModel()
     @StateObject private var level = LevelMonitor()
@@ -98,7 +105,20 @@ struct CameraView: View {
                     HStack(alignment: .top) {
                         readout
                         Spacer()
-                        if showHistogram { HistogramView(bins: camera.histogram) }
+                        if camera.isRecording, let started = camera.recordingStarted {
+                            TimelineView(.periodic(from: started, by: 1)) { context in
+                                let seconds = Int(context.date.timeIntervalSince(started))
+                                HStack(spacing: 6) {
+                                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                                    Text(String(format: "%02d:%02d", seconds / 60, seconds % 60))
+                                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                                }
+                                .padding(.horizontal, 10).padding(.vertical, 4)
+                                .background(Color.red.opacity(0.35), in: Capsule())
+                            }
+                            Spacer()
+                        }
+                        if showHistogram && camera.mode == .photo { HistogramView(bins: camera.histogram) }
                     }
                     Spacer()
                     if let countdown {
@@ -115,7 +135,7 @@ struct CameraView: View {
                             .onTapGesture { camera.message = nil }
                     }
                     if camera.zoom > 1.05 {
-                        Text(String(format: "%.1f×", camera.zoom))
+                        Text(String(format: "%.1f×", camera.effectiveZoom))
                             .font(.caption.weight(.semibold).monospacedDigit())
                             .padding(.horizontal, 8).padding(.vertical, 4)
                             .background(Color.black.opacity(0.5), in: Capsule())
@@ -131,19 +151,38 @@ struct CameraView: View {
             Spacer(minLength: 0)
             proControls
             lensPicker
+            modePicker
             bottomBar
         }
     }
 
     private var topBar: some View {
         HStack(spacing: 22) {
-            if camera.flashAvailable {
+            if camera.mode == .video {
+                Menu {
+                    ForEach(VideoQuality.allCases) { quality in
+                        Button {
+                            camera.setVideoQuality(quality)
+                        } label: {
+                            Label(quality.rawValue, systemImage: camera.videoQuality == quality ? "checkmark" : "")
+                        }
+                    }
+                } label: {
+                    Text(camera.videoQuality.rawValue)
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white, lineWidth: 1))
+                }
+                .disabled(camera.isRecording)
+            }
+            if camera.flashAvailable && camera.mode == .photo {
                 Button { cycleFlash() } label: {
                     Image(systemName: flashIcon)
                         .foregroundStyle(camera.flash == .off ? .white : .yellow)
                 }
                 .accessibilityLabel("Flash")
             }
+            if camera.mode == .photo {
             Menu {
                 ForEach(CaptureFormat.allCases) { format in
                     if (format != .raw && format != .rawPlusHEIF) || camera.rawAvailable {
@@ -160,6 +199,8 @@ struct CameraView: View {
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white, lineWidth: 1))
             }
+            }
+            if camera.mode == .photo {
             Button { timer = timer == 0 ? 3 : (timer == 3 ? 10 : 0) } label: {
                 HStack(spacing: 2) {
                     Image(systemName: "timer")
@@ -168,6 +209,7 @@ struct CameraView: View {
                 .foregroundStyle(timer > 0 ? .yellow : .white)
             }
             .accessibilityLabel("Self-timer")
+            }
             Menu {
                 Toggle("Grid", isOn: $showGrid)
                 Toggle("Level", isOn: $showLevel)
@@ -223,6 +265,13 @@ struct CameraView: View {
     @ViewBuilder
     private func controlSlider(_ control: ProControl) -> some View {
         switch control {
+        case .zoom:
+            sliderRow(title: String(format: "%.1f×", camera.effectiveZoom), isAuto: camera.zoom < 1.05,
+                      autoAction: { camera.setZoom(1) }) {
+                Slider(value: Binding(get: { log2(max(camera.effectiveZoom, 0.01)) },
+                                      set: { camera.setEffectiveZoom(pow(2, $0)) }),
+                       in: log2(camera.lensBase)...log2(camera.lensBase * Double(max(camera.maxZoom, 1.01))))
+            }
         case .ev:
             sliderRow(title: String(format: "%+.1f EV", camera.exposureBias), isAuto: abs(camera.exposureBias) < 0.05,
                       autoAction: { camera.setExposureBias(0) }) {
@@ -278,23 +327,60 @@ struct CameraView: View {
 
     private var lensPicker: some View {
         HStack(spacing: 10) {
-            ForEach(camera.lenses.filter { $0.position == .back }) { lens in
-                Button { camera.selectLens(lens) } label: {
-                    Text(lens.label)
+            ForEach(zoomStops, id: \.label) { stop in
+                let active = abs(camera.effectiveZoom - stop.zoom) < 0.15
+                Button {
+                    if let lens = stop.lens {
+                        if camera.currentLensID == lens.id { camera.setZoom(1) } else { camera.selectLens(lens) }
+                    } else {
+                        camera.zoomPreset(stop.zoom)
+                    }
+                } label: {
+                    Text(active ? stop.label : stop.label.replacingOccurrences(of: "×", with: ""))
                         .font(.caption.weight(.bold))
                         .frame(width: 40, height: 40)
-                        .background(Color.white.opacity(camera.currentLensID == lens.id ? 0.25 : 0.08), in: Circle())
-                        .foregroundStyle(camera.currentLensID == lens.id ? .yellow : .white)
+                        .background(Color.white.opacity(active ? 0.25 : 0.08), in: Circle())
+                        .foregroundStyle(active ? .yellow : .white)
                 }
+                .disabled(camera.isRecording && stop.lens != nil)
             }
         }
         .padding(.vertical, 10)
     }
 
+    /// Lens buttons, plus 2× on the main camera when there's no 2× lens (a crop of its high-resolution sensor).
+    private var zoomStops: [ZoomStop] {
+        var stops: [ZoomStop] = camera.lenses
+            .filter { $0.position == .back }
+            .map { ZoomStop(label: $0.label, zoom: $0.label == "0.5×" ? 0.5 : ($0.label == "1×" ? 1 : $0.order.rounded()), lens: $0) }
+        if camera.lenses.contains(where: { $0.label == "1×" }) && !stops.contains(where: { abs($0.zoom - 2) < 0.3 }) {
+            stops.append(ZoomStop(label: "2×", zoom: 2, lens: nil))
+        }
+        return stops.sorted { $0.zoom < $1.zoom }
+    }
+
+    private var modePicker: some View {
+        HStack(spacing: 24) {
+            ForEach([CaptureMode.photo, CaptureMode.video], id: \.self) { item in
+                Button { camera.setMode(item) } label: {
+                    Text(item.rawValue)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(camera.mode == item ? .yellow : .white.opacity(0.7))
+                }
+                .disabled(camera.isRecording)
+            }
+        }
+        .padding(.bottom, 8)
+    }
+
     private var bottomBar: some View {
         HStack {
             Button {
-                if let id = camera.lastAssetID { editing = EditSource(assetID: id) }
+                if camera.lastWasVideo, let url = camera.lastVideoURL {
+                    editing = EditSource(videoURL: url)
+                } else if let id = camera.lastAssetID {
+                    editing = EditSource(assetID: id)
+                }
             } label: {
                 Group {
                     if let thumb = camera.lastThumbnail {
@@ -309,14 +395,28 @@ struct CameraView: View {
             .accessibilityLabel("Edit the last photo")
             .frame(maxWidth: .infinity)
 
-            Button { shoot() } label: {
+            Button {
+                if camera.mode == .video {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    camera.toggleRecording()
+                } else {
+                    shoot()
+                }
+            } label: {
                 ZStack {
                     Circle().stroke(Color.white, lineWidth: 4).frame(width: 76, height: 76)
-                    Circle().fill(camera.isCapturing ? Color.gray : Color.white).frame(width: 62, height: 62)
+                    if camera.mode == .video {
+                        RoundedRectangle(cornerRadius: camera.isRecording ? 6 : 31)
+                            .fill(Color.red)
+                            .frame(width: camera.isRecording ? 30 : 62, height: camera.isRecording ? 30 : 62)
+                            .animation(.easeInOut(duration: 0.2), value: camera.isRecording)
+                    } else {
+                        Circle().fill(camera.isCapturing ? Color.gray : Color.white).frame(width: 62, height: 62)
+                    }
                 }
             }
-            .disabled(camera.isCapturing || countdown != nil)
-            .accessibilityLabel("Take photo")
+            .disabled((camera.mode == .photo && camera.isCapturing) || countdown != nil)
+            .accessibilityLabel(camera.mode == .video ? (camera.isRecording ? "Stop recording" : "Record video") : "Take photo")
 
             HStack(spacing: 18) {
                 PhotosPicker(selection: $libraryItem, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
@@ -396,6 +496,7 @@ struct CameraView: View {
 
     private func isManual(_ control: ProControl) -> Bool {
         switch control {
+        case .zoom: return camera.zoom > 1.05
         case .ev: return abs(camera.exposureBias) > 0.05
         case .iso, .shutter: return !camera.autoExposure
         case .whiteBalance: return !camera.autoWhiteBalance

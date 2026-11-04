@@ -185,6 +185,7 @@ struct EditorView: View {
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.6))
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    upscaleSection
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -215,6 +216,52 @@ struct EditorView: View {
                     .padding(.horizontal, 16)
             }
             .padding(.top, 16)
+        }
+    }
+
+    /// AI upscaling on the NAS (the lumen-ai app on TrueNAS).
+    private var upscaleSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().overlay(Color.white.opacity(0.2))
+            Text("AI upscale on your NAS").font(.subheadline.weight(.semibold))
+            if model.upscaling {
+                ProgressView(value: model.upscaleProgress).tint(.yellow)
+                HStack {
+                    Text(model.upscaleStatus).font(.caption).foregroundStyle(.white.opacity(0.7))
+                    Spacer()
+                    Button("Cancel") { model.cancelUpscale() }.font(.caption.weight(.semibold))
+                }
+            } else if model.upscaler.isConfigured {
+                HStack(spacing: 10) {
+                    ForEach([2, 4], id: \.self) { scale in
+                        Button { model.upscale(scale: scale) } label: {
+                            Text("Upscale \(scale)×")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                        }
+                    }
+                }
+                .disabled(model.loading)
+                Text("Real-ESRGAN rebuilds fine detail as it enlarges. It runs on your NAS's processor, so it takes a few minutes; the result is about 16 megapixels. Your edits so far are included.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.6))
+            }
+            DisclosureGroup(model.upscaler.isConfigured ? "Upscaler settings" : "Set up the upscaler") {
+                VStack(spacing: 8) {
+                    TextField("http://100.85.127.42:10702", text: $model.upscaler.address)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Key (from the lumen-ai app's logs)", text: $model.upscaler.key)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                .textFieldStyle(.roundedBorder)
+                .padding(.top, 6)
+            }
+            .font(.caption)
+            .tint(.yellow)
         }
     }
 
