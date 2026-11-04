@@ -1,7 +1,7 @@
 """Read-only check: can the Watch be reached for installing apps through the iPhone's relay?
 
-It opens the Watch's app installer (installation_proxy) and file transfer (AFC) services through the relay,
-lists the apps installed on the Watch, and looks for the PublicStaging folder that installs go through.
+It opens the Watch's app installer (installation_proxy), file transfer (AFC) and streaming installer
+(streaming_zip_conduit) services through the relay, and lists the apps installed on the Watch.
 Nothing is changed on the Watch or the iPhone.
 
     python watch_apps.py
@@ -35,6 +35,14 @@ async def main() -> None:
             entries = await afc.listdir("/")
             print(f"   Reachable. Top-level folders: {entries}")
             print("   PublicStaging (where installs are uploaded):", "present" if "PublicStaging" in entries else "not there yet (that's fine)")
+    except Exception as error:
+        print(f"   Not reachable: {type(error).__name__}: {error}")
+
+    print("\n3) Streaming installer (streaming_zip_conduit, what Xcode uses):")
+    try:
+        conduit = await watch.start_lockdown_service("com.apple.streaming_zip_conduit")
+        print("   Reachable. Apps can be streamed straight to the Watch's installer (nothing was sent).")
+        await conduit.close()
     except Exception as error:
         print(f"   Not reachable: {type(error).__name__}: {error}")
 
