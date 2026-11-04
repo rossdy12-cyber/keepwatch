@@ -27,11 +27,11 @@ enum ProControl: String, CaseIterable, Identifiable {
 }
 
 enum CaptureMode: String, CaseIterable, Identifiable {
-    case photo = "PHOTO", video = "VIDEO", slowMo = "SLO-MO", timeLapse = "TIME-LAPSE"
+    case photo = "PHOTO", video = "VIDEO", slowMo = "SLO-MO", timeLapse = "TIME-LAPSE", spatial = "SPATIAL"
     var id: String { rawValue }
     var isVideo: Bool { self != .photo }
     /// Recorded straight to a movie file (time-lapse writes its own).
-    var usesMovieFile: Bool { self == .video || self == .slowMo }
+    var usesMovieFile: Bool { self == .video || self == .slowMo || self == .spatial }
 }
 
 /// Video resolution and frame rate.
@@ -86,6 +86,11 @@ final class CameraModel: NSObject, ObservableObject {
     var burstTimer: DispatchSourceTimer?
     var burstInFlight = 0
     var auto180Timer: DispatchSourceTimer?
+    /// Spatial video: the dual (wide + ultra-wide) camera is in use.
+    var spatialSession = false
+    /// Live Photos are switched on in the photo output.
+    var liveSession = false
+    var readiness: AVCapturePhotoOutputReadinessCoordinator?
     private var configured = false
 
     // Frame-queue state.
@@ -95,10 +100,15 @@ final class CameraModel: NSObject, ObservableObject {
     var assist = AssistSettings()
     let frameAssist = FrameAssist()
     var stacker: FrameStacker?
+    var lastDetection = Date.distantPast
+    var lastLoupe = Date.distantPast
+    var scanQuad: [CGPoint]?
+    var scanRequested = false
     var timeLapse: TimeLapseWriter?
 
     // Main-thread helpers.
     let overlay = OverlayFeed()
+    let detection = DetectionFeed()
     let audioMeter = AudioMeter()
     let location = LocationProvider()
     var intervalTimer: Timer?
@@ -159,6 +169,21 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var lastWasVideo = false
     @Published var activeFormatLabel = ""
     @Published var auto180 = false
+    @Published var program: ExposureProgram = .auto
+    @Published var aeLocked = false
+    @Published var awbLocked = false
+    @Published var hdrVideo = Prefs.bool("hdrVideo", false) { didSet { Prefs.set("hdrVideo", hdrVideo); refreshVideoFormat() } }
+    @Published var hdrVideoAvailable = false
+    @Published var spatialAvailable = false
+    @Published var stabilization = StabilizationChoice(rawValue: Prefs.string("stabilization", "Auto")) ?? .auto {
+        didSet { Prefs.set("stabilization", stabilization.rawValue); refreshVideoFormat() }
+    }
+    @Published var slowMoEditable = Prefs.bool("slowMoEditable", true) { didSet { Prefs.set("slowMoEditable", slowMoEditable) } }
+    @Published var frameGuide = FrameGuide(rawValue: Prefs.string("frameGuide", "None")) ?? .none {
+        didSet { Prefs.set("frameGuide", frameGuide.rawValue) }
+    }
+    /// Anamorphic lens adapter: how much to stretch the preview back out (1 = none).
+    @Published var anamorphic = Prefs.double("anamorphic", 1) { didSet { Prefs.set("anamorphic", anamorphic) } }
     @Published var logAvailable = false
     @Published var proResAvailable = false
     @Published var useLog = Prefs.bool("useLog", false) { didSet { Prefs.set("useLog", useLog); refreshVideoFormat() } }
@@ -201,6 +226,27 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     @Published var histogram: [Float] = Array(repeating: 0, count: 64)
+    @Published var rgbHistogram: [[Float]] = []
+    @Published var waveform: CGImage?
+    @Published var scopeStyle = ScopeStyle(rawValue: Prefs.string("scope", "Brightness")) ?? .luma {
+        didSet { Prefs.set("scope", scopeStyle.rawValue); updateAssist() }
+    }
+    @Published var livePhoto = Prefs.bool("live", false) { didSet { Prefs.set("live", livePhoto); applyLivePhoto() } }
+    /// False while the camera is busy and another photo would have to wait.
+    @Published var shutterReady = true
+    @Published var saveToAlbum = Prefs.bool("album", true) { didSet { Prefs.set("album", saveToAlbum) } }
+    @Published var nasBackup = Prefs.bool("nasBackup", false) {
+        didSet { Prefs.set("nasBackup", nasBackup); if nasBackup { NASBackup.shared.kick() } }
+    }
+    @Published var detectCodes = Prefs.bool("detect", true) {
+        didSet {
+            Prefs.set("detect", detectCodes)
+            updateAssist()
+            if !detectCodes { detection.code = nil; detection.document = nil }
+        }
+    }
+    /// Magnified centre while focusing by hand.
+    @Published var loupe = false { didSet { updateAssist() } }
     @Published var lastThumbnail: UIImage?
     @Published var lastAssetID: String?
     @Published var isCapturing = false
@@ -264,8 +310,26 @@ final class CameraModel: NSObject, ObservableObject {
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
         session.commitConfiguration()
+        let coordinator = AVCapturePhotoOutputReadinessCoordinator(photoOutput: photoOutput)
+        coordinator.delegate = self
+        readiness = coordinator
         configured = true
         use(camera)
+        let spatial = Self.spatialCamera() != nil
+        DispatchQueue.main.async { self.spatialAvailable = spatial }
+    }
+
+    /// The camera pair that records spatial video (iPhone 15 Pro, 16 and later), if this iPhone has one.
+    static func spatialCamera() -> AVCaptureDevice? {
+        guard #available(iOS 18.0, *),
+              let dual = AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back),
+              dual.formats.contains(where: { supportsSpatial($0) }) else { return nil }
+        return dual
+    }
+
+    static func supportsSpatial(_ format: AVCaptureDevice.Format) -> Bool {
+        if #available(iOS 18.0, *) { return format.isSpatialVideoCaptureSupported }
+        return false
     }
 
     /// Every physical camera (manual controls only work on the physical ones, not the combined "virtual" camera).
@@ -337,6 +401,7 @@ final class CameraModel: NSObject, ObservableObject {
         if !depth, photoOutput.isPortraitEffectsMatteDeliveryEnabled { photoOutput.isPortraitEffectsMatteDeliveryEnabled = false }
         if photoOutput.isDepthDataDeliverySupported { photoOutput.isDepthDataDeliveryEnabled = depth }
         if depth, photoOutput.isPortraitEffectsMatteDeliverySupported { photoOutput.isPortraitEffectsMatteDeliveryEnabled = true }
+        configurePhotoFeatures()
         installSystemControls(for: active)
         session.commitConfiguration()
         makeRotationCoordinator()
@@ -368,7 +433,8 @@ final class CameraModel: NSObject, ObservableObject {
             minBias: active.minExposureTargetBias, maxBias: active.maxExposureTargetBias,
             maxZoom: min(active.maxAvailableVideoZoomFactor, 15),
             flash: active.hasFlash, manualFocus: active.isLockingFocusWithCustomLensPositionSupported,
-            log: active.formats.contains { $0.supportedColorSpaces.contains(.appleLog) }
+            log: active.formats.contains { $0.supportedColorSpaces.contains(.appleLog) },
+            hdr: active.formats.contains { $0.supportedColorSpaces.contains(.HLG_BT2020) }
         )
         DispatchQueue.main.async {
             self.currentLensID = snapshot.id
@@ -382,6 +448,10 @@ final class CameraModel: NSObject, ObservableObject {
             self.flashAvailable = snapshot.flash
             self.manualFocusSupported = snapshot.manualFocus
             self.logAvailable = snapshot.log
+            self.hdrVideoAvailable = snapshot.hdr
+            self.aeLocked = false
+            self.awbLocked = false
+            if self.program == .shutter || self.program == .iso { self.program = .auto }
             self.proRAW = proRAW
             self.rawAvailable = anyRAW
             if !anyRAW && (self.format == .raw || self.format == .rawPlusHEIF) && !self.portraitDriveActive { self.format = .heif }
@@ -397,6 +467,51 @@ final class CameraModel: NSObject, ObservableObject {
             self.focusA = nil
             self.focusB = nil
             if self.auto180 { self.startAuto180() }
+        }
+    }
+
+    /// Instant shutter, overlapping captures, Live Photos. Call on the session queue, inside a configuration.
+    func configurePhotoFeatures() {
+        if photoOutput.isZeroShutterLagSupported { photoOutput.isZeroShutterLagEnabled = true }
+        if photoOutput.isResponsiveCaptureSupported {
+            photoOutput.isResponsiveCaptureEnabled = true
+            if photoOutput.isFastCapturePrioritizationSupported { photoOutput.isFastCapturePrioritizationEnabled = true }
+        }
+        if photoOutput.isAutoDeferredPhotoDeliverySupported { photoOutput.isAutoDeferredPhotoDeliveryEnabled = !portraitSession }
+        if photoOutput.isLivePhotoCaptureSupported {
+            photoOutput.isLivePhotoCaptureEnabled = liveSession && sessionMode == .photo
+            if photoOutput.isLivePhotoCaptureEnabled { photoOutput.isLivePhotoAutoTrimmingEnabled = true }
+        }
+    }
+
+    /// Live Photos on or off (with the microphone for their sound).
+    func applyLivePhoto() {
+        let on = livePhoto
+        sessionQueue.async {
+            self.liveSession = on
+            guard self.sessionMode == .photo else { return }
+            self.session.beginConfiguration()
+            self.updatePhotoAudio()
+            self.configurePhotoFeatures()
+            self.session.commitConfiguration()
+            if on && !self.photoOutput.isLivePhotoCaptureEnabled {
+                self.publishMessage("Live Photos aren't available with this camera or drive.")
+            }
+        }
+    }
+
+    /// Photo mode keeps the microphone only for Live Photos. Call on the session queue, inside a configuration.
+    func updatePhotoAudio() {
+        if liveSession {
+            if audioInput == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+               let mic = AVCaptureDevice.default(for: .audio), let micInput = try? AVCaptureDeviceInput(device: mic),
+               session.canAddInput(micInput) {
+                session.addInput(micInput)
+                audioInput = micInput
+            }
+        } else if let audioInput {
+            session.removeInput(audioInput)
+            self.audioInput = nil
         }
     }
 
@@ -460,12 +575,15 @@ final class CameraModel: NSObject, ObservableObject {
     func setAutoExposure(_ on: Bool) {
         autoExposure = on
         aeafLocked = false
+        aeLocked = false
         if on {
-            if auto180 { stopAuto180() }
+            program = .auto
+            stopPriority()
             configureDevice { device in
                 if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
             }
         } else {
+            program = .manual
             applyManualExposure()
         }
     }
@@ -480,15 +598,95 @@ final class CameraModel: NSObject, ObservableObject {
     func setISO(_ value: Float) {
         iso = value
         autoExposure = false
-        if auto180 { stopAuto180() }
+        aeLocked = false
+        if program == .iso {
+            startPriority()
+            return
+        }
+        program = .manual
+        stopPriority()
         applyManualExposure()
     }
 
     func setShutter(_ seconds: Double) {
         shutter = seconds
         autoExposure = false
-        if auto180 { stopAuto180() }
+        aeLocked = false
+        if program == .shutter && !auto180 {
+            startPriority()
+            return
+        }
+        program = .manual
+        stopPriority()
         applyManualExposure()
+    }
+
+    /// A for auto, S for shutter priority, ISO for ISO priority, M for manual.
+    func setProgram(_ newProgram: ExposureProgram) {
+        if newProgram != .shutter { auto180 = false }
+        switch newProgram {
+        case .auto:
+            setAutoExposure(true)
+        case .manual:
+            program = .manual
+            autoExposure = false
+            stopPriority()
+            applyManualExposure()
+        case .shutter, .iso:
+            program = newProgram
+            autoExposure = false
+            aeLocked = false
+            startPriority()
+        }
+    }
+
+    /// AE-L: hold the exposure the camera has chosen.
+    func toggleAELock() {
+        let lock = !aeLocked
+        aeLocked = lock
+        if lock && program != .auto { setAutoExposure(true); aeLocked = true }
+        configureDevice { device in
+            if lock, device.isExposureModeSupported(.locked) {
+                device.exposureMode = .locked
+            } else if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+        }
+    }
+
+    /// AWB-L: hold the white balance the camera has chosen.
+    func toggleAWBLock() {
+        let lock = !awbLocked
+        awbLocked = lock
+        autoWhiteBalance = true
+        configureDevice { device in
+            if lock, device.isWhiteBalanceModeSupported(.locked) {
+                device.whiteBalanceMode = .locked
+            } else if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                device.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
+        }
+    }
+
+    /// Grey card: fill the frame with something white or grey, then set white balance from it.
+    func whiteBalanceFromGreyCard() {
+        awbLocked = false
+        autoWhiteBalance = false
+        configureDevice { device in
+            guard device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else { return }
+            var gains = device.grayWorldDeviceWhiteBalanceGains
+            let maxGain = device.maxWhiteBalanceGain
+            gains.redGain = max(1, min(maxGain, gains.redGain))
+            gains.greenGain = max(1, min(maxGain, gains.greenGain))
+            gains.blueGain = max(1, min(maxGain, gains.blueGain))
+            device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+            let values = device.temperatureAndTintValues(for: gains)
+            DispatchQueue.main.async {
+                self.temperature = values.temperature
+                self.tint = values.tint
+                self.message = "White balance set from the grey card."
+            }
+        }
     }
 
     func applyManualExposure() {
@@ -504,6 +702,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     func setAutoWhiteBalance(_ on: Bool) {
         autoWhiteBalance = on
+        awbLocked = false
         if on {
             configureDevice { device in
                 if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
@@ -556,10 +755,11 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// Tap to focus and expose at a point (0–1 device coordinates). Also releases an AE/AF lock.
     func focus(at point: CGPoint) {
-        let keepManualExposure = auto180
+        let keepManualExposure = program != .auto
         DispatchQueue.main.async {
             self.autoFocus = true
             self.aeafLocked = false
+            if !keepManualExposure { self.aeLocked = false }
             if !self.autoExposure && !keepManualExposure { self.autoExposure = true }
         }
         configureDevice { device in
@@ -577,10 +777,13 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// Long press: focus and expose on a point once, then hold both until the next tap.
     func lockFocusAndExposure(at point: CGPoint) {
+        auto180 = false
+        program = .auto
+        aeLocked = false
+        stopPriority()
         autoFocus = true
         autoExposure = true
         aeafLocked = true
-        if auto180 { stopAuto180() }
         configureDevice { device in
             device.isSubjectAreaChangeMonitoringEnabled = false
             if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
@@ -632,7 +835,7 @@ final class CameraModel: NSObject, ObservableObject {
         guard newMode != mode, !isRecording, !intervalRunning, !isBursting else { return }
         let oldMode = mode
         mode = newMode
-        if oldMode.isVideo && !newMode.isVideo && auto180 { stopAuto180() }
+        if oldMode.isVideo && !newMode.isVideo && auto180 { setAuto180(false) }
         if newMode.isVideo, drive == .portrait { setDrive(.single) }
         updateAssist()
         if newMode.usesMovieFile && AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
@@ -651,17 +854,19 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     private func refreshVideoFormat() {
-        guard mode == .video else { return }
+        guard mode.isVideo, mode != .timeLapse else { return }
         sessionQueue.async { self.applyVideoFormat(announce: true) }
     }
 
     /// Call on the session queue.
     private func applyMode(_ newMode: CaptureMode) {
+        let leavingSpatial = sessionMode == .spatial && newMode != .spatial
         sessionMode = newMode
         session.beginConfiguration()
         if newMode.isVideo {
             // The movie recorder goes in first: some iPhones can't also feed live frames while recording.
             if session.outputs.contains(videoOutput) { session.removeOutput(videoOutput) }
+            if photoOutput.isLivePhotoCaptureEnabled { photoOutput.isLivePhotoCaptureEnabled = false }
             if newMode.usesMovieFile {
                 if !session.outputs.contains(movieOutput), session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
                 if audioInput == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
@@ -678,23 +883,53 @@ final class CameraModel: NSObject, ObservableObject {
             if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
             session.commitConfiguration()
             alignFrameOutput()
-            applyVideoFormat(announce: false)
+            if newMode == .spatial {
+                guard let dual = Self.spatialCamera() else {
+                    publishMessage("This iPhone can't record spatial video.")
+                    applyVideoFormat(announce: false)
+                    return
+                }
+                spatialSession = true
+                macroSession = false
+                use(dual)
+                publishMessage("Spatial video: hold the iPhone sideways, about a metre or more from your subject.")
+            } else if leavingSpatial {
+                spatialSession = false
+                switchToMainCamera()
+            } else {
+                applyVideoFormat(announce: false)
+            }
         } else {
             if session.outputs.contains(movieOutput) { session.removeOutput(movieOutput) }
             if let audioInput { session.removeInput(audioInput) }
             audioInput = nil
+            updatePhotoAudio()
             if !session.outputs.contains(videoOutput), session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
             session.sessionPreset = .photo
+            session.automaticallyConfiguresCaptureDeviceForWideColor = true
             session.commitConfiguration()
-            if let device { use(device) }
+            if leavingSpatial {
+                spatialSession = false
+                switchToMainCamera()
+            } else if let device {
+                use(device)
+            }
         }
     }
 
-    /// Picks the camera format for the chosen resolution and frame rate. Call on the session queue.
+    /// Back to the main 1× camera. Call on the session queue.
+    private func switchToMainCamera() {
+        let main = Self.discoverLenses().first { $0.label == "1×" }
+        if let main, let camera = AVCaptureDevice(uniqueID: main.id) { use(camera) }
+    }
+
+    /// Picks the camera format for the chosen resolution, frame rate and colour. Call on the session queue.
     func applyVideoFormat(announce: Bool) {
         guard let device else { return }
-        let settings = DispatchQueue.main.sync { (self.videoQuality, self.slowMoRate, self.useLog, self.useProRes) }
-        let (quality, rate, wantsLog, wantsProRes) = settings
+        let settings = DispatchQueue.main.sync {
+            (self.videoQuality, self.slowMoRate, self.useLog, self.useProRes, self.hdrVideo, self.stabilization)
+        }
+        let (quality, rate, wantsLog, wantsProRes, wantsHDR, stabilization) = settings
         let wanted = VideoTarget(width: quality.width, height: quality.height, fps: quality.fps)
         var targets: [VideoTarget]
         switch sessionMode {
@@ -704,33 +939,51 @@ final class CameraModel: NSObject, ObservableObject {
                        VideoTarget(width: 1920, height: 1080, fps: 120), VideoTarget(width: 1280, height: 720, fps: 120)]
         case .timeLapse:
             targets = [VideoTarget(width: quality.width, height: quality.height, fps: 30), VideoTarget(width: 1920, height: 1080, fps: 30)]
+        case .spatial:
+            targets = [VideoTarget(width: 1920, height: 1080, fps: 30), VideoTarget(width: 1920, height: 1080, fps: 24)]
         default:
             targets = [wanted] + VideoQuality.allCases.filter { $0 != quality }.map { VideoTarget(width: $0.width, height: $0.height, fps: $0.fps) }
         }
-        let logPasses = sessionMode == .video && wantsLog ? [true, false] : [false]
-        for log in logPasses {
+        // Colour: Apple Log, else HDR (HLG, saved as Dolby Vision), else standard.
+        enum Colour { case log, hdr, standard }
+        var passes: [Colour] = []
+        if sessionMode == .video && wantsLog { passes.append(.log) }
+        if sessionMode == .video && wantsHDR && !wantsLog { passes.append(.hdr) }
+        passes.append(.standard)
+        let spatial = sessionMode == .spatial
+        for colour in passes {
             for target in targets {
                 let candidates = device.formats.filter { format in
                     let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                    return dims.width == target.width && dims.height == target.height
-                        && format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= target.fps }
-                        && (!log || format.supportedColorSpaces.contains(.appleLog))
+                    guard dims.width == target.width && dims.height == target.height
+                            && format.videoSupportedFrameRateRanges.contains(where: { $0.maxFrameRate >= target.fps }) else { return false }
+                    if spatial && !Self.supportsSpatial(format) { return false }
+                    switch colour {
+                    case .log: return format.supportedColorSpaces.contains(.appleLog)
+                    case .hdr: return format.supportedColorSpaces.contains(.HLG_BT2020)
+                    case .standard: return true
+                    }
                 }
-                // Prefer full-range 8-bit (every iPhone records it); Apple Log needs its own 10-bit formats.
-                let chosen = log ? candidates.first
-                    : (candidates.first { CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange }
-                        ?? candidates.first)
+                let subtype = { (format: AVCaptureDevice.Format) in CMFormatDescriptionGetMediaSubType(format.formatDescription) }
+                let chosen: AVCaptureDevice.Format?
+                switch colour {
+                case .log: chosen = candidates.first
+                case .hdr: chosen = candidates.first { subtype($0) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange } ?? candidates.first
+                // Full-range 8-bit: every iPhone records it.
+                case .standard: chosen = candidates.first { subtype($0) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange } ?? candidates.first
+                }
                 guard let format = chosen else { continue }
                 session.beginConfiguration()
                 session.sessionPreset = .inputPriority
-                session.automaticallyConfiguresCaptureDeviceForWideColor = !log
+                session.automaticallyConfiguresCaptureDeviceForWideColor = colour == .standard
                 do {
                     try device.lockForConfiguration()
                     device.activeFormat = format
-                    if log {
-                        device.activeColorSpace = .appleLog
-                    } else if device.activeColorSpace == .appleLog {
-                        device.activeColorSpace = .sRGB
+                    switch colour {
+                    case .log: device.activeColorSpace = .appleLog
+                    case .hdr: device.activeColorSpace = .HLG_BT2020
+                    case .standard:
+                        if device.activeColorSpace == .appleLog || device.activeColorSpace == .HLG_BT2020 { device.activeColorSpace = .sRGB }
                     }
                     let frame = CMTime(value: 1, timescale: CMTimeScale(target.fps))
                     device.activeVideoMinFrameDuration = frame
@@ -743,12 +996,26 @@ final class CameraModel: NSObject, ObservableObject {
                 session.commitConfiguration()
                 alignFrameOutput()
                 var proResOK = false
+                var spatialOn = false
                 if let connection = movieOutput.connection(with: .video) {
-                    if connection.isVideoStabilizationSupported { connection.preferredVideoStabilizationMode = .auto }
+                    if connection.isVideoStabilizationSupported {
+                        var mode = stabilization.mode
+                        if spatial { mode = format.isVideoStabilizationModeSupported(.cinematicExtended) ? .cinematicExtended : .standard }
+                        if mode != .auto && mode != .off && !format.isVideoStabilizationModeSupported(mode) { mode = .auto }
+                        connection.preferredVideoStabilizationMode = mode
+                    }
+                    if #available(iOS 18.0, *) {
+                        if spatial && movieOutput.isSpatialVideoCaptureSupported {
+                            movieOutput.isSpatialVideoCaptureEnabled = true
+                        } else if movieOutput.isSpatialVideoCaptureEnabled {
+                            movieOutput.isSpatialVideoCaptureEnabled = false
+                        }
+                        spatialOn = movieOutput.isSpatialVideoCaptureEnabled
+                    }
                     let codecs = movieOutput.availableVideoCodecTypes
                     proResOK = codecs.contains(.proRes422) || codecs.contains(.proRes422HQ)
                     let codec: AVVideoCodecType?
-                    if sessionMode == .video && (wantsProRes || log) && proResOK {
+                    if sessionMode == .video && (wantsProRes || colour == .log) && proResOK {
                         codec = codecs.contains(.proRes422HQ) ? .proRes422HQ : .proRes422
                     } else {
                         codec = codecs.contains(.hevc) ? .hevc : nil
@@ -759,8 +1026,13 @@ final class CameraModel: NSObject, ObservableObject {
                 let shutter = (max(format.minExposureDuration.seconds, 1.0 / 16000), min(format.maxExposureDuration.seconds, 1.0 / target.fps))
                 let maxZoom = min(format.videoMaxZoomFactor, 15)
                 let mode = sessionMode
-                let label = target.label + (log ? " · LOG" : "") + (mode == .video && (wantsProRes || log) && proResOK ? " · ProRes" : "")
-                let fellBack = target != targets[0] || (wantsLog && !log && mode == .video)
+                var label = target.label
+                if colour == .log { label += " · LOG" }
+                if colour == .hdr { label += " · HDR" }
+                if spatialOn { label += " · SPATIAL" }
+                if mode == .video && (wantsProRes || colour == .log) && proResOK { label += " · ProRes" }
+                let fellBack = target != targets[0] || (colour == .standard && mode == .video && (wantsLog || wantsHDR))
+                    || (spatial && !spatialOn)
                 DispatchQueue.main.async {
                     self.minISO = iso.0
                     self.maxISO = iso.1
@@ -774,7 +1046,7 @@ final class CameraModel: NSObject, ObservableObject {
                         self.videoQuality = match
                     }
                     if announce && fellBack { self.message = "This camera can't do that; using \(label)." }
-                    if self.auto180 { self.startAuto180() }
+                    if self.auto180 || self.program == .shutter || self.program == .iso { self.startPriority() }
                 }
                 return
             }
@@ -796,6 +1068,9 @@ final class CameraModel: NSObject, ObservableObject {
         settings.zebras = zebras
         settings.zebraLevel = CGFloat(zebraLevel)
         settings.falseColour = falseColour
+        settings.loupe = loupe
+        settings.scope = scopeStyle
+        settings.detect = detectCodes && mode == .photo
         videoQueue.async { self.assist = settings }
     }
 }
@@ -840,11 +1115,15 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
         let place = DispatchQueue.main.sync { self.locationTagging ? self.location.latest : nil }
         Task {
             var url = outputFileURL
-            if recordedMode == .slowMo, fps > 31 {
+            let editable = DispatchQueue.main.sync { self.slowMoEditable }
+            if recordedMode == .slowMo, fps > 31, editable {
+                // Saved at its full frame rate, sound included: Photos plays it as Slo-mo, and you can move the slow part there.
+                self.publishMessage("Slo-mo saved at \(Int(fps.rounded())) fps. In Photos, tap Edit to choose the slow part.")
+            } else if recordedMode == .slowMo, fps > 31 {
                 self.publishMessage("Making the slow-motion video…")
                 if let slow = await Self.slowMotion(outputFileURL, capturedFPS: fps) {
                     url = slow
-                    self.publishMessage("Slow motion saved (\(Int(fps.rounded())) fps played at 30).")
+                    self.publishMessage("Slow motion saved (\(Int(fps.rounded())) fps played at 30, with slowed sound).")
                 } else {
                     self.publishMessage("Couldn't slow the video down; saved it at normal speed.")
                 }
@@ -899,9 +1178,23 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             return
         }
 
+        if scanRequested {
+            scanRequested = false
+            scanDocument(from: pixels)
+        }
+
         let now = Date()
         let settings = assist
-        if settings.isActive {
+        if settings.loupe, now.timeIntervalSince(lastLoupe) >= 1.0 / 15 {
+            lastLoupe = now
+            let image = frameAssist.renderLoupe(pixels, peakingOn: settings.peaking)
+            DispatchQueue.main.async { self.overlay.loupe = image }
+        }
+        if settings.detect, now.timeIntervalSince(lastDetection) >= 0.4 {
+            lastDetection = now
+            detect(in: pixels)
+        }
+        if settings.needsOverlay {
             if now.timeIntervalSince(lastOverlay) >= 1.0 / 20 {
                 lastOverlay = now
                 let image = frameAssist.render(pixels, settings: settings)
@@ -916,6 +1209,8 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard now.timeIntervalSince(lastHistogram) > 0.15 else { return }
         lastHistogram = now
         let bins = Self.lumaHistogram(pixels)
+        let rgb = settings.scope == .rgb ? Scopes.rgbHistogram(pixels) : []
+        let wave = settings.scope == .waveform ? Scopes.waveform(pixels) : nil
         // While in auto, show what the camera chose.
         let device = self.device
         let iso = device?.iso
@@ -925,7 +1220,9 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         let isMainBack = device?.deviceType == .builtInWideAngleCamera && device?.position == .back
         DispatchQueue.main.async {
             self.histogram = bins
-            if (self.autoExposure || self.auto180), let iso, let shutter, shutter.isFinite {
+            self.rgbHistogram = rgb
+            self.waveform = wave
+            if (self.autoExposure || self.program == .shutter || self.program == .iso), let iso, let shutter, shutter.isFinite {
                 self.iso = iso
                 self.shutter = shutter
             }

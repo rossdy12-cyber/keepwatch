@@ -20,6 +20,9 @@ targets:
     platform: iOS
     sources:
       - path: Lumen
+      - path: Shared
+    dependencies:
+      - target: LumenControls
     settings:
       base:
         PRODUCT_NAME: Lumen
@@ -50,7 +53,7 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSCameraUsageDescription: Lumen uses the camera to take photos and videos.
-        NSMicrophoneUsageDescription: Lumen records sound with your videos.
+        NSMicrophoneUsageDescription: Lumen records sound with your videos and Live Photos.
         NSPhotoLibraryAddUsageDescription: Lumen saves the photos you take and edit to your library.
         NSPhotoLibraryUsageDescription: Lumen opens photos from your library so you can edit them.
         NSLocationWhenInUseUsageDescription: Lumen adds where you took a photo to it, if you turn on location tagging.
@@ -58,3 +61,31 @@ targets:
         # The upscaler on the NAS is reached over plain http (Tailscale or home network).
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+
+  # Control Centre / Lock Screen / Action button control that opens Lumen (iOS 18+).
+  LumenControls:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: LumenControls
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: LumenControls
+        PRODUCT_BUNDLE_IDENTIFIER: app.lumen.camera.controls
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+        SKIP_INSTALL: "YES"
+    info:
+      path: LumenControls/Info.plist
+      properties:
+        CFBundleDisplayName: Lumen
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

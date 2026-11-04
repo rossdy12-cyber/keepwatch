@@ -127,50 +127,73 @@ extension CameraModel {
         }
     }
 
-    // MARK: Auto 180° shutter
+    // MARK: Shutter priority, ISO priority and auto 180°
 
     /// Video: shutter fixed at half the frame time (1/48 at 24 fps, 1/60 at 30…) for natural motion blur; ISO follows the light.
     func setAuto180(_ on: Bool) {
         auto180 = on
-        if on { startAuto180() } else { stopAuto180(); setAutoExposure(true) }
+        if on {
+            program = .shutter
+            autoExposure = false
+            startPriority()
+        } else {
+            setAutoExposure(true)
+        }
     }
 
-    func startAuto180() {
-        guard mode.isVideo else { return }
+    func startAuto180() { startPriority() }
+    func stopAuto180() { setAuto180(false) }
+
+    /// Keeps the chosen shutter (S) or ISO (ISO) and moves the other to follow the light, a few times a second.
+    func startPriority() {
+        let program = self.program
+        guard program == .shutter || program == .iso else { return }
+        let use180 = auto180 && mode.isVideo
+        let chosenShutter = shutter
+        let chosenISO = iso
+        let video = mode.isVideo
         autoExposure = false
         aeafLocked = false
+        aeLocked = false
         sessionQueue.async {
             self.auto180Timer?.cancel()
             guard let device = self.device, device.isExposureModeSupported(.custom) else { return }
-            let fps = 1 / max(device.activeVideoMinFrameDuration.seconds, 1.0 / 240)
             let format = device.activeFormat
-            let seconds = max(format.minExposureDuration.seconds, min(format.maxExposureDuration.seconds, 1 / (2 * fps)))
-            let duration = CMTime(seconds: seconds, preferredTimescale: 1_000_000)
-            if (try? device.lockForConfiguration()) != nil {
-                device.setExposureModeCustom(duration: duration, iso: AVCaptureDevice.currentISO, completionHandler: nil)
-                device.unlockForConfiguration()
+            let frameTime = device.activeVideoMinFrameDuration.seconds
+            var longest = format.maxExposureDuration.seconds
+            if video && frameTime > 0 { longest = min(longest, frameTime) }
+            let shortest = format.minExposureDuration.seconds
+            let fixedSeconds = use180 ? 1 / (2 / max(frameTime, 1.0 / 240)) : chosenShutter
+            var seconds = max(shortest, min(longest, program == .shutter ? fixedSeconds : device.exposureDuration.seconds))
+            var iso = max(format.minISO, min(format.maxISO, program == .iso ? chosenISO : device.iso))
+            func apply() {
+                if (try? device.lockForConfiguration()) != nil {
+                    device.setExposureModeCustom(duration: CMTime(seconds: seconds, preferredTimescale: 1_000_000), iso: iso, completionHandler: nil)
+                    device.unlockForConfiguration()
+                }
             }
+            apply()
             let timer = DispatchSource.makeTimerSource(queue: self.sessionQueue)
             timer.schedule(deadline: .now() + 0.3, repeating: 0.2)
             timer.setEventHandler { [weak self] in
-                guard let self, let device = self.device, device.exposureMode == .custom else { return }
+                guard self != nil, device.exposureMode == .custom else { return }
                 let offset = device.exposureTargetOffset - device.exposureTargetBias
                 guard offset.isFinite, abs(offset) > 0.1 else { return }
                 // Move part of the way each time so changes look smooth.
-                let target = device.iso * pow(2, -offset * 0.5)
-                let iso = max(device.activeFormat.minISO, min(device.activeFormat.maxISO, target))
-                if (try? device.lockForConfiguration()) != nil {
-                    device.setExposureModeCustom(duration: duration, iso: iso, completionHandler: nil)
-                    device.unlockForConfiguration()
+                let step = pow(2, -offset * 0.5)
+                if program == .shutter {
+                    iso = max(format.minISO, min(format.maxISO, iso * step))
+                } else {
+                    seconds = max(shortest, min(longest, seconds * Double(step)))
                 }
+                apply()
             }
             self.auto180Timer = timer
             timer.resume()
         }
     }
 
-    func stopAuto180() {
-        auto180 = false
+    func stopPriority() {
         sessionQueue.async {
             self.auto180Timer?.cancel()
             self.auto180Timer = nil
@@ -209,7 +232,7 @@ extension CameraModel {
 
     // MARK: Slow motion
 
-    /// Stretches a high-frame-rate clip so it plays back at 30 fps (every captured frame shown). The sound is left out.
+    /// Stretches a high-frame-rate clip so it plays back at 30 fps (every captured frame shown), sound slowed to match.
     static func slowMotion(_ url: URL, capturedFPS: Double) async -> URL? {
         let asset = AVURLAsset(url: url)
         do {
@@ -221,12 +244,17 @@ extension CameraModel {
             let range = CMTimeRange(start: .zero, duration: duration)
             try videoTrack.insertTimeRange(range, of: track, at: .zero)
             videoTrack.preferredTransform = transform
+            if let sound = try await asset.loadTracks(withMediaType: .audio).first,
+               let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+                try? audioTrack.insertTimeRange(range, of: sound, at: .zero)
+            }
             composition.scaleTimeRange(range, toDuration: CMTimeMultiplyByFloat64(duration, multiplier: capturedFPS / 30))
             guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHEVCHighestQuality)
                     ?? AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else { return nil }
             let output = FileManager.default.temporaryDirectory.appendingPathComponent("Lumen-slomo-\(UUID().uuidString).mov")
             export.outputURL = output
             export.outputFileType = .mov
+            export.audioTimePitchAlgorithm = .spectral
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 export.exportAsynchronously { continuation.resume() }
             }

@@ -20,13 +20,16 @@ enum CaptureError: LocalizedError {
     }
 }
 
-/// Collects one capture (RAW and/or processed) and saves it to Photos as a single photo:
-/// cropped to the chosen shape, tagged with the location, then given the chosen look as a revertible edit.
+/// Collects one capture (RAW and/or processed, a Live Photo's movie, or a quick "proxy" that Photos finishes later)
+/// and saves it to Photos as a single photo: tagged with the location, with the shape and look either cropped into
+/// the file or added as a revertible Photos edit.
 final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
     private let options: SaveOptions
     private let completion: (Result<SavedPhoto, Error>) -> Void
     private var rawData: Data?
     private var processedData: Data?
+    private var proxyData: Data?
+    private var liveMovie: URL?
 
     init(options: SaveOptions, completion: @escaping (Result<SavedPhoto, Error>) -> Void) {
         self.options = options
@@ -38,12 +41,23 @@ final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
         if photo.isRawPhoto { rawData = data } else { processedData = data }
     }
 
+    /// The iPhone hands over a quick version now and finishes the full processing in the background (in Photos).
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCapturingDeferredPhotoProxy deferredPhotoProxy: AVCaptureDeferredPhotoProxy?, error: Error?) {
+        guard error == nil, let data = deferredPhotoProxy?.fileDataRepresentation() else { return }
+        proxyData = data
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingLivePhotoToMovieFileAt outputFileURL: URL,
+                     duration: CMTime, photoDisplayTime: CMTime, resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        if error == nil { liveMovie = outputFileURL }
+    }
+
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
         if let error {
             completion(.failure(error))
             return
         }
-        guard rawData != nil || processedData != nil else {
+        guard rawData != nil || processedData != nil || proxyData != nil else {
             completion(.failure(CaptureError.failed("The photo didn't come out. Try again.")))
             return
         }
@@ -51,16 +65,19 @@ final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
     }
 
     private func save() {
-        let raw = rawData
-        let captured = processedData
+        let raw = rawData, captured = processedData, proxy = proxyData, movie = liveMovie
         let options = self.options
         let completion = self.completion
         Task.detached(priority: .userInitiated) {
             var processed = captured
-            // RAW files keep the whole sensor; the HEIF/JPEG is cropped to the chosen shape.
-            if let data = processed, options.allowCrop { processed = PhotoSaver.crop(data, to: options.aspect) }
+            // Shape and look as a Photos edit for proxies and Live Photos (their files can't be changed);
+            // otherwise cropped into the HEIF/JPEG. RAW files always keep the whole sensor.
+            let editLater = options.editInPhotos || proxy != nil || movie != nil
+            if !editLater, let data = processed, options.allowCrop { processed = PhotoSaver.crop(data, to: options.aspect) }
             var resources: [(PHAssetResourceType, Data)] = []
-            if let processed {
+            if let proxy {
+                resources.append((.photoProxy, proxy))
+            } else if let processed {
                 resources.append((.photo, processed))
                 // RAW+HEIF: the RAW goes alongside, and the editor uses it.
                 if let raw { resources.append((.alternatePhoto, raw)) }
@@ -68,13 +85,25 @@ final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
                 resources.append((.photo, raw))
             }
             do {
-                let id = try await PhotoSaver.savePhoto(resources, location: options.location)
-                let thumbnail = processed.flatMap { PhotoSaver.thumbnail($0, look: options.look) } ?? Self.rawThumbnail(raw)
+                let id = try await PhotoSaver.savePhoto(resources, location: options.location, pairedVideo: movie)
+                let preview = proxy ?? processed
+                let thumbnail = preview.flatMap {
+                    PhotoSaver.thumbnail($0, look: options.look, aspect: editLater && options.allowCrop ? options.aspect : .fourThree)
+                } ?? Self.rawThumbnail(raw)
                 completion(.success(SavedPhoto(assetID: id, thumbnail: thumbnail)))
-                if let id { await PhotoSaver.applyLook(options.look, toAsset: id) }
+                if let id {
+                    if editLater {
+                        // Live Photos keep their shape: cropping one here would turn off its movie.
+                        await PhotoSaver.applyEdits(look: options.look, aspect: movie == nil && options.allowCrop ? options.aspect : .fourThree,
+                                                    toAsset: id)
+                    } else {
+                        await PhotoSaver.applyLook(options.look, toAsset: id)
+                    }
+                }
             } catch {
                 completion(.failure(error))
             }
+            if let movie { try? FileManager.default.removeItem(at: movie) }
         }
     }
 

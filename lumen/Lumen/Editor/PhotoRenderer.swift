@@ -337,8 +337,9 @@ enum PhotoRenderer {
     }
 
     /// Full-resolution HEIC for saving.
-    static func heic(_ image: CIImage) -> Data? {
-        let origin = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+    static func heic(_ image: CIImage, properties: [String: Any]? = nil) -> Data? {
+        var origin = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+        if let properties { origin = origin.settingProperties(properties) }
         return context.heifRepresentation(of: origin, format: .RGBA8,
                                           colorSpace: CGColorSpace(name: CGColorSpace.displayP3)!,
                                           options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92])

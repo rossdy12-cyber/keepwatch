@@ -23,6 +23,9 @@ services:
         target: /app/upscaler.py
     volumes:
       - lumen-ai-data:/data
+      # Lumen's NAS backups. To keep them in one of your datasets instead, change the left side to its path,
+      # for example /mnt/tank/photos/lumen:/backup
+      - lumen-backup:/backup
     environment:
       # Photos bigger than this are scaled down first so a job takes minutes, not hours, on a CPU.
       # Both give roughly a 16-megapixel result. Raise them if your NAS is quick.
@@ -33,6 +36,9 @@ services:
       GPU_MAX_INPUT_MEGAPIXELS_4X: "4"
       # Processor threads to use (0 = all of them).
       THREADS: "0"
+      # Where Lumen's backed-up originals go (inside the container), and the biggest single file accepted.
+      BACKUP_DIR: /backup
+      MAX_BACKUP_GB: "8"
       TZ: Europe/London
     command:
       - sh
@@ -46,6 +52,7 @@ services:
 
 volumes:
   lumen-ai-data:
+  lumen-backup:
 
 configs:
   upscaler:

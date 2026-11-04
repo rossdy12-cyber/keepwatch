@@ -10,7 +10,7 @@ extension CameraModel {
     /// One press of the shutter in photo mode, whatever the drive.
     func capture() {
         switch drive {
-        case .night: captureStack(longExposure: false)
+        case .night: captureNight()
         case .longExposure: captureStack(longExposure: true)
         case .hdr: captureHDR()
         case .interval: toggleInterval()
@@ -28,30 +28,30 @@ extension CameraModel {
 
     /// A single photo. `inSequence` (burst, interval) skips the one-at-a-time guard and the slow processing.
     func capturePhoto(inSequence: Bool = false) {
-        if !inSequence {
-            guard !isCapturing else { return }
-            isCapturing = true
-        }
+        // Several photos can be on the go at once; the camera says when it's ready for the next.
+        if !inSequence { guard shutterReady, !isCapturing else { return } }
         let portrait = drive == .portrait
         let chosen: CaptureFormat = inSequence || portrait ? (format == .jpeg ? .jpeg : .heif) : format
         let flash: AVCaptureDevice.FlashMode = inSequence ? .off : self.flash
-        let options = saveOptions(withLook: drive != .burst)
+        let live = !inSequence && drive == .single && livePhoto && (chosen == .heif || chosen == .jpeg)
+        var options = saveOptions(withLook: drive != .burst)
+        options.editInPhotos = live
         sessionQueue.async {
-            self.shootPhoto(format: chosen, flash: flash, speed: inSequence, options: options) { [weak self] result in
-                guard let self else { return }
-                DispatchQueue.main.async {
-                    if !inSequence { self.isCapturing = false }
-                    self.show(result)
-                }
+            self.shootPhoto(format: chosen, flash: flash, speed: inSequence, live: live, options: options) { [weak self] result in
+                DispatchQueue.main.async { self?.show(result) }
             }
         }
     }
 
     /// Call on the session queue.
-    func shootPhoto(format: CaptureFormat, flash: AVCaptureDevice.FlashMode, speed: Bool, options: SaveOptions,
+    func shootPhoto(format: CaptureFormat, flash: AVCaptureDevice.FlashMode, speed: Bool, live: Bool = false, options: SaveOptions,
                     completion: @escaping (Result<SavedPhoto, Error>) -> Void) {
         let settings = makeSettings(format: format, flash: flash, speed: speed)
+        if live && photoOutput.isLivePhotoCaptureEnabled {
+            settings.livePhotoMovieFileURL = FileManager.default.temporaryDirectory.appendingPathComponent("Lumen-live-\(UUID().uuidString).mov")
+        }
         rotatePhotoConnection()
+        readiness?.startTrackingCaptureRequest(using: settings)
         let id = settings.uniqueID
         let processor = PhotoProcessor(options: options) { [weak self] result in
             self?.sessionQueue.async { self?.processors[id] = nil }
@@ -208,14 +208,94 @@ extension CameraModel {
             return
         }
         let upright = StackMath.rotated(image, clockwiseDegrees: turn)
-        let space = CGColorSpace(name: CGColorSpace.sRGB)!
-        guard let heif = PhotoSaver.context.heifRepresentation(of: upright, format: .RGBA8, colorSpace: space,
+        saveRendered(upright, options: options, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+    }
+
+    /// Encodes a finished picture (stack, scan, night merge) and saves it.
+    func saveRendered(_ image: CIImage, options: SaveOptions, colorSpace: CGColorSpace, extras: [Data] = []) {
+        guard let heif = PhotoSaver.context.heifRepresentation(of: image, format: .RGBA8, colorSpace: colorSpace,
                                                                 options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92])
         else {
             finishStack(.failure(CaptureError.failed("Couldn't make the photo.")))
             return
         }
-        save(heif, extras: [], options: options)
+        save(heif, extras: extras, options: options)
+    }
+
+    // MARK: Night (full resolution, from several long photo exposures)
+
+    /// Apple's own Night mode isn't open to other apps, so: several long exposures from the photo pipeline,
+    /// lined up and averaged. Falls back to stacking live frames if this camera can't bracket.
+    func captureNight() {
+        guard !isCapturing else { return }
+        isCapturing = true
+        stackProgress = 0.15
+        let options = saveOptions()
+        let tripod = onTripod
+        sessionQueue.async {
+            let count = min(self.photoOutput.maxBracketedCapturePhotoCount, 4)
+            guard count >= 2, let device = self.device else {
+                DispatchQueue.main.async {
+                    self.isCapturing = false
+                    self.stackProgress = nil
+                    self.captureStack(longExposure: false)
+                }
+                return
+            }
+            // Same light as the camera is metering, but each frame longer (and so at a lower, cleaner ISO).
+            let format = device.activeFormat
+            let light = device.exposureDuration.seconds * Double(device.iso) * 1.25
+            let longest = min(format.maxExposureDuration.seconds, tripod ? 1.0 : 1.0 / 8)
+            let seconds = max(format.minExposureDuration.seconds, min(longest, max(device.exposureDuration.seconds, light / Double(format.minISO))))
+            let iso = Float(max(Double(format.minISO), min(Double(format.maxISO), light / seconds)))
+            let frames = (0..<count).map { _ in
+                AVCaptureManualExposureBracketedStillImageSettings.manualExposureSettings(
+                    exposureDuration: CMTime(seconds: seconds, preferredTimescale: 1_000_000), iso: iso)
+            }
+            let hevc = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
+            let settings = AVCapturePhotoBracketSettings(
+                rawPixelFormatType: 0,
+                processedFormat: [AVVideoCodecKey: hevc ? AVVideoCodecType.hevc : AVVideoCodecType.jpeg],
+                bracketedSettings: frames)
+            settings.photoQualityPrioritization = .speed
+            if self.photoOutput.isLensStabilizationDuringBracketedCaptureSupported { settings.isLensStabilizationEnabled = true }
+            self.rotatePhotoConnection()
+            let id = settings.uniqueID
+            DispatchQueue.main.async { self.stackProgress = 0.3 }
+            let processor = BracketProcessor { [weak self] shots, error in
+                guard let self else { return }
+                self.sessionQueue.async { self.processors[id] = nil }
+                DispatchQueue.main.async { self.stackProgress = 0.7 }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    self.mergeNight(shots.map { $0.data }, error: error, options: options)
+                }
+            }
+            self.processors[id] = processor
+            self.photoOutput.capturePhoto(with: settings, delegate: processor)
+        }
+    }
+
+    private func mergeNight(_ frames: [Data], error: Error?, options: SaveOptions) {
+        let images = frames.compactMap { CIImage(data: $0, options: [.applyOrientationProperty: true]) }
+            .map { $0.transformed(by: CGAffineTransform(translationX: -$0.extent.minX, y: -$0.extent.minY)) }
+        guard let first = images.first else {
+            finishStack(.failure(error ?? CaptureError.failed("The night shot didn't come out. Try again.")))
+            return
+        }
+        // Average, each frame lined up with the first.
+        var merged = FrameStacker.scaled(first, by: 1 / CGFloat(images.count))
+        for image in images.dropFirst() {
+            let aligned = StackMath.align(image, to: first, context: PhotoSaver.context)
+            merged = FrameStacker.scaled(aligned, by: 1 / CGFloat(images.count))
+                .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: merged])
+                .cropped(to: first.extent)
+        }
+        merged = merged.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": 0.01, "inputSharpness": 0.5])
+            .cropped(to: first.extent)
+        var properties = first.properties
+        properties[kCGImagePropertyOrientation as String] = 1
+        saveRendered(merged.settingProperties(properties), options: options,
+                     colorSpace: first.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!)
     }
 
     /// Saves a finished (stacked or merged) photo, then the optional extra frames.
@@ -233,7 +313,7 @@ extension CameraModel {
         }
     }
 
-    private func finishStack(_ result: Result<SavedPhoto, Error>) {
+    func finishStack(_ result: Result<SavedPhoto, Error>) {
         DispatchQueue.main.async {
             self.stackProgress = nil
             self.isCapturing = false
@@ -504,4 +584,12 @@ final class CaptureControlsHelper: NSObject, AVCaptureSessionControlsDelegate {
     func sessionControlsWillEnterFullscreenAppearance(_ session: AVCaptureSession) {}
     func sessionControlsWillExitFullscreenAppearance(_ session: AVCaptureSession) {}
     func sessionControlsDidBecomeInactive(_ session: AVCaptureSession) {}
+}
+
+extension CameraModel: AVCapturePhotoOutputReadinessCoordinatorDelegate {
+    func readinessCoordinator(_ coordinator: AVCapturePhotoOutputReadinessCoordinator,
+                              captureReadinessDidChange captureReadiness: AVCapturePhotoOutput.CaptureReadiness) {
+        let ready = captureReadiness == .ready
+        DispatchQueue.main.async { if self.shutterReady != ready { self.shutterReady = ready } }
+    }
 }

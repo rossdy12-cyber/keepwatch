@@ -68,7 +68,10 @@ struct EditorView: View {
         .background(Color.black.ignoresSafeArea())
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
-        .task { await model.load(source) }
+        .task {
+            await model.load(source)
+            if let scale = source.autoUpscale { model.upscale(scale: scale) }
+        }
         .sheet(item: Binding(get: { model.shareURL.map(ShareItem.init) }, set: { if $0 == nil { model.shareURL = nil } })) { item in
             ActivitySheet(items: [item.url])
         }

@@ -1,4 +1,5 @@
 import CoreImage
+import ImageIO
 import Photos
 import UIKit
 
@@ -8,9 +9,14 @@ struct EditSource: Identifiable {
     var data: Data?
     var assetID: String?
     var videoURL: URL?
+    /// Start an AI upscale (2 or 4) as soon as the photo opens.
+    var autoUpscale: Int?
 
     init(data: Data) { self.data = data }
-    init(assetID: String) { self.assetID = assetID }
+    init(assetID: String, autoUpscale: Int? = nil) {
+        self.assetID = assetID
+        self.autoUpscale = autoUpscale
+    }
     init(videoURL: URL) { self.videoURL = videoURL }
 }
 
@@ -41,6 +47,8 @@ final class EditorModel: ObservableObject {
     private var source: PhotoSource?
     /// The person cut-out recorded with Portrait photos (better than guessing).
     private var portraitMatte: CIImage?
+    /// The original's camera details (EXIF, location), written into saved and shared copies.
+    private var metadata: [String: Any] = [:]
     private var analysis: AIAnalysis?
     private var previewScale: CGFloat = 1
     private var generation = 0
@@ -62,6 +70,10 @@ final class EditorModel: ObservableObject {
         self.source = source
         isRAW = source.isRAW
         portraitMatte = CIImage(data: data, options: [.auxiliaryPortraitEffectsMatte: true, .applyOrientationProperty: true])
+        if let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+           let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] {
+            metadata = properties
+        }
         await prepare()
     }
 
@@ -300,7 +312,7 @@ final class EditorModel: ObservableObject {
 
     /// Writes the full-resolution edit to a file for the share sheet.
     func prepareShare() async {
-        guard let data = await fullResolutionHEIC() else {
+        guard let data = await fullResolutionHEIC(forSharing: true) else {
             message = "Couldn't create the edited photo."
             return
         }
@@ -313,19 +325,27 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    private func fullResolutionHEIC() async -> Data? {
+    /// Sharing leaves out where the photo was taken (unless that's switched off in the camera settings).
+    private func fullResolutionHEIC(forSharing: Bool = false) async -> Data? {
         guard let source else { return nil }
         saving = true
         defer { saving = false }
         let recipe = self.recipe
         let analysis = self.analysis
+        var properties = metadata
+        properties[kCGImagePropertyOrientation as String] = 1
+        properties.removeValue(forKey: kCGImagePropertyPixelWidth as String)
+        properties.removeValue(forKey: kCGImagePropertyPixelHeight as String)
+        if forSharing && (UserDefaults.standard.object(forKey: "lumen.camera.stripLocation") as? Bool ?? true) {
+            properties.removeValue(forKey: kCGImagePropertyGPSDictionary as String)
+        }
         return await withCheckedContinuation { continuation in
             renderQueue.async {
                 guard let image = PhotoRenderer.render(source, recipe: recipe, scale: 1, analysis: analysis) else {
                     continuation.resume(returning: nil)
                     return
                 }
-                continuation.resume(returning: PhotoRenderer.heic(image))
+                continuation.resume(returning: PhotoRenderer.heic(image, properties: properties))
             }
         }
     }

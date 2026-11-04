@@ -5,6 +5,8 @@ struct CameraSettingsSheet: View {
     @ObservedObject var camera: CameraModel
     @Binding var hardwareShutter: Bool
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("lumen.camera.stripLocation") private var stripLocation = true
+    @State private var pendingBackups = NASBackup.shared.pendingCount
 
     var body: some View {
         NavigationStack {
@@ -12,10 +14,29 @@ struct CameraSettingsSheet: View {
                 Section {
                     Toggle("Volume buttons & Camera Control take photos", isOn: $hardwareShutter)
                     Toggle("Tag photos with location", isOn: $camera.locationTagging)
+                    Toggle("Remove location when sharing", isOn: $stripLocation)
+                    Toggle("Live Photos", isOn: $camera.livePhoto)
+                    Toggle("Save into a “Lumen” album", isOn: $camera.saveToAlbum)
+                    Toggle("Spot QR codes and documents", isOn: $camera.detectCodes)
                 } header: {
                     Text("Shooting")
                 } footer: {
-                    Text("Hold a volume button in Burst for continuous shots. On iPhone 16, press Camera Control lightly for zoom, exposure and look.")
+                    Text("Hold a volume button in Burst for continuous shots. On iPhone 16, press Camera Control lightly for zoom, exposure and look. Live Photos work in Single drive, and keep their full 4:3 shape (the look is added as an edit). The album needs full Photos access.")
+                }
+
+                Section {
+                    Toggle("Back up originals to my NAS", isOn: $camera.nasBackup)
+                    if camera.nasBackup {
+                        LabeledContent("Waiting to upload", value: "\(pendingBackups)")
+                        Button("Try uploading now") {
+                            NASBackup.shared.kick()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { pendingBackups = NASBackup.shared.pendingCount }
+                        }
+                    }
+                } header: {
+                    Text("NAS backup")
+                } footer: {
+                    Text("Every new photo (RAW too) and video is copied to the lumen-ai app on your NAS, using the address and key from the editor's AI tab. Files wait on the iPhone until the NAS can be reached (Tailscale or home Wi-Fi).")
                 }
 
                 Section("Photo") {
@@ -58,6 +79,25 @@ struct CameraSettingsSheet: View {
                             Text(value < 1 ? "\(value, specifier: "%.2g") s" : "\(Int(value)) s").tag(value)
                         }
                     }
+                    if camera.hdrVideoAvailable {
+                        Toggle("HDR video (Dolby Vision)", isOn: $camera.hdrVideo)
+                    }
+                    Picker("Stabilisation", selection: $camera.stabilization) {
+                        ForEach(StabilizationChoice.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    Picker("Save slow motion as", selection: $camera.slowMoEditable) {
+                        Text("iPhone Slo-mo (editable)").tag(true)
+                        Text("Already slowed down").tag(false)
+                    }
+                    Picker("Frame guides", selection: $camera.frameGuide) {
+                        ForEach(FrameGuide.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    Picker("Anamorphic lens", selection: $camera.anamorphic) {
+                        Text("None").tag(1.0)
+                        Text("1.33×").tag(1.33)
+                        Text("1.55×").tag(1.55)
+                        Text("2×").tag(2.0)
+                    }
                     Toggle("Auto 180° shutter", isOn: Binding(get: { camera.auto180 }, set: { camera.setAuto180($0) }))
                         .disabled(!camera.mode.isVideo)
                     Picker("Focus pull speed", selection: $camera.focusPullSeconds) {
@@ -82,6 +122,12 @@ struct CameraSettingsSheet: View {
                     Text(videoFooter)
                 }
 
+                Section("Open Lumen quickly") {
+                    Text("Control Centre or Lock Screen: edit them, tap Add a Control, and search for Lumen. The Action button can open it too (Settings → Action Button → Controls). Opening Lumen straight from the Camera Control or a locked screen without unlocking isn't possible for this app: Apple only allows that for apps it has signed with a special lock-screen camera extension.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Custom settings") {
                     Text("Tap C1, C2 or C3 on the viewfinder to load a set of settings. Long-press one to save what you're using now: mode, drive, format, lens and zoom, exposure, white balance, focus, look and shape.")
                         .font(.footnote)
@@ -99,7 +145,8 @@ struct CameraSettingsSheet: View {
     }
 
     private var videoFooter: String {
-        var lines = ["Auto 180°: the shutter stays at half the frame time (1/48 at 24 fps, 1/60 at 30) for natural motion blur; ISO follows the light. Microphone choice works in Video and Slo-mo."]
+        var lines = ["Anamorphic stretches the preview back out; the recording stays squeezed for your editor. Frame guides assume you're holding the iPhone sideways.",
+                     "Auto 180°: the shutter stays at half the frame time (1/48 at 24 fps, 1/60 at 30) for natural motion blur; ISO follows the light. Microphone choice works in Video and Slo-mo."]
         if !camera.logAvailable || !camera.proResAvailable {
             lines.append("Apple Log and ProRes appear here (in Video mode) on iPhones that support them – Pro models only, so not on iPhone 16.")
         }

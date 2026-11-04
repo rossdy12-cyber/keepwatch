@@ -30,7 +30,7 @@ enum DriveMode: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .single: return "One photo per press."
         case .burst: return "Hold the shutter for continuous shots."
-        case .night: return "Combines 8 shots for a cleaner low-light photo. Hold still."
+        case .night: return "Several longer exposures, lined up and merged, at full resolution. Hold still for a second."
         case .longExposure: return "Blends 16 shots: silky water, or light trails. Best on a tripod."
         case .hdr: return "Dark, normal and bright shots merged for bright skies and dark shadows."
         case .portrait: return "Records depth, so the background blur can be adjusted in the editor."
@@ -145,4 +145,67 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         latest = locations.last
     }
+}
+
+/// Who sets the exposure: the camera, you, or a mix.
+enum ExposureProgram: String, CaseIterable, Identifiable, Codable {
+    case auto = "A", shutter = "S", iso = "ISO", manual = "M"
+    var id: String { rawValue }
+    var help: String {
+        switch self {
+        case .auto: return "Auto"
+        case .shutter: return "Shutter priority: you pick the shutter, ISO follows the light"
+        case .iso: return "ISO priority: you pick the ISO, the shutter follows the light"
+        case .manual: return "Manual"
+        }
+    }
+}
+
+/// Video stabilisation.
+enum StabilizationChoice: String, CaseIterable, Identifiable, Codable {
+    case auto = "Auto", off = "Off", standard = "Standard", cinematic = "Cinematic",
+         extended = "Cinematic extended", enhanced = "Extra steady (Action-like)"
+    var id: String { rawValue }
+
+    var mode: AVCaptureVideoStabilizationMode {
+        switch self {
+        case .auto: return .auto
+        case .off: return .off
+        case .standard: return .standard
+        case .cinematic: return .cinematic
+        case .extended: return .cinematicExtended
+        case .enhanced:
+            if #available(iOS 18.0, *) { return .cinematicExtendedEnhanced }
+            return .cinematicExtended
+        }
+    }
+}
+
+/// Cinema frame lines for video.
+enum FrameGuide: String, CaseIterable, Identifiable, Codable {
+    case none = "None", scope = "2.39:1", flat = "1.85:1", academy = "4:3", square = "1:1"
+    var id: String { rawValue }
+    /// Long side ÷ short side.
+    var ratio: CGFloat? {
+        switch self {
+        case .none: return nil
+        case .scope: return 2.39
+        case .flat: return 1.85
+        case .academy: return 4.0 / 3.0
+        case .square: return 1
+        }
+    }
+}
+
+enum ScopeStyle: String, CaseIterable, Identifiable, Codable {
+    case luma = "Brightness", rgb = "RGB", waveform = "Waveform"
+    var id: String { rawValue }
+}
+
+/// What the live QR / document finder sees (normalised, top-left origin, in live-frame space).
+final class DetectionFeed: ObservableObject {
+    @Published var code: String?
+    @Published var document: [CGPoint]?
+    /// The live frame's size, to place the outline over the preview.
+    @Published var frameSize: CGSize = .zero
 }

@@ -15,6 +15,9 @@ services:
         target: /app/upscaler.py
     volumes:
       - lumen-ai-data:/data
+      # Lumen's NAS backups. To keep them in one of your datasets instead, change the left side to its path,
+      # for example /mnt/tank/photos/lumen:/backup
+      - lumen-backup:/backup
     environment:
       # Photos bigger than this are scaled down first so a job takes minutes, not hours, on a CPU.
       # Both give roughly a 16-megapixel result. Raise them if your NAS is quick.
@@ -25,6 +28,9 @@ services:
       GPU_MAX_INPUT_MEGAPIXELS_4X: "4"
       # Processor threads to use (0 = all of them).
       THREADS: "0"
+      # Where Lumen's backed-up originals go (inside the container), and the biggest single file accepted.
+      BACKUP_DIR: /backup
+      MAX_BACKUP_GB: "8"
       TZ: Europe/London
     command:
       - sh
@@ -38,6 +44,7 @@ services:
 
 volumes:
   lumen-ai-data:
+  lumen-backup:
 
 configs:
   upscaler:
@@ -54,6 +61,7 @@ configs:
           POST /upscale?token=KEY&scale=2|4   body: JPEG/PNG bytes        -> {"job": "<id>"}
           GET  /jobs/<id>?token=KEY                                        -> {"status", "progress", "error", "width", "height"}
           GET  /jobs/<id>/result?token=KEY                                 -> JPEG
+          POST /backup?token=KEY&name=FILE    body: an original photo/video -> saved in BACKUP_DIR/<yyyy-mm>/FILE
       """
 
       import io
@@ -75,6 +83,9 @@ configs:
 
       DATA = os.environ.get("DATA_DIR", "/data")
       PORT = int(os.environ.get("PORT", "10702"))
+      # Lumen's "Back up originals to my NAS" files land here, in a folder per month.
+      BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(DATA, "backup"))
+      MAX_BACKUP_BYTES = int(float(os.environ.get("MAX_BACKUP_GB", "8")) * 1_000_000_000)
       TILE = int(os.environ.get("TILE", "256"))
       # Bigger photos are scaled down to this many megapixels first, so a job finishes in a few minutes on a CPU.
       # Both give about a 16-megapixel result.
@@ -354,6 +365,8 @@ configs:
               parts = [p for p in parsed.path.split("/") if p]
               if not self.authorised(query):
                   return self.reply(403, {"error": "Wrong key"})
+              if parts == ["backup"]:
+                  return self.backup(query)
               if parts == ["upscale"]:
                   scale = int((query.get("scale") or ["2"])[0])
                   if scale not in MODELS:
@@ -388,6 +401,41 @@ configs:
                       job.update(status="queued", processor=None, lease_until=None, cpu_only=True, progress=0.0)
                       return self.reply(200, {"ok": True})
               self.reply(404, {"error": "Not found"})
+
+          def backup(self, query):
+              """Streams one file from Lumen to the backup folder (written as .part, then renamed, so a cut-off upload never
+              looks finished). Sending the same file again is fine: it's replaced."""
+              name = os.path.basename((query.get("name") or [""])[0]).strip()
+              length = int(self.headers.get("Content-Length") or 0)
+              if not name or name.startswith(".") or length <= 0:
+                  return self.reply(400, {"error": "Send a file with ?name="})
+              if length > MAX_BACKUP_BYTES:
+                  return self.reply(413, {"error": "That file is bigger than MAX_BACKUP_GB"})
+              month = name[:7] if len(name) >= 7 and name[4] == "-" else "other"
+              folder = os.path.join(BACKUP_DIR, month)
+              os.makedirs(folder, exist_ok=True)
+              path = os.path.join(folder, name)
+              part = path + ".part"
+              remaining = length
+              try:
+                  with open(part, "wb") as handle:
+                      while remaining > 0:
+                          chunk = self.rfile.read(min(1 << 20, remaining))
+                          if not chunk:
+                              break
+                          handle.write(chunk)
+                          remaining -= len(chunk)
+              except OSError as error:
+                  return self.reply(500, {"error": "Couldn't write the file: %s" % error})
+              if remaining:
+                  try:
+                      os.remove(part)
+                  except OSError:
+                      pass
+                  return self.reply(400, {"error": "The upload was cut off"})
+              os.replace(part, path)
+              log("Backed up %s (%.1f MB)" % (name, length / 1e6))
+              return self.reply(200, {"ok": True, "saved": os.path.join(month, name)})
 
           def do_GET(self):
               parsed = urllib.parse.urlparse(self.path)

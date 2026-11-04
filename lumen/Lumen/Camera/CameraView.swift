@@ -52,6 +52,10 @@ struct CameraView: View {
         .onAppear {
             camera.start()
             level.start()
+            NASBackup.shared.kick()
+        }
+        .onChange(of: control) { _, value in
+            camera.loupe = value == .focus
         }
         .onDisappear {
             camera.stop()
@@ -93,7 +97,8 @@ struct CameraView: View {
         VStack(spacing: 0) {
             topBar
             ZStack {
-                CameraPreview(camera: camera, hardwareShutter: hardwareShutter && editing == nil && !showSettings) { point in
+                CameraPreview(camera: camera, hardwareShutter: hardwareShutter && editing == nil && !showSettings,
+                              fit: camera.mode.isVideo) { point in
                     lockPoint = nil
                     focusPoint = point
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -109,8 +114,16 @@ struct CameraView: View {
                     case .cancelled: if camera.isBursting { camera.stopBurst() }
                     }
                 }
-                OverlayImageView(feed: camera.overlay)
+                .scaleEffect(x: desqueeze, y: 1)
+                OverlayImageView(feed: camera.overlay, fit: camera.mode.isVideo)
+                    .scaleEffect(x: desqueeze, y: 1)
+                if camera.mode.isVideo && camera.frameGuide != .none {
+                    FrameGuideMask(guide: camera.frameGuide, frameRatio: 16.0 / 9.0 * CGFloat(camera.anamorphic))
+                }
                 if gridStyle != .off { GridOverlay(style: gridStyle) }
+                if camera.mode == .photo && camera.detectCodes {
+                    DetectionOverlay(feed: camera.detection) { camera.requestDocumentScan() }
+                }
                 if camera.mode == .photo && camera.aspect != .fourThree { AspectMask(aspect: camera.aspect) }
                 if showLevel { LevelOverlay(level: level) }
                 if let focusPoint {
@@ -169,9 +182,18 @@ struct CameraView: View {
                     }
                     Spacer()
                 }
-                if showHistogram { HistogramView(bins: camera.histogram) }
+                if showHistogram {
+                    switch camera.scopeStyle {
+                    case .luma: HistogramView(bins: camera.histogram)
+                    case .rgb: RGBHistogramView(channels: camera.rgbHistogram)
+                    case .waveform: WaveformView(image: camera.waveform)
+                    }
+                }
             }
             Spacer()
+            if control == .focus {
+                LoupeView(feed: camera.overlay)
+            }
             if let countdown {
                 Text("\(countdown)")
                     .font(.system(size: 96, weight: .thin, design: .rounded))
@@ -213,6 +235,11 @@ struct CameraView: View {
     private var badges: some View {
         HStack(spacing: 6) {
             if camera.aeafLocked { badge("AE/AF LOCK", highlighted: true) }
+            if camera.aeLocked { badge("AE-L", highlighted: true) }
+            if camera.awbLocked { badge("AWB-L", highlighted: true) }
+            if camera.program == .shutter || camera.program == .iso { badge(camera.program.rawValue + " PRIORITY", highlighted: false) }
+            if camera.mode == .photo && camera.livePhoto && camera.drive == .single { badge("LIVE", highlighted: false) }
+            if camera.mode.isVideo && camera.anamorphic > 1 { badge(String(format: "%.2g× ANAMORPHIC", camera.anamorphic), highlighted: false) }
             if camera.macroActive { badge("MACRO", highlighted: true) }
             if camera.mode == .photo && camera.drive != .single { badge(camera.drive.rawValue.uppercased(), highlighted: false) }
             if camera.isBursting { badge("\(camera.burstTaken)", highlighted: true) }
@@ -253,7 +280,7 @@ struct CameraView: View {
     // MARK: Top bar
 
     private var topBar: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 16) {
             switch camera.mode {
             case .video:
                 Menu {
@@ -288,6 +315,8 @@ struct CameraView: View {
                     boxed(camera.timeLapseInterval < 1 ? String(format: "%.2gs", camera.timeLapseInterval) : "\(Int(camera.timeLapseInterval))s")
                 }
                 .disabled(camera.isRecording)
+            case .spatial:
+                boxed(camera.activeFormatLabel.isEmpty ? "SPATIAL" : camera.activeFormatLabel)
             case .photo:
                 photoTopItems
             }
@@ -341,6 +370,13 @@ struct CameraView: View {
         }
         .disabled(camera.intervalRunning || camera.isBursting)
         .accessibilityLabel("Drive mode")
+        if camera.drive == .single {
+            Button { camera.livePhoto.toggle() } label: {
+                Image(systemName: camera.livePhoto ? "livephoto" : "livephoto.slash")
+                    .foregroundStyle(camera.livePhoto ? .yellow : .white)
+            }
+            .accessibilityLabel(camera.livePhoto ? "Live Photo on" : "Live Photo off")
+        }
         Button { timer = timer == 0 ? 3 : (timer == 3 ? 10 : 0) } label: {
             HStack(spacing: 2) {
                 Image(systemName: "timer")
@@ -368,6 +404,9 @@ struct CameraView: View {
             }
             Toggle("Level", isOn: $showLevel)
             Toggle("Histogram", isOn: $showHistogram)
+            Picker("Scope", selection: $camera.scopeStyle) {
+                ForEach(ScopeStyle.allCases) { Text($0.rawValue).tag($0) }
+            }
             Section("Exposure and focus aids") {
                 Toggle("Focus peaking", isOn: $camera.peaking)
                 Toggle("Zebras", isOn: $camera.zebras)
@@ -412,6 +451,30 @@ struct CameraView: View {
                 if control == .focus && camera.manualFocusSupported {
                     focusPullRow.padding(.horizontal, 16)
                 }
+                if control == .iso || control == .shutter {
+                    Picker("Exposure", selection: Binding(get: { camera.program }, set: { camera.setProgram($0) })) {
+                        ForEach(ExposureProgram.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    .accessibilityHint(camera.program.help)
+                }
+                if control == .ev {
+                    HStack {
+                        smallToggle("AE-L", on: camera.aeLocked) { camera.toggleAELock() }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                }
+                if control == .whiteBalance {
+                    HStack(spacing: 10) {
+                        smallToggle("AWB-L", on: camera.awbLocked) { camera.toggleAWBLock() }
+                        smallToggle("Grey card", on: false) { camera.whiteBalanceFromGreyCard() }
+                        Text("Fill the frame with white or grey").font(.caption2).foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                }
             }
             HStack(spacing: 6) {
                 ForEach(ProControl.allCases) { item in
@@ -448,6 +511,20 @@ struct CameraView: View {
             Spacer()
             Text("\(Int(camera.focusPullSeconds))s").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
+    }
+
+    private func smallToggle(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.weight(.bold))
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(on ? Color.yellow : Color.white.opacity(0.15), in: Capsule())
+                .foregroundStyle(on ? .black : .white)
+        }
+    }
+
+    private var desqueeze: CGFloat {
+        camera.mode.isVideo && camera.anamorphic > 1 ? 1 / CGFloat(camera.anamorphic) : 1
     }
 
     private func markButton(_ name: String, value: Float?, action: @escaping () -> Void) -> some View {
@@ -527,7 +604,12 @@ struct CameraView: View {
 
     private var lensPicker: some View {
         HStack(spacing: 10) {
-            if camera.drive == .portrait && camera.mode == .photo {
+            if camera.mode == .spatial {
+                Text("SPATIAL · wide + ultra wide together")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.yellow)
+                    .frame(height: 40)
+            } else if camera.drive == .portrait && camera.mode == .photo {
                 Text("PORTRAIT · depth for background blur")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.yellow)
@@ -577,8 +659,8 @@ struct CameraView: View {
     }
 
     private var modePicker: some View {
-        HStack(spacing: 20) {
-            ForEach(CaptureMode.allCases) { item in
+        HStack(spacing: 16) {
+            ForEach(CaptureMode.allCases.filter { $0 != .spatial || camera.spatialAvailable }) { item in
                 Button { camera.setMode(item) } label: {
                     Text(item.rawValue)
                         .font(.caption.weight(.bold))
@@ -611,7 +693,14 @@ struct CameraView: View {
                 .frame(width: 52, height: 52)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
+            .contextMenu {
+                if !camera.lastWasVideo, let id = camera.lastAssetID {
+                    Button { editing = EditSource(assetID: id, autoUpscale: 2) } label: { Label("AI upscale 2×", systemImage: "arrow.up.left.and.arrow.down.right") }
+                    Button { editing = EditSource(assetID: id, autoUpscale: 4) } label: { Label("AI upscale 4×", systemImage: "sparkles") }
+                }
+            }
             .accessibilityLabel("Edit the last photo")
+            .accessibilityHint("Touch and hold for one-tap AI upscaling")
             .frame(maxWidth: .infinity)
 
             shutterButton
@@ -635,7 +724,8 @@ struct CameraView: View {
     }
 
     private var shutterBusy: Bool {
-        (camera.mode == .photo && camera.isCapturing && !camera.intervalRunning && !camera.isBursting) || countdown != nil
+        (camera.mode == .photo && (camera.isCapturing || !camera.shutterReady) && !camera.intervalRunning && !camera.isBursting)
+            || countdown != nil
     }
 
     private var shutterButton: some View {

@@ -5,6 +5,8 @@ import SwiftUI
 /// Kept apart from CameraModel so 20 updates a second only redraw the overlay.
 final class OverlayFeed: ObservableObject {
     @Published var image: CGImage?
+    /// The magnified centre, for manual focus.
+    @Published var loupe: CGImage?
 }
 
 /// Microphone levels, 0–1 per channel.
@@ -18,7 +20,11 @@ struct AssistSettings {
     var zebras = false
     var zebraLevel: CGFloat = 0.95
     var falseColour = false
-    var isActive: Bool { look != Look.none.id || peaking || zebras || falseColour }
+    var loupe = false
+    /// Look for QR codes and documents.
+    var detect = false
+    var scope: ScopeStyle = .luma
+    var needsOverlay: Bool { look != Look.none.id || peaking || zebras || falseColour }
 }
 
 /// Renders the overlay from a live frame. Runs on the frame queue.
@@ -53,6 +59,18 @@ final class FrameAssist {
             output = peaking(placed, bounds: bounds).composited(over: output)
         }
         return context.createCGImage(output.cropped(to: bounds), from: bounds, format: .RGBA8, colorSpace: sRGB)
+    }
+
+    /// The middle of the full-resolution frame at 1:1, with peaking if it's on.
+    func renderLoupe(_ buffer: CVPixelBuffer, peakingOn: Bool) -> CGImage? {
+        let source = CIImage(cvPixelBuffer: buffer)
+        let side = min(360, min(source.extent.width, source.extent.height))
+        let rect = CGRect(x: source.extent.midX - side / 2, y: source.extent.midY - side / 2, width: side, height: side).integral
+        let crop = source.cropped(to: rect).transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+        let bounds = CGRect(origin: .zero, size: rect.size)
+        var output = crop
+        if peakingOn { output = peaking(crop, bounds: bounds).composited(over: crop) }
+        return context.createCGImage(output, from: bounds, format: .RGBA8, colorSpace: sRGB)
     }
 
     // MARK: Zebras: diagonal stripes over the brightest parts
@@ -125,5 +143,77 @@ final class FrameAssist {
         case ..<97: return [1.0, 0.9, 0.1, 1]
         default: return [1.0, 0.1, 0.1, 1]
         }
+    }
+}
+
+/// Scopes from the live frame's brightness (Y) and colour (CbCr) planes.
+enum Scopes {
+    /// Red, green and blue histograms (64 bins each, 0–1).
+    static func rgbHistogram(_ buffer: CVPixelBuffer) -> [[Float]] {
+        guard CVPixelBufferGetPlaneCount(buffer) >= 2,
+              CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else { return [] }
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let yBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 0),
+              let cBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) else { return [] }
+        let width = CVPixelBufferGetWidthOfPlane(buffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let yStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        let cStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
+        let yBytes = yBase.assumingMemoryBound(to: UInt8.self)
+        let cBytes = cBase.assumingMemoryBound(to: UInt8.self)
+        var bins = [[Float]](repeating: [Float](repeating: 0, count: 64), count: 3)
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                let luma = Float(yBytes[y * yStride + x])
+                let c = (y / 2) * cStride + (x / 2) * 2
+                let cb = Float(cBytes[c]) - 128, cr = Float(cBytes[c + 1]) - 128
+                let r = luma + 1.402 * cr
+                let g = luma - 0.344136 * cb - 0.714136 * cr
+                let b = luma + 1.772 * cb
+                bins[0][Int(max(0, min(255, r))) >> 2] += 1
+                bins[1][Int(max(0, min(255, g))) >> 2] += 1
+                bins[2][Int(max(0, min(255, b))) >> 2] += 1
+                x += 12
+            }
+            y += 12
+        }
+        let peak = max(1, bins.flatMap { $0 }.max() ?? 1)
+        return bins.map { channel in channel.map { $0 / peak } }
+    }
+
+    /// A brightness waveform: across = left to right in the frame, up = brighter.
+    static func waveform(_ buffer: CVPixelBuffer) -> CGImage? {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard CVPixelBufferGetPlaneCount(buffer) > 0, let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return nil }
+        let width = CVPixelBufferGetWidthOfPlane(buffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        let columns = 96, levels = 64
+        var counts = [Float](repeating: 0, count: columns * levels)
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                let column = min(columns - 1, x * columns / max(width, 1))
+                let level = Int(bytes[y * stride + x]) * levels / 256
+                counts[(levels - 1 - level) * columns + column] += 1
+                x += 6
+            }
+            y += 6
+        }
+        let scale = Float(height / 6) / Float(levels) * 2.5
+        var pixels = counts.map { UInt8(min(255, $0 / max(scale, 1) * 255)) }
+        let image: CGImage? = pixels.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress, width: columns, height: levels, bitsPerComponent: 8,
+                                          bytesPerRow: columns, space: CGColorSpaceCreateDeviceGray(),
+                                          bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+            return context.makeImage()
+        }
+        return image
     }
 }
