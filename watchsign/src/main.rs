@@ -71,7 +71,7 @@ async fn register_device_v1(dev: &mut DeveloperSession, team_id: &str, name: &st
         let headers = dev.get_headers().await.context("Couldn't get Apple auth headers")?;
         let response = dev
             .get_grandslam_client()
-            .post("https://developerservices2.apple.com/services/v1/devices")?
+            .post("https://developerservices2.apple.com/services/v1/devices?clientId=XABBG36SBA")?
             .headers(headers)
             .header("Content-Type", "application/vnd.api+json")
             .header("Accept", "application/vnd.api+json")
