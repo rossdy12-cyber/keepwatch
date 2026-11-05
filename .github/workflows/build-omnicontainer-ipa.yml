@@ -31,11 +31,13 @@ jobs:
       - name: Build OmniContainer (unsigned)
         run: |
           set -o pipefail
+          # No -sdk override: each target builds with its own SDK (iOS app -> iphoneos, embedded
+          # watch app + widgets -> watchos). Forcing -sdk iphoneos miscompiled the watch widgets.
           xcodebuild \
             -project OmniContainer.xcodeproj \
             -target OmniContainer \
             -configuration Release \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             SYMROOT="$PWD/build" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
