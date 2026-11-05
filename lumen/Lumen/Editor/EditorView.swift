@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 enum EditorTool: String, CaseIterable, Identifiable {
     case looks = "Looks", ai = "AI", light = "Light", colour = "Colour", grade = "Grade", detail = "Detail", selective = "Masks", crop = "Crop"
@@ -29,6 +30,8 @@ struct EditorView: View {
     @State private var showOriginal = false
     @State private var savedBanner = false
     @State private var confirmClose = false
+    @State private var showLUTImporter = false
+    @State private var lutError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -93,6 +96,29 @@ struct EditorView: View {
         .confirmationDialog("Discard your changes?", isPresented: $confirmClose, titleVisibility: .visible) {
             Button("Discard changes", role: .destructive) { dismiss() }
         }
+        .fileImporter(isPresented: $showLUTImporter,
+                      allowedContentTypes: [UTType(filenameExtension: "cube") ?? .data, .data],
+                      allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                do {
+                    let id = try LUTStore.importLUT(from: url)
+                    model.reloadLUTs()
+                    model.recipe.look = id
+                    if model.recipe.lookAmount == 0 { model.recipe.lookAmount = 1 }
+                } catch {
+                    lutError = error.localizedDescription
+                }
+            case .failure(let error):
+                lutError = error.localizedDescription
+            }
+        }
+        .alert("Couldn't import that LUT", isPresented: Binding(get: { lutError != nil }, set: { if !$0 { lutError = nil } })) {
+            Button("OK", role: .cancel) { lutError = nil }
+        } message: {
+            Text(lutError ?? "")
+        }
     }
 
     private var topBar: some View {
@@ -146,7 +172,7 @@ struct EditorView: View {
             VStack(spacing: 14) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
-                        ForEach(Look.all) { look in
+                        ForEach(Look.catalog) { look in
                             Button {
                                 model.recipe.look = look.id
                                 if model.recipe.lookAmount == 0 { model.recipe.lookAmount = 1 }
@@ -166,7 +192,26 @@ struct EditorView: View {
                                     Text(look.name)
                                         .font(.caption2.weight(model.recipe.look == look.id ? .bold : .regular))
                                         .foregroundStyle(model.recipe.look == look.id ? .yellow : .white)
+                                        .lineLimit(1).frame(width: 72)
                                 }
+                            }
+                            .contextMenu {
+                                if LUTStore.isCustom(look.id) {
+                                    Button(role: .destructive) {
+                                        if model.recipe.look == look.id { model.recipe.look = Look.none.id }
+                                        LUTStore.delete(id: look.id)
+                                        model.reloadLUTs()
+                                    } label: { Label("Delete LUT", systemImage: "trash") }
+                                }
+                            }
+                        }
+                        Button { showLUTImporter = true } label: {
+                            VStack(spacing: 6) {
+                                Image(systemName: "square.and.arrow.down")
+                                    .font(.title3)
+                                    .frame(width: 72, height: 72)
+                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                                Text("Import LUT").font(.caption2).foregroundStyle(.white)
                             }
                         }
                     }

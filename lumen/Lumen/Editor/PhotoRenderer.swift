@@ -57,7 +57,10 @@ struct Look: Identifiable, Equatable {
         },
     ]
 
-    static func named(_ id: String) -> Look { all.first { $0.id == id } ?? .none }
+    static func named(_ id: String) -> Look { all.first { $0.id == id } ?? LUTStore.looks.first { $0.id == id } ?? .none }
+
+    /// Built-in looks plus any imported .cube LUTs.
+    static var catalog: [Look] { all + LUTStore.looks }
 
     /// A gentle S-free curve: lifted blacks (lift), mid-tone shift (gamma), rolled-off whites (roll).
     static func toneCurve(lift: Double, gamma: Double, roll: Double) -> [String: Any] {

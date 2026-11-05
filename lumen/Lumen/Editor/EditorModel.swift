@@ -394,7 +394,7 @@ final class EditorModel: ObservableObject {
 
     private func makeLookThumbnails() async {
         let thumbScale = previewScale * 0.12
-        for look in Look.all {
+        for look in Look.catalog {
             var recipe = EditRecipe()
             recipe.look = look.id
             recipe.aspect = .square
@@ -402,6 +402,11 @@ final class EditorModel: ObservableObject {
                 lookThumbnails[look.id] = image
             }
         }
+    }
+
+    /// After importing or deleting a LUT: refresh the look list and rebuild thumbnails.
+    func reloadLUTs() {
+        Task { await makeLookThumbnails() }
     }
 
     func reset() {
