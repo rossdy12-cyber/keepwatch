@@ -50,6 +50,10 @@ enum PhotoSaver {
         var enhanced = image
         for step in filters { enhanced = enhanced.applyingFilter(step.name, parameters: step.parameters) }
         enhanced = enhanced.cropped(to: image.extent)
+        // Blend 65% toward the enhanced version so the auto-adjust is gentle and doesn't amplify noise
+        // (a full-strength shadow/contrast boost makes dark, high-ISO shots look grainier).
+        enhanced = enhanced.applyingFilter("CIDissolveTransition", parameters: [
+            kCIInputTargetImageKey: image, "inputTime": 0.35]).cropped(to: image.extent)
         var properties = image.properties
         properties[kCGImagePropertyOrientation as String] = 1
         let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!

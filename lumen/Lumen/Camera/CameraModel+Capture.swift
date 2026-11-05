@@ -524,13 +524,15 @@ extension CameraModel {
         case .bonfire:
             setMode(.photo)
             format = format == .jpeg ? .jpeg : .heif
-            setDrive(.night)
+            // A single frame at a fast-ish shutter freezes people — night-mode stacking smears anyone who moves.
+            // The camera raises ISO to compensate (a little noisier, but sharp beats blurry for faces).
+            setDrive(.single)
             setAutoFocus(true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self.setAutoExposure(true)
-                self.setExposureBias(-0.3)   // brighten the dark but keep detail in the flames
+                self.setProgram(.shutter)
+                self.setShutter(1.0 / 30)
             }
-            message = "Bonfire night mode: brightens the dark and keeps the flames. Hold still for a moment per shot."
+            message = "Bonfire (people): freezes movement so faces are sharp, not smeared. For clean shots in the dark, get a little light on faces (or a quick tap of flash)."
         case .darkVideo:
             setMode(.video)
             setDrive(.single)
