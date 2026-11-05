@@ -286,6 +286,51 @@ def run_inpaint(blob, device="cpu", progress=None):
     return buffer.getvalue()
 
 
+# ---------------------------------------------------------------------------------------------- panorama
+
+def _split_pano(blob):
+    """blob = 4-byte frame count, then for each frame a 4-byte length followed by its JPEG."""
+    if len(blob) < 4:
+        raise ValueError("panorama request too short")
+    count = int.from_bytes(blob[:4], "big")
+    offset = 4
+    frames = []
+    for _ in range(count):
+        if offset + 4 > len(blob):
+            raise ValueError("bad panorama framing")
+        length = int.from_bytes(blob[offset:offset + 4], "big")
+        offset += 4
+        if length <= 0 or offset + length > len(blob):
+            raise ValueError("bad panorama framing")
+        frames.append(blob[offset:offset + length])
+        offset += length
+    if len(frames) < 2:
+        raise ValueError("need at least two frames to stitch a panorama")
+    return frames
+
+
+def run_pano(blob, progress=None):
+    """Stitches the captured frames into one wide photo with OpenCV. Returns a JPEG."""
+    import numpy as np
+    import cv2
+    frames = _split_pano(blob)
+    images = []
+    for frame_bytes in frames:
+        image = ImageOps.exif_transpose(Image.open(io.BytesIO(frame_bytes))).convert("RGB")
+        images.append(np.array(image)[:, :, ::-1].copy())  # RGB -> BGR for OpenCV
+    if progress:
+        progress(0.2)
+    stitcher = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
+    status, pano = stitcher.stitch(images)
+    if status != cv2.Stitcher_OK:
+        raise ValueError("Couldn't stitch these frames (code %d). Try panning more slowly with more overlap." % status)
+    if progress:
+        progress(0.9)
+    result = Image.fromarray(pano[:, :, ::-1])  # BGR -> RGB
+    buffer = io.BytesIO()
+    result.save(buffer, "JPEG", quality=92, subsampling=0)
+    return buffer.getvalue()
+
 
 def requeue_stale():
     """A GPU worker that went quiet mid-job: hand its job back (to the NAS processor)."""
@@ -341,6 +386,11 @@ def cpu_worker():
             if job.get("kind") == "inpaint":
                 log("Job %s: removing objects on the NAS processor" % job["id"])
                 result = run_inpaint(job["input"], "cpu", lambda fraction: job.__setitem__("progress", fraction))
+                finish(job, result)
+                continue
+            if job.get("kind") == "pano":
+                log("Job %s: stitching a panorama on the NAS processor" % job["id"])
+                result = run_pano(job["input"], lambda fraction: job.__setitem__("progress", fraction))
                 finish(job, result)
                 continue
             image = shrink(ImageOps.exif_transpose(Image.open(io.BytesIO(job["input"]))), MAX_INPUT_MP[job["scale"]])
@@ -406,6 +456,16 @@ class Handler(BaseHTTPRequestHandler):
             with jobs_lock:
                 jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0.0, "kind": "inpaint",
                                 "input": data, "created": time.time()}
+            return self.reply(200, {"job": job_id})
+        if parts == ["pano"]:
+            data = self.body(200_000_000)
+            if not data:
+                return self.reply(413, {"error": "Send the panorama frames (under 200 MB)"})
+            job_id = secrets.token_hex(8)
+            with jobs_lock:
+                # Stitching runs on the NAS itself (no GPU benefit), so mark it cpu_only.
+                jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0.0, "kind": "pano",
+                                "cpu_only": True, "input": data, "created": time.time()}
             return self.reply(200, {"job": job_id})
         # The GPU worker reporting back: /worker/progress/<id>, /worker/result/<id>, /worker/fail/<id>
         if len(parts) == 3 and parts[0] == "worker":
@@ -515,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
                 if job:
                     log("Job %s: sent to %s" % (job["id"], name))
                     headers = {"X-Job": job["id"], "X-Kind": job.get("kind", "upscale")}
-                    if job.get("kind") != "inpaint":
+                    if job.get("kind", "upscale") == "upscale":
                         headers["X-Scale"] = job["scale"]
                         headers["X-Max-Megapixels"] = GPU_MAX_INPUT_MP[job["scale"]]
                     return self.reply(200, job["input"], "application/octet-stream", headers)

@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import CoreLocation
 import Photos
 import UIKit
@@ -227,6 +228,16 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var burstTaken = 0
     /// 0–1 while a night, long-exposure or HDR shot is being made.
     @Published var stackProgress: Double?
+    // Panorama: capture a sweep of frames, then stitch them on the NAS.
+    @Published var panoActive = false
+    @Published var panoFrameCount = 0
+    @Published var panoStatus: String?
+    @Published var panoResult: Data?
+    var panoFrames: [Data] = []
+    var lastPanoGrab = Date.distantPast
+    let panoContext = CIContext(options: [.cacheIntermediates: false])
+    var panoStitchTask: Task<Void, Never>?
+    let panoMaxFrames = 24
     @Published var locationTagging = Prefs.bool("location", false) {
         didSet {
             Prefs.set("location", locationTagging)
@@ -1201,6 +1212,8 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        if panoActive { grabPanoFrame(pixels, rotation: connection.videoRotationAngle) }
 
         if let writer = timeLapse, writer.append(sampleBuffer) {
             let frames = writer.frameCount

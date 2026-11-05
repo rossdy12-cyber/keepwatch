@@ -93,6 +93,29 @@ struct UpscaleClient {
         return job
     }
 
+    /// Sends a set of overlapping frames to the NAS to stitch into a panorama.
+    /// Body is: 4-byte big-endian frame count, then for each frame a 4-byte big-endian length followed by its JPEG.
+    func startPano(images: [Data]) async throws -> String {
+        var body = Data()
+        var count = UInt32(images.count).bigEndian
+        withUnsafeBytes(of: &count) { body.append(contentsOf: $0) }
+        for image in images {
+            var length = UInt32(image.count).bigEndian
+            withUnsafeBytes(of: &length) { body.append(contentsOf: $0) }
+            body.append(image)
+        }
+        var request = URLRequest(url: try url("pano"))
+        request.httpMethod = "POST"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        let (data, status) = try await fetch(request)
+        guard status == 200, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let job = json["job"] as? String else {
+            throw UpscaleError.server(Self.errorText(data) ?? "The NAS refused the panorama (HTTP \(status)).")
+        }
+        return job
+    }
+
     func start(jpeg: Data, scale: Int) async throws -> String {
         var request = URLRequest(url: try url("upscale", [URLQueryItem(name: "scale", value: String(scale))]))
         request.httpMethod = "POST"

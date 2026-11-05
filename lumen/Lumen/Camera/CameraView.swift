@@ -50,8 +50,16 @@ struct CameraView: View {
                 }
                 .padding()
             }
+            if camera.panoActive { panoCaptureOverlay }
+            if let status = camera.panoStatus { panoStitchOverlay(status) }
         }
         .foregroundStyle(.white)
+        .onChange(of: camera.panoResult) { _, data in
+            if let data {
+                camera.panoResult = nil
+                editing = EditSource(data: data)
+            }
+        }
         .onAppear {
             camera.start()
             level.start()
@@ -434,16 +442,59 @@ struct CameraView: View {
                 Toggle("Zebras", isOn: $camera.zebras)
                 Toggle("False colour", isOn: $camera.falseColour)
             }
-            if DocumentScannerView.isSupported {
-                Section {
+            Section {
+                if DocumentScannerView.isSupported {
                     Button { showScanner = true } label: { Label("Scan a document", systemImage: "doc.viewfinder") }
                 }
+                Button { camera.startPano() } label: { Label("Panorama", systemImage: "pano") }
             }
         } label: {
             Image(systemName: "square.grid.3x3")
                 .foregroundStyle(camera.peaking || camera.zebras || camera.falseColour ? .yellow : .white)
         }
         .accessibilityLabel("Viewfinder aids")
+    }
+
+    private var panoCaptureOverlay: some View {
+        VStack {
+            Spacer()
+            VStack(spacing: 14) {
+                Label("Pan slowly across the scene", systemImage: "pano")
+                    .font(.headline)
+                Text("\(camera.panoFrameCount) frame\(camera.panoFrameCount == 1 ? "" : "s") captured")
+                    .font(.subheadline).foregroundStyle(.white.opacity(0.8))
+                HStack(spacing: 16) {
+                    Button("Cancel") { camera.cancelPano() }
+                        .padding(.horizontal, 18).padding(.vertical, 10)
+                        .background(.white.opacity(0.15), in: Capsule())
+                    Button { camera.stopPano() } label: {
+                        Label("Stitch", systemImage: "checkmark")
+                            .fontWeight(.bold)
+                            .padding(.horizontal, 22).padding(.vertical, 10)
+                            .background(camera.panoFrameCount >= 2 ? Color.yellow : Color.white.opacity(0.15), in: Capsule())
+                            .foregroundStyle(camera.panoFrameCount >= 2 ? .black : .white)
+                    }
+                    .disabled(camera.panoFrameCount < 2)
+                }
+            }
+            .padding(20)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 18))
+            .padding(.bottom, 60)
+        }
+    }
+
+    private func panoStitchOverlay(_ status: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.6).ignoresSafeArea()
+            VStack(spacing: 16) {
+                ProgressView().tint(.white).scaleEffect(1.3)
+                Text(status).font(.subheadline).multilineTextAlignment(.center)
+                Button("Cancel") { camera.cancelPano() }
+                    .padding(.horizontal, 18).padding(.vertical, 8)
+                    .background(.white.opacity(0.15), in: Capsule())
+            }
+            .padding(24)
+        }
     }
 
     private func boxed(_ text: String) -> some View {
