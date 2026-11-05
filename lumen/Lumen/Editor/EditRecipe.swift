@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Every adjustment for one photo. All values are 0 when untouched.
@@ -28,11 +29,44 @@ struct EditRecipe: Equatable {
     // Look
     var look: String = Look.none.id
     var lookAmount: Double = 1    // 0…1
+    // Local adjustments (radial / graduated masks)
+    var masks: [MaskLayer] = []
     // Crop
     var aspect: CropAspect = .original
     var straighten: Double = 0    // degrees, -15…15
 
     var isUntouched: Bool { self == EditRecipe() }
+}
+
+/// One local adjustment: a radial or graduated (linear) mask with its own sliders. Geometry is in
+/// normalised image coordinates (0–1, origin top-left of the upright photo).
+struct MaskLayer: Identifiable, Equatable {
+    enum Kind: String, Equatable { case radial = "Radial", linear = "Graduated" }
+
+    let id: String
+    var kind: Kind
+    var invert: Bool = false
+    var center = CGPoint(x: 0.5, y: 0.5)   // radial centre, or the start (full-strength end) of a graduated mask
+    var radius: Double = 0.35              // radial size, as a fraction of the shorter side
+    var end = CGPoint(x: 0.5, y: 0.85)     // graduated: where the effect fades to nothing
+
+    var exposure: Double = 0     // -2…2 EV
+    var contrast: Double = 0     // -1…1
+    var saturation: Double = 0   // -1…1
+    var temperature: Double = 0  // -1…1
+    var clarity: Double = 0      // -1…1
+
+    var hasEffect: Bool { exposure != 0 || contrast != 0 || saturation != 0 || temperature != 0 || clarity != 0 }
+
+    static func new(_ kind: Kind) -> MaskLayer { MaskLayer(id: UUID().uuidString, kind: kind) }
+
+    static let adjustments: [(name: String, range: ClosedRange<Double>, keyPath: WritableKeyPath<MaskLayer, Double>)] = [
+        ("Exposure", -2...2, \.exposure),
+        ("Contrast", -1...1, \.contrast),
+        ("Saturation", -1...1, \.saturation),
+        ("Temperature", -1...1, \.temperature),
+        ("Clarity", -1...1, \.clarity),
+    ]
 }
 
 enum CropAspect: String, CaseIterable, Identifiable {

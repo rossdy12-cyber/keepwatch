@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 enum EditorTool: String, CaseIterable, Identifiable {
-    case looks = "Looks", ai = "AI", light = "Light", colour = "Colour", detail = "Detail", crop = "Crop"
+    case looks = "Looks", ai = "AI", light = "Light", colour = "Colour", detail = "Detail", selective = "Masks", crop = "Crop"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -11,6 +11,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .light: return "sun.max"
         case .colour: return "thermometer.medium"
         case .detail: return "triangle"
+        case .selective: return "circle.lefthalf.striped.horizontal"
         case .crop: return "crop.rotate"
         }
     }
@@ -21,6 +22,7 @@ struct EditorView: View {
     @StateObject private var model = EditorModel()
     @Environment(\.dismiss) private var dismiss
     @State private var tool: EditorTool = .looks
+    @State private var selectedMaskID: String?
     @State private var showOriginal = false
     @State private var savedBanner = false
     @State private var confirmClose = false
@@ -37,6 +39,9 @@ struct EditorView: View {
                         .padding(8)
                 } else if model.loading {
                     ProgressView().tint(.white)
+                }
+                if tool == .selective, !showOriginal, let id = selectedMaskID, let bind = maskBinding(id) {
+                    MaskOverlay(mask: bind, imageSize: model.imageSize)
                 }
                 VStack {
                     if showOriginal {
@@ -199,6 +204,8 @@ struct EditorView: View {
             adjustmentList(Adjustment.colour)
         case .detail:
             adjustmentList(Adjustment.detail)
+        case .selective:
+            selectivePanel
         case .crop:
             VStack(spacing: 18) {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -266,6 +273,79 @@ struct EditorView: View {
             .font(.caption)
             .tint(.yellow)
         }
+    }
+
+    // MARK: Selective (local) edits
+
+    private var selectivePanel: some View {
+        VStack(spacing: 10) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Button { addMask(.radial) } label: { maskChip("Radial", "plus.circle") }
+                    Button { addMask(.linear) } label: { maskChip("Graduated", "plus.circle") }
+                    ForEach(Array(model.recipe.masks.enumerated()), id: \.element.id) { index, mask in
+                        Button { selectedMaskID = mask.id } label: {
+                            Text("\(mask.kind.rawValue) \(index + 1)")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(selectedMaskID == mask.id ? Color.yellow : Color.white.opacity(0.1), in: Capsule())
+                                .foregroundStyle(selectedMaskID == mask.id ? .black : .white)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            if let id = selectedMaskID, let bind = maskBinding(id) {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        HStack {
+                            Toggle("Invert", isOn: bind.invert).font(.subheadline).tint(.yellow)
+                            Spacer()
+                            Button(role: .destructive) { deleteMask(id) } label: { Label("Delete", systemImage: "trash") }
+                                .font(.subheadline)
+                        }
+                        ForEach(MaskLayer.adjustments, id: \.name) { adj in
+                            AdjustmentRow(name: adj.name, value: bind[dynamicMember: adj.keyPath], range: adj.range, neutral: 0)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            } else {
+                Text("Add a radial or graduated mask, drag it on the photo, then adjust just that area.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.6))
+                    .padding(.horizontal, 16).frame(maxWidth: .infinity, alignment: .leading)
+                Spacer()
+            }
+        }
+        .padding(.top, 12)
+    }
+
+    private func maskChip(_ title: String, _ icon: String) -> some View {
+        Label(title, systemImage: icon)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color.white.opacity(0.12), in: Capsule())
+            .foregroundStyle(.white)
+    }
+
+    private func addMask(_ kind: MaskLayer.Kind) {
+        let mask = MaskLayer.new(kind)
+        model.recipe.masks.append(mask)
+        selectedMaskID = mask.id
+    }
+
+    private func deleteMask(_ id: String) {
+        model.recipe.masks.removeAll { $0.id == id }
+        selectedMaskID = model.recipe.masks.last?.id
+    }
+
+    private func maskBinding(_ id: String) -> Binding<MaskLayer>? {
+        guard model.recipe.masks.contains(where: { $0.id == id }) else { return nil }
+        return Binding(
+            get: { model.recipe.masks.first(where: { $0.id == id }) ?? MaskLayer.new(.radial) },
+            set: { newValue in
+                if let i = model.recipe.masks.firstIndex(where: { $0.id == id }) { model.recipe.masks[i] = newValue }
+            })
     }
 
     private func adjustmentList(_ adjustments: [Adjustment]) -> some View {

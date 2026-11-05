@@ -127,7 +127,60 @@ enum PhotoRenderer {
     /// - scale: 1 for full resolution, smaller for the on-screen preview.
     static func render(_ source: PhotoSource, recipe: EditRecipe, scale: CGFloat, analysis: AIAnalysis? = nil) -> CIImage? {
         guard let base = develop(source, recipe: recipe, scale: scale) else { return nil }
-        return crop(adjust(base, recipe: recipe, scale: scale, analysis: analysis, isRAW: source.isRAW), recipe: recipe)
+        let adjusted = adjust(base, recipe: recipe, scale: scale, analysis: analysis, isRAW: source.isRAW)
+        return crop(applyMasks(adjusted, recipe: recipe), recipe: recipe)
+    }
+
+    /// Local adjustments: each radial / graduated mask, blended over the photo through its own gradient.
+    static func applyMasks(_ input: CIImage, recipe: EditRecipe) -> CIImage {
+        var image = input
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return image }
+        let minSide = min(extent.width, extent.height)
+        // Normalised (top-left origin) -> Core Image point (bottom-left origin).
+        func point(_ p: CGPoint) -> CIVector {
+            CIVector(x: extent.minX + p.x * extent.width, y: extent.minY + (1 - p.y) * extent.height)
+        }
+        let white = CIColor(red: 1, green: 1, blue: 1), black = CIColor(red: 0, green: 0, blue: 0)
+        for layer in recipe.masks where layer.hasEffect {
+            var mask: CIImage
+            switch layer.kind {
+            case .radial:
+                let outer = max(4, layer.radius * minSide)
+                mask = CIFilter(name: "CIRadialGradient", parameters: [
+                    "inputCenter": point(layer.center),
+                    "inputRadius0": outer * 0.35, "inputRadius1": outer,
+                    "inputColor0": white, "inputColor1": black])?.outputImage ?? CIImage(color: black)
+            case .linear:
+                mask = CIFilter(name: "CILinearGradient", parameters: [
+                    "inputPoint0": point(layer.center), "inputPoint1": point(layer.end),
+                    "inputColor0": white, "inputColor1": black])?.outputImage ?? CIImage(color: black)
+            }
+            mask = mask.cropped(to: extent)
+            if layer.invert { mask = mask.applyingFilter("CIColorInvert").cropped(to: extent) }
+
+            var adjusted = image
+            if layer.exposure != 0 {
+                adjusted = adjusted.applyingFilter("CIExposureAdjust", parameters: ["inputEV": layer.exposure])
+            }
+            if layer.contrast != 0 || layer.saturation != 0 {
+                adjusted = adjusted.applyingFilter("CIColorControls", parameters: [
+                    "inputContrast": 1 + layer.contrast * 0.4, "inputSaturation": 1 + layer.saturation])
+            }
+            if layer.temperature != 0 {
+                adjusted = adjusted.applyingFilter("CITemperatureAndTint", parameters: [
+                    "inputNeutral": CIVector(x: 6500, y: 0),
+                    "inputTargetNeutral": CIVector(x: 6500 - layer.temperature * 2500, y: 0)])
+            }
+            if layer.clarity != 0 {
+                let radius = max(2, minSide * 0.02)
+                adjusted = adjusted.applyingFilter("CIUnsharpMask", parameters: [
+                    "inputRadius": radius, "inputIntensity": layer.clarity * 0.7])
+            }
+            image = adjusted.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: image, kCIInputMaskImageKey: mask]).cropped(to: extent)
+        }
+        return image
     }
 
     /// One video frame: everything except crop, subject pop and background blur.
