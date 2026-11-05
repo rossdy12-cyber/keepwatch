@@ -511,15 +511,16 @@ extension CameraModel {
         case .fireworks:
             setMode(.photo)
             format = format == .jpeg ? .jpeg : .heif
-            setDrive(.longExposure)
-            longExposureSeconds = 2
+            // A single, full-resolution 1-second exposure at low ISO: sharp, clean light trails — far better
+            // than stacking preview-resolution frames (which looked low-res and noisy).
+            setDrive(.single)
             // Focus on the far distance (fireworks are far away and autofocus hunts in the dark).
             if manualFocusSupported { setAutoFocus(false); setLensPosition(1.0) } else { setAutoFocus(true) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self.setAutoExposure(true)
-                self.setExposureBias(-0.7)   // keep the bursts and flames from blowing out; cleaner trails
+                self.setISO(min(self.maxISO, max(self.minISO, 125)))   // low ISO = clean, noise-free sky
+                self.setShutter(min(1.0, self.maxShutter))             // ~1 second captures the trails
             }
-            message = "Fireworks: 2-second light trails, focus set far. Hold steady or rest the phone on something."
+            message = "Fireworks: 1-second exposure, low ISO, focus far. Rest the phone on something solid — a 1-second shot blurs if hand-held."
         case .bonfire:
             setMode(.photo)
             format = format == .jpeg ? .jpeg : .heif
