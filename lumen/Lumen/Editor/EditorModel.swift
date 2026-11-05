@@ -450,6 +450,27 @@ final class EditorModel: ObservableObject {
     func removeBlur(_ id: String) { recipe.blurs.removeAll { $0.id == id } }
     func clearBlurs() { recipe.blurs.removeAll() }
 
+    // MARK: Copy / paste edits (non-destructive)
+
+    @Published var hasCopiedRecipe = RecipeClipboard.hasValue
+
+    /// Copies this photo's look (tone, colour, grade, look) to reuse on other photos.
+    func copyEdits() {
+        RecipeClipboard.copy(recipe)
+        hasCopiedRecipe = true
+        message = "Edits copied. Open another photo and tap Paste."
+    }
+
+    /// Applies the copied edits, keeping this photo's own crop and local (mask/blur) adjustments.
+    func pasteEdits() {
+        guard var copied = RecipeClipboard.stored else { return }
+        copied.aspect = recipe.aspect
+        copied.straighten = recipe.straighten
+        copied.masks = recipe.masks
+        copied.blurs = recipe.blurs
+        recipe = copied
+    }
+
     func reset() {
         recipe = EditRecipe()
     }

@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 
 /// Every adjustment for one photo. All values are 0 when untouched.
-struct EditRecipe: Equatable {
+struct EditRecipe: Equatable, Codable {
     // Light
     var exposure: Double = 0      // -3…3 EV
     var contrast: Double = 0      // -1…1
@@ -44,8 +44,8 @@ struct EditRecipe: Equatable {
 
 /// One local adjustment: a radial or graduated (linear) mask with its own sliders. Geometry is in
 /// normalised image coordinates (0–1, origin top-left of the upright photo).
-struct MaskLayer: Identifiable, Equatable {
-    enum Kind: String, Equatable { case radial = "Radial", linear = "Graduated" }
+struct MaskLayer: Identifiable, Equatable, Codable {
+    enum Kind: String, Equatable, Codable { case radial = "Radial", linear = "Graduated" }
 
     let id: String
     var kind: Kind
@@ -74,7 +74,7 @@ struct MaskLayer: Identifiable, Equatable {
 }
 
 /// 3-way colour grading, like a colourist's wheels. Each wheel tints one tonal range.
-struct ColorGrade: Equatable {
+struct ColorGrade: Equatable, Codable {
     var shadows = GradeWheel()
     var midtones = GradeWheel()
     var highlights = GradeWheel()
@@ -82,7 +82,7 @@ struct ColorGrade: Equatable {
 }
 
 /// One colour wheel: a point in a hue/saturation disc (x,y in -1…1) plus a brightness (luma) for that range.
-struct GradeWheel: Equatable {
+struct GradeWheel: Equatable, Codable {
     var x: Double = 0      // -1…1, right = towards red
     var y: Double = 0      // -1…1, up = away from red (green/blue side)
     var luma: Double = 0   // -1…1, darker…brighter for this tonal range
@@ -123,8 +123,8 @@ struct GradeWheel: Equatable {
 }
 
 /// A region to hide before sharing. Geometry is normalised (0–1, origin top-left of the upright photo).
-struct BlurRegion: Identifiable, Equatable {
-    enum Style: String, Equatable { case blur = "Blur", pixelate = "Pixelate" }
+struct BlurRegion: Identifiable, Equatable, Codable {
+    enum Style: String, Equatable, Codable { case blur = "Blur", pixelate = "Pixelate" }
     let id: String
     var rect: CGRect
     var style: Style = .pixelate
@@ -134,7 +134,7 @@ struct BlurRegion: Identifiable, Equatable {
     }
 }
 
-enum CropAspect: String, CaseIterable, Identifiable {
+enum CropAspect: String, CaseIterable, Identifiable, Codable {
     case original = "Original", square = "1:1", portrait = "4:5", classic = "3:2", wide = "16:9", cinema = "2.39:1"
     var id: String { rawValue }
 

@@ -144,6 +144,15 @@ struct EditorView: View {
             Spacer()
             Button("Reset") { model.reset() }
                 .disabled(model.recipe.isUntouched)
+            Menu {
+                Button { model.copyEdits() } label: { Label("Copy edits", systemImage: "doc.on.doc") }
+                    .disabled(model.recipe.isUntouched)
+                Button { model.pasteEdits() } label: { Label("Paste edits", systemImage: "doc.on.clipboard") }
+                    .disabled(!model.hasCopiedRecipe)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .padding(.leading, 12)
             Button { showExport = true } label: {
                 Image(systemName: "slider.horizontal.3")
             }
