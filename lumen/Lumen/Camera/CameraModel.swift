@@ -1186,15 +1186,6 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
                     self.publishMessage("Couldn't slow the video down; saved it at normal speed.")
                 }
             }
-            // Auto AI enhance: re-render the clip with the enhance look baked in (optional; adds processing time).
-            if Prefs.bool("autoEnhanceVideo", false) {
-                self.publishMessage("Enhancing the video…")
-                if let enhanced = await Self.enhanceVideo(url) {
-                    url = enhanced
-                } else {
-                    self.publishMessage("Couldn't enhance the video; saved it as recorded.")
-                }
-            }
             await self.saveVideo(url, location: place)
         }
     }

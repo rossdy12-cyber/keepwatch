@@ -535,11 +535,9 @@ extension CameraModel {
             setDrive(.single)
             if videoQuality != .uhd30 { setVideoQuality(.uhd30) }
             if stabilization != .standard { stabilization = .standard }
-            if hdrVideoAvailable { hdrVideo = true }
-            Prefs.set("autoEnhanceVideo", true)
             setAutoFocus(true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.setAutoExposure(true) }
-            message = "Low-light video: 4K HDR, stabilised, auto-enhanced. Move slowly for the cleanest footage."
+            message = "Low-light video: 4K, stabilised. Move slowly for the cleanest footage."
         }
         Haptics.success()
     }
