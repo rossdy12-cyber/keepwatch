@@ -52,6 +52,7 @@ struct CameraView: View {
             }
             if camera.panoActive { panoCaptureOverlay }
             if let status = camera.panoStatus { panoStitchOverlay(status) }
+            if camera.remoteActive, let address = camera.remoteAddress { remoteBanner(address) }
         }
         .foregroundStyle(.white)
         .onChange(of: camera.panoResult) { _, data in
@@ -72,9 +73,11 @@ struct CameraView: View {
         .onDisappear {
             camera.stop()
             level.stop()
+            camera.stopRemoteViewfinder()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { camera.start() } else if phase == .background { camera.stop() }
+            if phase == .active { camera.start() }
+            else if phase == .background { camera.stop(); camera.stopRemoteViewfinder() }
         }
         .onChange(of: libraryItem) { _, item in
             guard let item else { return }
@@ -447,6 +450,9 @@ struct CameraView: View {
                     Button { showScanner = true } label: { Label("Scan a document", systemImage: "doc.viewfinder") }
                 }
                 Button { camera.startPano() } label: { Label("Panorama", systemImage: "pano") }
+                Button { camera.toggleRemoteViewfinder() } label: {
+                    Label(camera.remoteActive ? "Stop remote viewfinder" : "Remote viewfinder", systemImage: "wifi")
+                }
             }
         } label: {
             Image(systemName: "square.grid.3x3")
@@ -480,6 +486,27 @@ struct CameraView: View {
             .padding(20)
             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 18))
             .padding(.bottom, 60)
+        }
+    }
+
+    private func remoteBanner(_ address: String) -> some View {
+        VStack {
+            HStack(spacing: 10) {
+                Image(systemName: "wifi")
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Remote viewfinder on").font(.caption.weight(.semibold))
+                    Text(address).font(.caption2.monospaced()).foregroundStyle(.yellow)
+                }
+                Spacer()
+                Button("Stop") { camera.stopRemoteViewfinder() }
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(.white.opacity(0.15), in: Capsule())
+            }
+            .padding(12)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 8)
+            Spacer()
         }
     }
 

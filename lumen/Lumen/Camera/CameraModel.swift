@@ -238,6 +238,11 @@ final class CameraModel: NSObject, ObservableObject {
     let panoContext = CIContext(options: [.cacheIntermediates: false])
     var panoStitchTask: Task<Void, Never>?
     let panoMaxFrames = 24
+    // Remote viewfinder: stream the preview to a browser on the same network, with a remote shutter.
+    @Published var remoteActive = false
+    @Published var remoteAddress: String?
+    var remoteServer: RemoteViewfinder?
+    var lastRemoteFrame = Date.distantPast
     @Published var locationTagging = Prefs.bool("location", false) {
         didSet {
             Prefs.set("location", locationTagging)
@@ -1214,6 +1219,14 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         if panoActive { grabPanoFrame(pixels, rotation: connection.videoRotationAngle) }
+
+        if remoteActive, let server = remoteServer {
+            let now = Date()
+            if now.timeIntervalSince(lastRemoteFrame) >= 0.1 {
+                lastRemoteFrame = now
+                if let jpeg = remoteFrameJPEG(pixels, rotation: connection.videoRotationAngle) { server.broadcast(jpeg) }
+            }
+        }
 
         if let writer = timeLapse, writer.append(sampleBuffer) {
             let frames = writer.frameCount
