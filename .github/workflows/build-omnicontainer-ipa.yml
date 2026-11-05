@@ -28,6 +28,19 @@ jobs:
       - name: Generate the Xcode project
         run: xcodegen generate
 
+      - name: Package the ready-to-open Xcode project (for building on a Mac)
+        run: |
+          cd "$GITHUB_WORKSPACE/omnicontainer"
+          zip -qry "$GITHUB_WORKSPACE/OmniContainer-project.zip" . \
+            -x "build/*" ".git/*" "out/*" "*.o" "*.dylib"
+          ls -lh "$GITHUB_WORKSPACE/OmniContainer-project.zip"
+
+      - name: Upload the Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniContainer-project
+          path: OmniContainer-project.zip
+
       - name: Build OmniContainer (unsigned)
         run: |
           set -o pipefail
