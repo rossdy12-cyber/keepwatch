@@ -81,6 +81,10 @@ struct ImmichGalleryView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var opening = false
     @State private var showLocal = false
+    @State private var selecting = false
+    @State private var selected: Set<String> = []
+    @State private var toast: String?
+    @StateObject private var batch = BatchProcessor()
     var onOpen: (EditSource) -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 2)]
@@ -94,20 +98,43 @@ struct ImmichGalleryView: View {
                     grid
                 }
             }
-            .navigationTitle(model.isConfigured ? "Immich" : "Library")
+            .navigationTitle(selecting ? "\(selected.count) selected" : (model.isConfigured ? "Immich" : "Library"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    if selecting { Button("Cancel") { selecting = false; selected = [] } }
+                    else { Button("Close") { dismiss() } }
+                }
                 if model.isConfigured {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button { Task { await model.reload() } } label: { Image(systemName: "arrow.clockwise") }
+                        if selecting {
+                            Button(selected.count == model.assets.count ? "None" : "All") {
+                                selected = selected.count == model.assets.count ? [] : Set(model.assets.map(\.id))
+                            }
+                        } else {
+                            Menu {
+                                Button { Task { await model.reload() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                                Button { selecting = true } label: { Label("Select & batch-edit", systemImage: "checkmark.circle") }
+                            } label: { Image(systemName: "ellipsis.circle") }
+                        }
                     }
                 }
             }
-            .overlay { if opening { Color.black.opacity(0.5).overlay(ProgressView().tint(.white)).ignoresSafeArea() } }
+            .safeAreaInset(edge: .bottom) { if selecting { batchBar } }
+            .overlay { if opening || batch.running { batchHUD } }
         }
         .preferredColorScheme(.dark)
         .task { if model.assets.isEmpty { await model.reload() } }
+        .onChange(of: batch.finished) { _, text in
+            guard let text else { return }
+            selecting = false
+            selected = []
+            toast = text
+            batch.finished = nil
+        }
+        .alert("Batch edit", isPresented: Binding(get: { toast != nil }, set: { if !$0 { toast = nil } })) {
+            Button("OK", role: .cancel) { toast = nil }
+        } message: { Text(toast ?? "") }
         .fullScreenCover(isPresented: $showLocal) {
             GalleryView { source in
                 showLocal = false
@@ -117,12 +144,61 @@ struct ImmichGalleryView: View {
         }
     }
 
+    @ViewBuilder private var batchBar: some View {
+        let count = selected.count
+        let hasRecipe = RecipeClipboard.hasValue
+        VStack(spacing: 4) {
+            Button {
+                let chosen = model.assets.filter { selected.contains($0.id) }
+                if let recipe = RecipeClipboard.stored { batch.run(assets: chosen, recipe: recipe) }
+            } label: {
+                Text(hasRecipe ? "Apply copied edit to \(count)" : "Copy an edit in the editor first")
+                    .fontWeight(.bold)
+                    .frame(maxWidth: .infinity).padding(.vertical, 12)
+                    .background(count > 0 && hasRecipe ? Color.yellow : Color.white.opacity(0.15), in: Capsule())
+                    .foregroundStyle(count > 0 && hasRecipe ? .black : .white)
+            }
+            .disabled(count == 0 || !hasRecipe || batch.running)
+            Text("Edits a copy of each — your originals are untouched.")
+                .font(.caption2).foregroundStyle(.white.opacity(0.6))
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+    }
+
+    private var batchHUD: some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            VStack(spacing: 14) {
+                if batch.running {
+                    ProgressView(value: batch.progress).tint(.yellow).frame(width: 180)
+                    Text(batch.status).font(.subheadline)
+                } else {
+                    ProgressView().tint(.white)
+                }
+            }
+            .padding(22)
+            .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
     private var grid: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 2) {
                 ForEach(model.assets) { asset in
-                    Button { open(asset) } label: { ImmichThumbnail(asset: asset) }
-                        .task { await model.loadMoreIfNeeded(current: asset) }
+                    Button { tap(asset) } label: {
+                        ImmichThumbnail(asset: asset)
+                            .overlay(alignment: .topLeading) {
+                                if selecting {
+                                    Image(systemName: selected.contains(asset.id) ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(selected.contains(asset.id) ? Color.yellow : .white.opacity(0.9))
+                                        .padding(5).shadow(radius: 2)
+                                }
+                            }
+                            .overlay { if selecting && selected.contains(asset.id) { Color.yellow.opacity(0.18) } }
+                    }
+                    .task { await model.loadMoreIfNeeded(current: asset) }
                 }
             }
             .padding(2)
@@ -155,6 +231,14 @@ struct ImmichGalleryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+
+    private func tap(_ asset: ImmichAsset) {
+        if selecting {
+            if selected.contains(asset.id) { selected.remove(asset.id) } else { selected.insert(asset.id) }
+        } else {
+            open(asset)
+        }
     }
 
     private func open(_ asset: ImmichAsset) {
