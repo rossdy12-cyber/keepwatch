@@ -17,6 +17,7 @@ It also serves the Pi's setup script: on the Pi run the command printed in this 
 
 import io
 import json
+from datetime import datetime, timedelta
 import math
 import os
 import queue
@@ -231,6 +232,283 @@ def speak_piper(clean):
             pass
 
 
+# ---------------------------------------------------------------------------------------------- local skills
+# Alarms, timers, the time, and volume are handled right here on the hub, so they're instant and work
+# even if the Jarvis core is busy or offline. Anything not recognised falls through to the core.
+
+ALARM_CHIME = tone_wav([1047, 1319, 1047, 1319], length=0.18, volume=0.6)
+TIMER_CHIME = tone_wav([880, 1175, 880, 1175, 880], length=0.14, volume=0.55)
+ALARM_MAX_SECONDS = int(os.environ.get("ALARM_MAX_SECONDS", "600"))   # ring at most this long
+SNOOZE_MINUTES = int(os.environ.get("SNOOZE_MINUTES", "9"))
+
+ALARMS_FILE = os.path.join(DATA, "alarms.json")
+alarms_lock = threading.Lock()
+
+def load_alarms():
+    try:
+        with open(ALARMS_FILE) as handle:
+            data = json.load(handle)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+ALARMS = load_alarms()
+
+def save_alarms():
+    try:
+        with open(ALARMS_FILE, "w") as handle:
+            json.dump(ALARMS, handle)
+    except Exception as error:
+        log("Couldn't save alarms: %s" % error)
+
+# Connected Pis, by name, so the scheduler can ring the right one.
+SATELLITES = {}
+satellites_lock = threading.Lock()
+
+WORD_NUMBERS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+                "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+                "thirty": 30, "forty": 40, "fifty": 50, "quarter": 15, "half": 30, "an": 1, "a": 1, "one": 1}
+
+def _num(word):
+    word = word.strip().lower()
+    if word.isdigit():
+        return int(word)
+    return WORD_NUMBERS.get(word)
+
+def parse_alarm_time(text):
+    """Finds a clock time in the text and returns the next datetime it falls on (or None)."""
+    t = text.lower()
+    tomorrow = "tomorrow" in t or "next day" in t
+    pm_hint = any(w in t for w in ["afternoon", "evening", "tonight", "night", "p.m", "pm"])
+    am_hint = any(w in t for w in ["morning", "a.m", "am"])
+    hour = minute = None
+
+    m = re.search(r"\b(\d{1,2})[:.\s](\d{2})\s*(a\.?m\.?|p\.?m\.?)?", t)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        mer = (m.group(3) or "").replace(".", "")
+    else:
+        m = re.search(r"\b(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)", t)
+        if m:
+            hour, minute, mer = int(m.group(1)), 0, m.group(2).replace(".", "")
+        else:
+            oclock = re.search(r"\b(\w+)\s*o'?clock", t)
+            pastto = re.search(r"\b(quarter|half|\w+)\s+(past|to)\s+(\w+)", t)
+            lone = re.search(r"\b(?:at|for)\s+(\w+)", t)
+            if oclock and _num(oclock.group(1)) is not None:
+                hour, minute, mer = _num(oclock.group(1)), 0, ""
+            elif pastto and _num(pastto.group(1)) is not None and _num(pastto.group(3)) is not None:
+                mins, hr = _num(pastto.group(1)), _num(pastto.group(3))
+                if pastto.group(2) == "to":
+                    minute, hour = (60 - mins) % 60, (hr - 1) if mins else hr
+                else:
+                    minute, hour = mins, hr
+                mer = ""
+            elif lone and _num(lone.group(1)) is not None and 0 <= _num(lone.group(1)) <= 23:
+                hour, minute, mer = _num(lone.group(1)), 0, ""
+            else:
+                    return None
+    if hour is None:
+        return None
+    # Apply am/pm.
+    if mer.startswith("p") or (not mer and pm_hint and hour < 12):
+        if hour < 12:
+            hour += 12
+    elif mer.startswith("a") or (not mer and am_hint):
+        if hour == 12:
+            hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if tomorrow:
+        target += timedelta(days=1)
+    elif target <= now + timedelta(seconds=1):
+        target += timedelta(days=1)
+    return target
+
+def parse_duration(text):
+    """Total seconds from phrases like '5 minutes', '1 hour 30 minutes', 'half an hour', '90 seconds'."""
+    t = text.lower()
+    total = 0
+    if "half an hour" in t or "half hour" in t:
+        total += 1800
+    if re.search(r"\b(an|one)\s+hour\b", t) and "half an hour" not in t:
+        total += 3600
+    for value, unit in re.findall(r"(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)", t):
+        value = int(value)
+        if unit.startswith(("hour", "hr")):
+            total += value * 3600
+        elif unit.startswith(("min",)):
+            total += value * 60
+        else:
+            total += value
+    return total if total > 0 else None
+
+def format_when(when):
+    now = datetime.now()
+    clock = when.strftime("%I:%M %p").lstrip("0")
+    if when.date() == now.date():
+        day = "today"
+    elif when.date() == (now + timedelta(days=1)).date():
+        day = "tomorrow"
+    else:
+        day = when.strftime("%A")
+    return "%s %s" % (clock, day)
+
+def add_alarm(name, when, label, kind, repeat="once"):
+    entry = {"id": secrets.token_hex(4), "name": name, "at": when.timestamp(),
+             "label": label, "kind": kind, "repeat": repeat, "enabled": True}
+    with alarms_lock:
+        ALARMS.append(entry)
+        save_alarms()
+    return entry
+
+def scheduler():
+    while True:
+        time.sleep(2)
+        now = time.time()
+        changed = False
+        with alarms_lock:
+            due = [a for a in ALARMS if a.get("enabled") and now >= a["at"]]
+        for alarm in due:
+            with satellites_lock:
+                sat = SATELLITES.get(alarm["name"])
+            fired = False
+            if sat:
+                sat.start_ring(alarm)
+                fired = True
+            if fired or now > alarm["at"] + 600:   # ring it, or give up after 10 min with nobody listening
+                with alarms_lock:
+                    if alarm.get("repeat") == "daily":
+                        alarm["at"] += 86400
+                    else:
+                        alarm["enabled"] = False
+                    changed = True
+        if changed:
+            with alarms_lock:
+                save_alarms()
+
+threading.Thread(target=scheduler, daemon=True).start()
+
+def apply_gain(wav, gain):
+    """Scales a 16-bit PCM WAV's volume (software volume for the Pi)."""
+    if gain >= 0.999:
+        return wav
+    try:
+        with wave.open(io.BytesIO(wav)) as w:
+            channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            frames = w.readframes(w.getnframes())
+        if width != 2:
+            return wav
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) * gain
+        pcm = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w2:
+            w2.setnchannels(channels); w2.setsampwidth(2); w2.setframerate(rate); w2.writeframes(pcm)
+        return out.getvalue()
+    except Exception:
+        return wav
+
+def handle_command(text, sat):
+    """Handles alarms, timers, the time and volume on the hub. Returns True if it dealt with the request."""
+    t = " " + text.lower().strip() + " "
+    say = lambda words: sat.send_audio(speak(words) or BEEP_NOTHING)
+
+    stop_words = re.search(r"\b(stop|cancel|dismiss|snooze|turn (it|that|the alarm|the timer) off|be quiet|silence|enough|shut up)\b", t)
+
+    # Stop or snooze a ringing alarm/timer.
+    if sat.ringing and stop_words:
+        ringing = sat.ringing
+        sat.stop_ring()
+        if "snooze" in t:
+            when = datetime.now() + timedelta(minutes=SNOOZE_MINUTES)
+            add_alarm(sat.name, when, ringing.get("label") or "", ringing.get("kind", "alarm"))
+            say("Snoozing for %d minutes." % SNOOZE_MINUTES)
+        else:
+            say("Alarm off." if ringing.get("kind") != "timer" else "Timer stopped.")
+        return True
+
+    # Cancel scheduled (not currently ringing) alarms/timers.
+    if stop_words and ("alarm" in t or "timer" in t) and "set" not in t and "for" not in t:
+        kind = "timer" if "timer" in t else "alarm"
+        with alarms_lock:
+            mine = [a for a in ALARMS if a["name"] == sat.name and a.get("enabled") and a.get("kind") == kind]
+            for a in mine:
+                a["enabled"] = False
+            save_alarms()
+        say("Cancelled your %s." % kind if len(mine) == 1 else ("Cancelled your %ss." % kind if mine else "You have no %s set." % kind))
+        return True
+
+    # Set a timer.
+    if "timer" in t or (re.search(r"\b(set|start)\b", t) and re.search(r"\bfor\b.*\b(minute|second|hour|min|sec|hr)", t) and "alarm" not in t):
+        seconds = parse_duration(t)
+        if not seconds:
+            say("How long would you like the timer for?")
+            return True
+        when = datetime.now() + timedelta(seconds=seconds)
+        add_alarm(sat.name, when, "", "timer")
+        mins, secs = divmod(seconds, 60)
+        hrs, mins = divmod(mins, 60)
+        parts = [("%d hour%s" % (hrs, "" if hrs == 1 else "s")) if hrs else "",
+                 ("%d minute%s" % (mins, "" if mins == 1 else "s")) if mins else "",
+                 ("%d second%s" % (secs, "" if secs == 1 else "s")) if secs and not hrs else ""]
+        say("Timer set for %s." % " ".join(p for p in parts if p).strip())
+        return True
+
+    # Set an alarm.
+    if "alarm" in t or re.search(r"\b(wake me|set .* for)\b", t):
+        when = parse_alarm_time(t)
+        if not when:
+            say("What time would you like the alarm for?")
+            return True
+        repeat = "daily" if ("every day" in t or "daily" in t or "every morning" in t) else "once"
+        add_alarm(sat.name, when, "", "alarm", repeat)
+        say("Alarm set for %s%s." % (format_when(when), ", every day" if repeat == "daily" else ""))
+        return True
+
+    # List alarms.
+    if re.search(r"\b(what|any|list|my).{0,20}(alarm|timer)", t) or re.search(r"\balarms?\b.{0,10}\?", t):
+        with alarms_lock:
+            mine = sorted([a for a in ALARMS if a["name"] == sat.name and a.get("enabled")], key=lambda a: a["at"])
+        if not mine:
+            say("You have no alarms set.")
+        else:
+            items = ", ".join("%s%s" % (format_when(datetime.fromtimestamp(a["at"])),
+                                        " (timer)" if a.get("kind") == "timer" else "") for a in mine[:5])
+            say("You have %d set: %s." % (len(mine), items))
+        return True
+
+    # The time / date.
+    if re.search(r"\b(what('s| is)? the )?(time|date)\b", t) or "what day" in t or "time is it" in t:
+        now = datetime.now()
+        if "date" in t or "day" in t:
+            say("It's %s." % now.strftime("%A the %d of %B").replace(" 0", " "))
+        else:
+            say("It's %s." % now.strftime("%I:%M %p").lstrip("0"))
+        return True
+
+    # Volume.
+    if re.search(r"\b(volume|louder|quieter|turn (it|the volume) (up|down)|mute|unmute|too (loud|quiet))\b", t):
+        m = re.search(r"(\d{1,3})\s*(percent|%)", t)
+        if "mute" in t and "unmute" not in t:
+            sat.gain = 0.0
+            return True
+        if "unmute" in t or "max" in t:
+            sat.gain = 1.0
+        elif m:
+            sat.gain = max(0.0, min(1.5, int(m.group(1)) / 100.0))
+        elif re.search(r"\b(up|louder|too quiet)\b", t):
+            sat.gain = min(1.5, sat.gain + 0.25)
+        elif re.search(r"\b(down|quieter|too loud)\b", t):
+            sat.gain = max(0.1, sat.gain - 0.25)
+        say("Volume %d percent." % round(sat.gain * 100))
+        return True
+
+    return False
+
+
 def fetch_as_wav(url):
     """The core's own voice recording (usually MP3), converted to WAV for the Pi."""
     if not url.lower().startswith("http"):
@@ -289,15 +567,43 @@ class Satellite:
         self.recorded = 0.0
         self.wait_limit = 5.0
         self.pending = b""
+        self.gain = 1.0
+        self.ringing = None
 
-    def send_audio(self, wav, tail=0.6):
+    def send_audio(self, wav, tail=0.6, mute=True):
         if not wav:
             return
+        wav = apply_gain(wav, self.gain)
         frame = b"A" + struct.pack(">I", len(wav)) + wav
         with self.send_lock:
             self.sock.sendall(frame)
-        # Ignore what the microphone hears while (and just after) the Pi is playing.
-        self.muted_until = max(self.muted_until, time.time()) + wav_seconds(wav) + tail
+        # Ignore what the microphone hears while (and just after) the Pi is playing — but not while an
+        # alarm is ringing, so "Hey Jarvis, stop" can still be heard over it.
+        if mute:
+            self.muted_until = max(self.muted_until, time.time()) + wav_seconds(wav) + tail
+
+    def start_ring(self, alarm):
+        if self.ringing:
+            return
+        self.ringing = alarm
+        threading.Thread(target=self._ring_loop, args=(alarm,), daemon=True).start()
+        log("[%s] %s ringing" % (self.name, alarm.get("kind", "alarm")))
+
+    def stop_ring(self):
+        self.ringing = None
+
+    def _ring_loop(self, alarm):
+        chime = TIMER_CHIME if alarm.get("kind") == "timer" else ALARM_CHIME
+        started = time.time()
+        while self.ringing is alarm and time.time() - started < ALARM_MAX_SECONDS:
+            # Pause the chiming while the person is talking to Jarvis, so their command is heard clearly.
+            if self.state == "wake" and time.time() >= self.muted_until:
+                self.send_audio(chime, tail=0.0, mute=False)
+                time.sleep(1.5)
+            else:
+                time.sleep(0.3)
+        if self.ringing is alarm:
+            self.ringing = None
 
     def feed(self, data):
         self.pending += data
@@ -360,6 +666,12 @@ class Satellite:
                 self.send_audio(BEEP_NOTHING)
                 return
             log("[%s] Heard: %s" % (self.name, text))
+            # Alarms, timers, the time and volume are handled on the hub; everything else goes to the core.
+            try:
+                if handle_command(text, self):
+                    return
+            except Exception as error:
+                log("[%s] Local command error: %s" % (self.name, error))
             try:
                 reply, audio_url = ask_jarvis(text)
             except Exception as error:
@@ -383,6 +695,7 @@ class AudioHandler(socketserver.BaseRequestHandler):
     def handle(self):
         sock = self.request
         sock.settimeout(30)
+        name, satellite = None, None
         try:
             hello = b""
             while not hello.endswith(b"\n") and len(hello) < 512:
@@ -397,6 +710,8 @@ class AudioHandler(socketserver.BaseRequestHandler):
             name = parts[2] if len(parts) > 2 else self.client_address[0]
             log("[%s] Connected from %s" % (name, self.client_address[0]))
             satellite = Satellite(sock, name)
+            with satellites_lock:
+                SATELLITES[name] = satellite
             if GREETING:
                 threading.Thread(target=lambda: satellite.send_audio(speak(GREETING)), daemon=True).start()
             while True:
@@ -407,6 +722,10 @@ class AudioHandler(socketserver.BaseRequestHandler):
         except (OSError, socket.timeout) as error:
             log("Connection ended: %s" % error)
         finally:
+            if name is not None:
+                with satellites_lock:
+                    if SATELLITES.get(name) is satellite:
+                        SATELLITES.pop(name, None)
             log("Disconnected: %s" % self.client_address[0])
 
 

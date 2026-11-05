@@ -13,6 +13,19 @@ its microphone to your NAS and plays what comes back. The NAS does everything el
 Say **"Hey Jarvis"** and wait for the beep. Ask your question, and Jarvis answers through the speaker. A low double
 beep means it didn't catch anything. There's no time limit on answers, unlike Alexa.
 
+### Built-in commands (handled on the hub, so they work even if the core is offline)
+
+- **Alarms:** "set an alarm for 6:30am", "wake me at 7 tomorrow", "alarm for half past six", "set an alarm for
+  7am every day". Stop a ringing alarm with "Hey Jarvis, stop" (or "stop the alarm" / "snooze"). Alarms survive
+  reboots and ring the Pi they were set on. The alarm chimes in bursts with gaps so "Hey Jarvis" is still heard
+  over it.
+- **Timers:** "set a timer for 5 minutes", "timer for 90 seconds", "set a timer for an hour and a half".
+- **The time / date:** "what's the time?", "what day is it?".
+- **Volume:** "volume up", "quieter", "set volume to 50 percent", "mute", "max volume" (software volume, per Pi).
+- **Cancel / list:** "cancel my alarm", "what alarms do I have?".
+
+Anything else is sent on to your Jarvis core as usual.
+
 Tested here end to end with recorded speech: the wake word was detected, "What time is it?" was transcribed, the
 Jarvis core answered, and the spoken reply played on a simulated Pi. Not yet tried on real hardware.
 
