@@ -122,7 +122,16 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var authorised = true
     @Published var lenses: [Lens] = []
     @Published var currentLensID: String?
-    @Published var format: CaptureFormat = .heif
+    @Published var format: CaptureFormat = CaptureFormat(rawValue: Prefs.string("format", "HEIF")) ?? .heif {
+        didSet { Prefs.set("format", format.rawValue) }
+    }
+    /// Full-sensor (48 MP) vs binned (12 MP) photos.
+    @Published var resolution: PhotoResolution = PhotoResolution(rawValue: Prefs.string("resolution", "Max")) ?? .max
+    var sessionWantsMaxResolution = true
+    @Published var maxResolutionAvailable = false
+    /// The biggest resolution this camera can shoot, as "48 MP".
+    @Published var maxResolutionLabel = ""
+    @Published var mirrorFront = Prefs.bool("mirrorFront", false) { didSet { Prefs.set("mirrorFront", mirrorFront) } }
     @Published var proRAW = false
     @Published var rawAvailable = false
     @Published var flash: AVCaptureDevice.FlashMode = .off
@@ -195,7 +204,7 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var isPulling = false
     @Published var focusPullSeconds = Prefs.double("focusPull", 2) { didSet { Prefs.set("focusPull", focusPullSeconds) } }
 
-    @Published var drive: DriveMode = .single
+    @Published var drive: DriveMode = DriveMode(rawValue: Prefs.string("drive", "Single")) ?? .single
     @Published var aspect: CaptureAspect = CaptureAspect(rawValue: Prefs.string("aspect", "4:3")) ?? .fourThree {
         didSet { Prefs.set("aspect", aspect.rawValue) }
     }
@@ -256,6 +265,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     func start() {
         if locationTagging { location.start() }
+        sessionWantsMaxResolution = resolution == .max
         updateAssist()
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -389,12 +399,22 @@ final class CameraModel: NSObject, ObservableObject {
             session.addInput(input)
         }
         let active = device ?? camera
-        // Full-resolution photos from this camera (12 MP for depth, which can't go bigger).
+        // Photo resolution: the full sensor (48 MP on the main camera), or binned ~12 MP. Depth tops out at 12 MP.
         let sizes = active.activeFormat.supportedMaxPhotoDimensions
-        let candidates = portraitSession ? sizes.filter { $0.width <= 4032 } : sizes
-        if let largest = (candidates.isEmpty ? sizes : candidates).max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }) {
-            photoOutput.maxPhotoDimensions = largest
+        let pool = portraitSession ? sizes.filter { $0.width <= 4032 } : sizes
+        let usable = pool.isEmpty ? sizes : pool
+        let area: (CMVideoDimensions) -> Int = { Int($0.width) * Int($0.height) }
+        let biggest = usable.max(by: { area($0) < area($1) })
+        let chosen: CMVideoDimensions?
+        if sessionWantsMaxResolution {
+            chosen = biggest
+        } else {
+            chosen = usable.filter { area($0) <= 12_500_000 }.max(by: { area($0) < area($1) })
+                ?? usable.min(by: { area($0) < area($1) })
         }
+        if let chosen { photoOutput.maxPhotoDimensions = chosen }
+        let hasMax = (biggest.map(area) ?? 0) > 13_000_000
+        let maxLabel = biggest.map { "\(Int((Double(area($0)) / 1_000_000).rounded())) MP" } ?? ""
         photoOutput.maxPhotoQualityPrioritization = .quality
         if photoOutput.isAppleProRAWSupported { photoOutput.isAppleProRAWEnabled = !portraitSession }
         let depth = portraitSession && photoOutput.isDepthDataDeliverySupported
@@ -458,6 +478,8 @@ final class CameraModel: NSObject, ObservableObject {
             self.zoom = initialZoom
             self.lensBase = base
             self.macroActive = macro
+            self.maxResolutionAvailable = hasMax
+            self.maxResolutionLabel = maxLabel
             // A new camera starts in auto; manual values are per-camera.
             self.autoExposure = true
             self.autoWhiteBalance = true
@@ -851,6 +873,17 @@ final class CameraModel: NSObject, ObservableObject {
     func setVideoQuality(_ quality: VideoQuality) {
         videoQuality = quality
         sessionQueue.async { self.applyVideoFormat(announce: true) }
+    }
+
+    /// Full-sensor (48 MP) or binned (12 MP) photos. Re-picks the camera's photo size.
+    func setResolution(_ newResolution: PhotoResolution) {
+        resolution = newResolution
+        Prefs.set("resolution", newResolution.rawValue)
+        let wantsMax = newResolution == .max
+        sessionQueue.async {
+            self.sessionWantsMaxResolution = wantsMax
+            if let device = self.device, self.sessionMode == .photo { self.use(device) }
+        }
     }
 
     private func refreshVideoFormat() {

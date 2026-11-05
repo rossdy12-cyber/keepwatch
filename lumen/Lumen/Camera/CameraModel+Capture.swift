@@ -73,9 +73,16 @@ extension CameraModel {
     }
 
     func rotatePhotoConnection() {
-        if let connection = photoOutput.connection(with: .video), let coordinator = rotationCoordinator {
+        guard let connection = photoOutput.connection(with: .video) else { return }
+        if let coordinator = rotationCoordinator {
             let angle = coordinator.videoRotationAngleForHorizonLevelCapture
             if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
+        }
+        // Mirror selfies so they come out the way you saw them, if that's turned on.
+        if connection.isVideoMirroringSupported {
+            let front = device?.position == .front
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = front && mirrorFront
         }
     }
 
@@ -404,6 +411,7 @@ extension CameraModel {
         guard !intervalRunning, !isBursting, newDrive != drive else { return }
         let wasPortrait = drive == .portrait
         drive = newDrive
+        Prefs.set("drive", newDrive.rawValue)
         if newDrive == .portrait {
             enterPortrait()
         } else if wasPortrait {
@@ -498,7 +506,7 @@ extension CameraModel {
                      lensLabel: lens, effectiveZoom: effectiveZoom, autoExposure: autoExposure, iso: iso, shutter: shutter,
                      exposureBias: exposureBias, autoWhiteBalance: autoWhiteBalance, temperature: temperature, tint: tint,
                      autoFocus: autoFocus, lensPosition: lensPosition, look: look, aspect: aspect.rawValue).save(slot)
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        Haptics.success()
         message = "Saved as C\(slot)."
     }
 

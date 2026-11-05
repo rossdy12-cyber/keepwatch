@@ -6,13 +6,22 @@ struct CameraSettingsSheet: View {
     @Binding var hardwareShutter: Bool
     @Environment(\.dismiss) private var dismiss
     @AppStorage("lumen.camera.stripLocation") private var stripLocation = true
+    @AppStorage("lumen.camera.haptics") private var haptics = true
     @State private var pendingBackups = NASBackup.shared.pendingCount
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
+                    if camera.maxResolutionAvailable {
+                        Picker("Resolution", selection: Binding(get: { camera.resolution }, set: { camera.setResolution($0) })) {
+                            Text("Max (\(camera.maxResolutionLabel))").tag(PhotoResolution.max)
+                            Text("12 MP (smaller, better in low light)").tag(PhotoResolution.standard)
+                        }
+                    }
+                    Toggle("Mirror selfies (front camera)", isOn: $camera.mirrorFront)
                     Toggle("Volume buttons & Camera Control take photos", isOn: $hardwareShutter)
+                    Toggle("Haptic taps", isOn: $haptics)
                     Toggle("Tag photos with location", isOn: $camera.locationTagging)
                     Toggle("Remove location when sharing", isOn: $stripLocation)
                     Toggle("Live Photos", isOn: $camera.livePhoto)
@@ -21,7 +30,7 @@ struct CameraSettingsSheet: View {
                 } header: {
                     Text("Shooting")
                 } footer: {
-                    Text("Hold a volume button in Burst for continuous shots. On iPhone 16, press Camera Control lightly for zoom, exposure and look. Live Photos work in Single drive, and keep their full 4:3 shape (the look is added as an edit). The album needs full Photos access.")
+                    Text("Lumen remembers your last mode, format, drive, shape, look and grid. Max resolution uses the full sensor (48 MP on the main camera); 12 MP is smaller and cleaner in low light. Hold a volume button in Burst for continuous shots. On iPhone 16, press Camera Control lightly for zoom, exposure and look. The album needs full Photos access.")
                 }
 
                 Section {

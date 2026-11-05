@@ -74,7 +74,7 @@ struct CameraPreview: UIViewRepresentable {
         @objc func held(_ gesture: UILongPressGestureRecognizer) {
             guard gesture.state == .began, let view = gesture.view as? PreviewUIView else { return }
             let location = gesture.location(in: view)
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            Haptics.tap(.medium)
             parent.camera.lockFocusAndExposure(at: view.previewLayer.captureDevicePointConverted(fromLayerPoint: location))
             parent.onLock(location)
         }
@@ -98,7 +98,6 @@ final class LevelMonitor: ObservableObject {
     /// Pointing down: how far off flat, −1…1 across and along the screen.
     @Published var tilt = CGPoint.zero
     private let motion = CMMotionManager()
-    private let haptic = UIImpactFeedbackGenerator(style: .light)
     private var wasLevel = false
 
     func start() {
@@ -114,7 +113,7 @@ final class LevelMonitor: ObservableObject {
             self.roll = roll
             self.tilt = CGPoint(x: gravity.x, y: -gravity.y)
             let level = self.flat ? (abs(gravity.x) < 0.015 && abs(gravity.y) < 0.015) : abs(roll) < 1
-            if level && !self.wasLevel { self.haptic.impactOccurred() }
+            if level && !self.wasLevel { Haptics.tap(.light) }
             self.wasLevel = level
         }
     }

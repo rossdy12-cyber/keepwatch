@@ -28,6 +28,8 @@ struct CameraView: View {
     @State private var libraryItem: PhotosPickerItem?
     @State private var editing: EditSource?
     @State private var showSettings = false
+    @State private var showScanner = false
+    @State private var scanToShare: ScanFile?
     @State private var shutterHeld = false
 
     var body: some View {
@@ -89,6 +91,21 @@ struct CameraView: View {
         .sheet(isPresented: $showSettings) {
             CameraSettingsSheet(camera: camera, hardwareShutter: $hardwareShutter)
         }
+        .fullScreenCover(isPresented: $showScanner) {
+            DocumentScannerView { url in
+                showScanner = false
+                if let url { scanToShare = ScanFile(url: url) }
+            }
+            .ignoresSafeArea()
+        }
+        .sheet(item: $scanToShare) { scan in
+            ActivitySheet(items: [scan.url])
+        }
+    }
+
+    private struct ScanFile: Identifiable {
+        let url: URL
+        var id: String { url.absoluteString }
     }
 
     // MARK: Layout
@@ -122,7 +139,7 @@ struct CameraView: View {
                 }
                 if gridStyle != .off { GridOverlay(style: gridStyle) }
                 if camera.mode == .photo && camera.detectCodes {
-                    DetectionOverlay(feed: camera.detection) { camera.requestDocumentScan() }
+                    DetectionOverlay(feed: camera.detection) { showScanner = true }
                 }
                 if camera.mode == .photo && camera.aspect != .fourThree { AspectMask(aspect: camera.aspect) }
                 if showLevel { LevelOverlay(level: level) }
@@ -411,6 +428,11 @@ struct CameraView: View {
                 Toggle("Focus peaking", isOn: $camera.peaking)
                 Toggle("Zebras", isOn: $camera.zebras)
                 Toggle("False colour", isOn: $camera.falseColour)
+            }
+            if DocumentScannerView.isSupported {
+                Section {
+                    Button { showScanner = true } label: { Label("Scan a document", systemImage: "doc.viewfinder") }
+                }
             }
         } label: {
             Image(systemName: "square.grid.3x3")
@@ -814,10 +836,10 @@ struct CameraView: View {
 
     private func shutterPressed() {
         if camera.mode.isVideo {
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            Haptics.tap(.medium)
             camera.toggleRecording()
         } else if camera.intervalRunning || camera.drive == .interval {
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            Haptics.tap(.medium)
             if camera.intervalRunning { camera.toggleInterval() } else { shoot() }
         } else if !shutterBusy {
             shoot()
@@ -841,7 +863,7 @@ struct CameraView: View {
     }
 
     private func takePhoto() {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        Haptics.tap(.medium)
         if camera.drive != .interval {
             flashOverlay = true
             withAnimation(.easeOut(duration: 0.25)) { flashOverlay = false }

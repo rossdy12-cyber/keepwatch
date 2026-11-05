@@ -206,7 +206,7 @@ extension CameraModel {
     func setFocusMark(_ mark: Int) {
         if autoFocus { setLensPosition(lensPosition) }
         if mark == 0 { focusA = lensPosition } else { focusB = lensPosition }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        Haptics.tap(.light)
     }
 
     /// Smoothly racks focus to whichever mark is further away.
