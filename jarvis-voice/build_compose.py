@@ -43,7 +43,16 @@ services:
       WAKE_THRESHOLD: "0.5"
       # Keep listening this many seconds after a reply, so you can carry on without "Hey Jarvis". 0 = off.
       FOLLOW_UP_SECONDS: "0"
+      # How long a pause ends your question. Lower = snappier replies; raise it if it cuts you off mid-sentence.
+      ENDPOINT_SILENCE: "0.75"
       GREETING: Jarvis is listening.
+      # Music: your Navidrome server, so "play Coldplay", "shuffle", "skip", "pause" work on the Pi.
+      # Fill in the same username and password you use in the Jarvis iPhone app (Settings -> Music).
+      NAVIDROME_URL: https://navidrome.nas-server.co.uk
+      NAVIDROME_USER: ""
+      NAVIDROME_PASS: ""
+      # Navidrome transcodes to MP3 at this many kbps before the hub plays it (lighter on the network); "0" = original.
+      NAVIDROME_BITRATE: "320"
       TZ: Europe/London
     command:
       - sh
