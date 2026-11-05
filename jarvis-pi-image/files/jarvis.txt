@@ -24,8 +24,13 @@ HUB_KEY=
 # Tailscale (optional): to reach the NAS over Tailscale, paste an auth key here. Make one at
 # https://login.tailscale.com/admin/settings/keys (a reusable key is handy). The Pi joins your
 # tailnet on first boot as its HOSTNAME below, then this key is blanked. Leave empty to skip Tailscale.
-# (Works on Pi 2/3/4/5 and Zero 2 W. The very old Pi 1 / Zero can't run Tailscale — use the local IP.)
+# (Works on Pi 2/3/4/5 and Zero 2 W. The very old Pi 1 / Zero can't run Tailscale — use WireGuard below.)
 TAILSCALE_AUTHKEY=
+
+# WireGuard (optional): to reach a hub out on the internet (e.g. a VPS) securely — and this works on the
+# old Pi 1 too — put a file called "wireguard.conf" on this same drive. The Pi installs it on first boot
+# (and removes it from the card so the key isn't left on it) and brings the tunnel up. Then set
+# HUB_ADDRESS above to the hub's WireGuard address, e.g. 10.9.0.1. Nothing to fill in here — just the file.
 
 # A login for SSH, if you ever need it (ssh jarvis@jarvis-pi.local). Leave the password empty
 # for no SSH logins at all.

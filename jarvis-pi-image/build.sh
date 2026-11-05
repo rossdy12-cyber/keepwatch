@@ -56,7 +56,7 @@ export DEBIAN_FRONTEND=noninteractive
 # Don't let package install try to start services in the emulated Pi.
 printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; chmod +x /usr/sbin/policy-rc.d
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends alsa-utils python3 curl iw rfkill ca-certificates >/dev/null
+apt-get install -y -qq --no-install-recommends alsa-utils python3 curl iw rfkill ca-certificates wireguard-tools >/dev/null
 # Tailscale (optional at runtime — only used if jarvis.txt has an auth key).
 curl -fsSL https://pkgs.tailscale.com/stable/raspbian/bookworm.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg
 curl -fsSL https://pkgs.tailscale.com/stable/raspbian/bookworm.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list
@@ -88,8 +88,10 @@ install -m 755 "$HERE/files/jarvis-firstboot.sh" "$ROOT/usr/local/sbin/jarvis-se
 install -m 755 "$HERE/files/jarvis-audio.sh" "$ROOT/usr/local/sbin/jarvis-audio"
 install -m 755 "$HERE/files/jarvis-update-client.sh" "$ROOT/usr/local/sbin/jarvis-update-client"
 install -m 755 "$HERE/files/jarvis-tailscale.sh" "$ROOT/usr/local/sbin/jarvis-tailscale"
+install -m 755 "$HERE/files/jarvis-wireguard.sh" "$ROOT/usr/local/sbin/jarvis-wireguard"
 install -m 644 "$HERE/files/jarvis-setup.service" "$ROOT/etc/systemd/system/jarvis-setup.service"
 install -m 644 "$HERE/files/jarvis-tailscale.service" "$ROOT/etc/systemd/system/jarvis-tailscale.service"
+install -m 644 "$HERE/files/jarvis-wireguard.service" "$ROOT/etc/systemd/system/jarvis-wireguard.service"
 install -m 644 "$HERE/files/jarvis-voice.service" "$ROOT/etc/systemd/system/jarvis-voice.service"
 install -m 644 "$HERE/files/jarvis.txt" "$ROOT/boot/firmware/jarvis.txt"
 cat > "$ROOT/boot/firmware/README-JARVIS.txt" <<'TXT'
@@ -99,7 +101,7 @@ it's listening. Then say "Hey Jarvis".
 TXT
 
 chroot "$ROOT" /bin/bash -euo pipefail <<'CHROOT'
-systemctl enable jarvis-setup.service jarvis-tailscale.service jarvis-voice.service ssh.service >/dev/null 2>&1
+systemctl enable jarvis-setup.service jarvis-tailscale.service jarvis-wireguard.service jarvis-voice.service ssh.service >/dev/null 2>&1
 # tailscaled stays disabled; jarvis-tailscale starts it on demand only when Tailscale is actually used,
 # so the old Pi 1 (which can't run Tailscale) never tries to.
 systemctl disable tailscaled.service >/dev/null 2>&1 || true
@@ -115,8 +117,9 @@ echo "== Checking"
 chroot "$ROOT" /usr/bin/python3 -m py_compile /opt/jarvis-voice/jarvis-pi.py
 chroot "$ROOT" /bin/bash -n /usr/local/sbin/jarvis-setup
 chroot "$ROOT" /bin/bash -n /usr/local/sbin/jarvis-tailscale
-chroot "$ROOT" /usr/bin/which arecord aplay amixer curl tailscale >/dev/null
-chroot "$ROOT" systemctl is-enabled jarvis-setup.service jarvis-tailscale.service jarvis-voice.service ssh.service
+chroot "$ROOT" /bin/bash -n /usr/local/sbin/jarvis-wireguard
+chroot "$ROOT" /usr/bin/which arecord aplay amixer curl tailscale wg-quick >/dev/null
+chroot "$ROOT" systemctl is-enabled jarvis-setup.service jarvis-tailscale.service jarvis-wireguard.service jarvis-voice.service ssh.service
 
 echo "== Packing"
 cleanup

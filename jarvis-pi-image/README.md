@@ -21,6 +21,11 @@ It works on every Raspberry Pi, including the Pi 1 B+. No SSH or setup commands 
      can't run Tailscale, so use the local 192.168 address there.
    - `PASSWORD` (optional), if you want SSH logins as `jarvis@jarvis-pi.local`.
 
+   To reach a hub out on the internet (e.g. a VPS), or to connect securely from a Pi 1, use WireGuard:
+   run [`vps-wireguard-setup.sh`](vps-wireguard-setup.sh) on the hub, copy the `wireguard.conf` it prints
+   onto this same drive, and set `HUB_ADDRESS` to the hub's tunnel address (e.g. `10.9.0.1`). Don't expose
+   the hub's `10700`/`10701` ports to the internet — WireGuard carries them privately.
+
    Save it and eject the card.
 4. Put the card in the Pi, plug in the Wi-Fi dongle (if you use one) and the USB speakerphone, and power it on.
    The first start takes a few minutes, because it expands to fill the card and restarts once. Then Jarvis says
@@ -38,6 +43,10 @@ After a password or key has been used, it's replaced with `(saved)`, so it isn't
 - `files/jarvis-tailscale.sh`: runs after the network is up and before Jarvis. If `jarvis.txt` has a
   `TAILSCALE_AUTHKEY`, it joins your Tailscale network (as the Pi's `HOSTNAME`) and then blanks the key.
   Tailscale is pre-installed in the image, so no download is needed at first boot.
+- `files/jarvis-wireguard.sh`: runs after the network is up and before Jarvis. If a `wireguard.conf` is on
+  the boot partition, it installs it to `/etc/wireguard/wg0.conf` (removing the boot copy, so the private
+  key isn't left on the card) and brings the tunnel up. WireGuard is pre-installed and works on every Pi,
+  including the Pi 1 — unlike Tailscale — so it's the way to reach a hub on the internet (e.g. a VPS).
 - `files/jarvis-update-client.sh`: runs before Jarvis starts. It fetches the newest speaker program from the NAS
   and keeps the built-in copy if the NAS can't be reached.
 - `jarvis-voice.service`: the speaker itself. It is the same program the hub's set-up command installs, taken
