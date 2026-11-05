@@ -144,7 +144,38 @@ enum PhotoRenderer {
     static func render(_ source: PhotoSource, recipe: EditRecipe, scale: CGFloat, analysis: AIAnalysis? = nil) -> CIImage? {
         guard let base = develop(source, recipe: recipe, scale: scale) else { return nil }
         let adjusted = adjust(base, recipe: recipe, scale: scale, analysis: analysis, isRAW: source.isRAW)
-        return crop(applyMasks(adjusted, recipe: recipe), recipe: recipe)
+        let masked = applyMasks(adjusted, recipe: recipe)
+        return crop(applyBlurs(masked, recipe: recipe), recipe: recipe)
+    }
+
+    /// Privacy blur: hides each region (face / plate / manual) with a blur or pixelation.
+    static func applyBlurs(_ input: CIImage, recipe: EditRecipe) -> CIImage {
+        guard !recipe.blurs.isEmpty else { return input }
+        var image = input
+        let extent = input.extent
+        guard extent.width > 0, extent.height > 0 else { return input }
+        for region in recipe.blurs {
+            let x = extent.minX + region.rect.minX * extent.width
+            let y = extent.minY + (1 - region.rect.minY - region.rect.height) * extent.height
+            let r = CGRect(x: x, y: y, width: region.rect.width * extent.width, height: region.rect.height * extent.height).integral
+            guard r.width > 1, r.height > 1 else { continue }
+            let patch: CIImage
+            switch region.style {
+            case .blur:
+                let radius = max(4, min(r.width, r.height) * 0.25)
+                patch = image.clampedToExtent()
+                    .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": radius])
+                    .cropped(to: r)
+            case .pixelate:
+                let blockSize = max(8, min(r.width, r.height) / 10)
+                patch = image.clampedToExtent()
+                    .applyingFilter("CIPixellate", parameters: [
+                        "inputCenter": CIVector(x: r.midX, y: r.midY), "inputScale": blockSize])
+                    .cropped(to: r)
+            }
+            image = patch.composited(over: image)
+        }
+        return image.cropped(to: extent)
     }
 
     /// Local adjustments: each radial / graduated mask, blended over the photo through its own gradient.

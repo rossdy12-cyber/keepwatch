@@ -50,6 +50,9 @@ struct EditorView: View {
                 if tool == .selective, !showOriginal, let id = selectedMaskID, let bind = maskBinding(id) {
                     MaskOverlay(mask: bind, imageSize: model.imageSize)
                 }
+                if tool == .ai, !showOriginal, !model.recipe.blurs.isEmpty {
+                    BlurOverlay(regions: model.recipe.blurs, imageSize: model.imageSize) { model.removeBlur($0) }
+                }
                 VStack {
                     if showOriginal {
                         Text("ORIGINAL").font(.caption2.weight(.heavy)).padding(6)
@@ -256,6 +259,7 @@ struct EditorView: View {
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.6))
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    privacySection
                     upscaleSection
                 }
                 .padding(.horizontal, 16)
@@ -291,6 +295,42 @@ struct EditorView: View {
                     .padding(.horizontal, 16)
             }
             .padding(.top, 16)
+        }
+    }
+
+    /// Hide faces and plates/text before sharing (detected on-device with Vision).
+    private var privacySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().overlay(Color.white.opacity(0.2))
+            Text("Privacy blur").font(.subheadline.weight(.semibold))
+            Picker("Style", selection: $model.blurStyle) {
+                Text("Pixelate").tag(BlurRegion.Style.pixelate)
+                Text("Blur").tag(BlurRegion.Style.blur)
+            }
+            .pickerStyle(.segmented)
+            HStack(spacing: 10) {
+                Button { model.addAutoBlur(text: false) } label: {
+                    Label("Blur faces", systemImage: "face.dashed")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 9)
+                        .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                }
+                Button { model.addAutoBlur(text: true) } label: {
+                    Label("Blur text", systemImage: "textformat")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 9)
+                        .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                }
+            }
+            .disabled(model.detectingBlur || model.loading)
+            if !model.recipe.blurs.isEmpty {
+                Button(role: .destructive) { model.clearBlurs() } label: {
+                    Label("Clear \(model.recipe.blurs.count) blur\(model.recipe.blurs.count == 1 ? "" : "s")", systemImage: "trash")
+                        .font(.caption.weight(.semibold))
+                }
+            }
+            Text(model.detectingBlur ? "Looking…" : "Finds faces and text (number plates, signs) on your iPhone and covers them. Tap a box's ✕ to remove it. It's baked in only when you Save or Share.")
+                .font(.caption).foregroundStyle(.white.opacity(0.6))
         }
     }
 

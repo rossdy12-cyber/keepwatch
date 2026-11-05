@@ -33,6 +33,8 @@ struct EditRecipe: Equatable {
     var lookAmount: Double = 1    // 0…1
     // Local adjustments (radial / graduated masks)
     var masks: [MaskLayer] = []
+    // Privacy: regions blurred/pixelated before sharing (faces, plates, manual)
+    var blurs: [BlurRegion] = []
     // Crop
     var aspect: CropAspect = .original
     var straighten: Double = 0    // degrees, -15…15
@@ -117,6 +119,18 @@ struct GradeWheel: Equatable {
         case 4: return (t, p, v)
         default: return (v, p, q)
         }
+    }
+}
+
+/// A region to hide before sharing. Geometry is normalised (0–1, origin top-left of the upright photo).
+struct BlurRegion: Identifiable, Equatable {
+    enum Style: String, Equatable { case blur = "Blur", pixelate = "Pixelate" }
+    let id: String
+    var rect: CGRect
+    var style: Style = .pixelate
+
+    static func make(_ rect: CGRect, style: Style) -> BlurRegion {
+        BlurRegion(id: UUID().uuidString, rect: rect, style: style)
     }
 }
 

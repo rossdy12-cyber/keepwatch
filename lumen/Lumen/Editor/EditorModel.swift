@@ -412,6 +412,44 @@ final class EditorModel: ObservableObject {
         Task { await makeLookThumbnails() }
     }
 
+    // MARK: Privacy blur
+
+    @Published var blurStyle: BlurRegion.Style = .pixelate
+    @Published private(set) var detectingBlur = false
+
+    /// Finds faces (or text/plates) and adds a blur region over each one it doesn't already cover.
+    func addAutoBlur(text: Bool) {
+        guard let source, !detectingBlur else { return }
+        detectingBlur = true
+        var base = recipe
+        base.aspect = .original
+        base.straighten = 0
+        base.blurs = []
+        let analysis = self.analysis
+        let style = blurStyle
+        Task {
+            let image: CIImage? = await withCheckedContinuation { continuation in
+                renderQueue.async {
+                    continuation.resume(returning: PhotoRenderer.render(source, recipe: base, scale: 0.7, analysis: analysis))
+                }
+            }
+            guard let image else { detectingBlur = false; return }
+            let rects = text ? await AutoBlur.text(in: image) : await AutoBlur.faces(in: image)
+            var added = 0
+            for rect in rects where rect.width > 0.01 && rect.height > 0.01 {
+                if !recipe.blurs.contains(where: { $0.rect.intersects(rect) }) {
+                    recipe.blurs.append(BlurRegion.make(rect, style: style))
+                    added += 1
+                }
+            }
+            detectingBlur = false
+            if added == 0 { message = text ? "No text found to blur." : "No faces found." }
+        }
+    }
+
+    func removeBlur(_ id: String) { recipe.blurs.removeAll { $0.id == id } }
+    func clearBlurs() { recipe.blurs.removeAll() }
+
     func reset() {
         recipe = EditRecipe()
     }
