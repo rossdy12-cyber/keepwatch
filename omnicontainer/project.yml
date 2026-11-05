@@ -30,7 +30,7 @@ targets:
     settings:
       base:
         TARGETED_DEVICE_FAMILY: "1,2"
-        PRODUCT_BUNDLE_IDENTIFIER: com.ross.omnicontainer
+        PRODUCT_BUNDLE_IDENTIFIER: com.rossd.jarvishost
         PRODUCT_NAME: OmniContainer
         INFOPLIST_KEY_CFBundleDisplayName: "OmniContainer"
         MARKETING_VERSION: "2.1.0"
@@ -83,7 +83,7 @@ targets:
     settings:
       base:
         TARGETED_DEVICE_FAMILY: "4"
-        PRODUCT_BUNDLE_IDENTIFIER: com.ross.omnicontainer.watchkitapp
+        PRODUCT_BUNDLE_IDENTIFIER: com.rossd.jarvishost.watchkitapp
         PRODUCT_NAME: OmniWatch
         MARKETING_VERSION: "2.1.0"
         CURRENT_PROJECT_VERSION: "2"
@@ -93,7 +93,7 @@ targets:
       properties:
         CFBundleDisplayName: "J.A.R.V.I.S."
         WKApplication: true
-        WKCompanionAppBundleIdentifier: com.ross.omnicontainer
+        WKCompanionAppBundleIdentifier: com.rossd.jarvishost
         WKRunsIndependentlyOfCompanionApp: true
         WKBackgroundModes:
           - self-care
@@ -112,7 +112,7 @@ targets:
     settings:
       base:
         TARGETED_DEVICE_FAMILY: "4"
-        PRODUCT_BUNDLE_IDENTIFIER: com.ross.omnicontainer.watchkitapp.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: com.rossd.jarvishost.watchkitapp.widgets
         PRODUCT_NAME: OmniWatchWidgets
         MARKETING_VERSION: "2.1.0"
         CURRENT_PROJECT_VERSION: "2"
