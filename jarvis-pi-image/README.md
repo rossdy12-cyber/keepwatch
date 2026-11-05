@@ -12,8 +12,13 @@ It works on every Raspberry Pi, including the Pi 1 B+. No SSH or setup commands 
 3. When it's done, take the card out and put it back in. A drive called **bootfs** appears. Open **jarvis.txt** in
    Notepad, fill in:
    - `WIFI_NAME` and `WIFI_PASSWORD`. Leave both empty if the Pi is on an Ethernet cable.
-   - `HUB_ADDRESS`: your NAS's 192.168.x.x address.
+   - `HUB_ADDRESS`: your NAS's address — its 192.168.x.x address at home, or its Tailscale 100.x.x.x
+     address if you're using Tailscale.
    - `HUB_KEY`: from TrueNAS → Apps → **jarvis-voice** → Logs, the part after `token=`.
+   - `TAILSCALE_AUTHKEY` (optional): to put the Pi on your Tailscale network, paste an auth key from
+     <https://login.tailscale.com/admin/settings/keys>. The Pi joins on first boot (as its `HOSTNAME`) and
+     the key is then blanked. Leave empty to skip. Works on Pi 2/3/4/5 and Zero 2 W; the old Pi 1 / Zero
+     can't run Tailscale, so use the local 192.168 address there.
    - `PASSWORD` (optional), if you want SSH logins as `jarvis@jarvis-pi.local`.
 
    Save it and eject the card.
@@ -30,6 +35,9 @@ After a password or key has been used, it's replaced with `(saved)`, so it isn't
   NetworkManager), the Wi-Fi country, the name, the hub address and key (`/etc/jarvis-voice.env`), and the login.
 - `files/jarvis-audio.sh`: runs before Jarvis starts. It finds the USB speakerphone and makes it the default
   microphone and speaker.
+- `files/jarvis-tailscale.sh`: runs after the network is up and before Jarvis. If `jarvis.txt` has a
+  `TAILSCALE_AUTHKEY`, it joins your Tailscale network (as the Pi's `HOSTNAME`) and then blanks the key.
+  Tailscale is pre-installed in the image, so no download is needed at first boot.
 - `files/jarvis-update-client.sh`: runs before Jarvis starts. It fetches the newest speaker program from the NAS
   and keeps the built-in copy if the NAS can't be reached.
 - `jarvis-voice.service`: the speaker itself. It is the same program the hub's set-up command installs, taken
@@ -38,4 +46,5 @@ After a password or key has been used, it's replaced with `(saved)`, so it isn't
   adds the above and compresses the result. GitHub Actions runs it, and it can also be run by hand on any
   Linux PC with root access.
 
-No Wi-Fi password, key or login is in the image itself.
+No Wi-Fi password, hub key, Tailscale auth key or login is in the image itself — each is blanked on the card
+once it has been used.

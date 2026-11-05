@@ -53,8 +53,17 @@ mount --bind /etc/resolv.conf "$ROOT/etc/resolv.conf" 2>/dev/null || true
 echo "== Installing what Jarvis needs (in an emulated Pi)"
 chroot "$ROOT" /bin/bash -euo pipefail <<'CHROOT'
 export DEBIAN_FRONTEND=noninteractive
+# Don't let package install try to start services in the emulated Pi.
+printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; chmod +x /usr/sbin/policy-rc.d
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends alsa-utils python3 curl iw rfkill >/dev/null
+apt-get install -y -qq --no-install-recommends alsa-utils python3 curl iw rfkill ca-certificates >/dev/null
+# Tailscale (optional at runtime — only used if jarvis.txt has an auth key).
+curl -fsSL https://pkgs.tailscale.com/stable/raspbian/bookworm.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+curl -fsSL https://pkgs.tailscale.com/stable/raspbian/bookworm.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list
+apt-get update -qq
+apt-get install -y -qq tailscale || true   # postinst may grumble in a chroot; the binary is what matters
+command -v tailscale >/dev/null || { echo "tailscale install failed"; exit 1; }
+rm -f /usr/sbin/policy-rc.d
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 CHROOT
@@ -78,7 +87,9 @@ python3 -m py_compile "$ROOT/opt/jarvis-voice/jarvis-pi.py"
 install -m 755 "$HERE/files/jarvis-firstboot.sh" "$ROOT/usr/local/sbin/jarvis-setup"
 install -m 755 "$HERE/files/jarvis-audio.sh" "$ROOT/usr/local/sbin/jarvis-audio"
 install -m 755 "$HERE/files/jarvis-update-client.sh" "$ROOT/usr/local/sbin/jarvis-update-client"
+install -m 755 "$HERE/files/jarvis-tailscale.sh" "$ROOT/usr/local/sbin/jarvis-tailscale"
 install -m 644 "$HERE/files/jarvis-setup.service" "$ROOT/etc/systemd/system/jarvis-setup.service"
+install -m 644 "$HERE/files/jarvis-tailscale.service" "$ROOT/etc/systemd/system/jarvis-tailscale.service"
 install -m 644 "$HERE/files/jarvis-voice.service" "$ROOT/etc/systemd/system/jarvis-voice.service"
 install -m 644 "$HERE/files/jarvis.txt" "$ROOT/boot/firmware/jarvis.txt"
 cat > "$ROOT/boot/firmware/README-JARVIS.txt" <<'TXT'
@@ -88,7 +99,8 @@ it's listening. Then say "Hey Jarvis".
 TXT
 
 chroot "$ROOT" /bin/bash -euo pipefail <<'CHROOT'
-systemctl enable jarvis-setup.service jarvis-voice.service ssh.service >/dev/null 2>&1
+systemctl enable jarvis-setup.service jarvis-tailscale.service jarvis-voice.service ssh.service >/dev/null 2>&1
+systemctl enable tailscaled.service >/dev/null 2>&1 || true
 # jarvis.txt makes the login, so skip the first-boot "create a user" prompt.
 systemctl mask userconfig.service >/dev/null 2>&1 || true
 # Debian's default would otherwise open a console wizard asking for a keyboard layout.
@@ -100,8 +112,9 @@ sed -i -E 's/^pi:[^:]*:/pi:*:/' "$ROOT/etc/shadow" 2>/dev/null || true
 echo "== Checking"
 chroot "$ROOT" /usr/bin/python3 -m py_compile /opt/jarvis-voice/jarvis-pi.py
 chroot "$ROOT" /bin/bash -n /usr/local/sbin/jarvis-setup
-chroot "$ROOT" /usr/bin/which arecord aplay amixer curl >/dev/null
-chroot "$ROOT" systemctl is-enabled jarvis-setup.service jarvis-voice.service ssh.service
+chroot "$ROOT" /bin/bash -n /usr/local/sbin/jarvis-tailscale
+chroot "$ROOT" /usr/bin/which arecord aplay amixer curl tailscale >/dev/null
+chroot "$ROOT" systemctl is-enabled jarvis-setup.service jarvis-tailscale.service jarvis-voice.service ssh.service
 
 echo "== Packing"
 cleanup

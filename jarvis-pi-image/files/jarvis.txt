@@ -15,10 +15,17 @@ WIFI_PASSWORD=
 # Two-letter country code, for the Wi-Fi rules (GB for the UK).
 WIFI_COUNTRY=GB
 
-# Your NAS's local address (the 192.168.x.x one on the TrueNAS dashboard's Network card).
+# Your NAS's address. Use its 192.168.x.x address if the Pi is on the same network at home, or its
+# Tailscale 100.x.x.x address if you're connecting over Tailscale (see below).
 HUB_ADDRESS=
 # The key from TrueNAS: Apps -> jarvis-voice -> Logs. It's the part after token= in the Pi command.
 HUB_KEY=
+
+# Tailscale (optional): to reach the NAS over Tailscale, paste an auth key here. Make one at
+# https://login.tailscale.com/admin/settings/keys (a reusable key is handy). The Pi joins your
+# tailnet on first boot as its HOSTNAME below, then this key is blanked. Leave empty to skip Tailscale.
+# (Works on Pi 2/3/4/5 and Zero 2 W. The very old Pi 1 / Zero can't run Tailscale — use the local IP.)
+TAILSCALE_AUTHKEY=
 
 # A login for SSH, if you ever need it (ssh jarvis@jarvis-pi.local). Leave the password empty
 # for no SSH logins at all.
