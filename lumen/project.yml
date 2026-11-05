@@ -117,7 +117,10 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         WKApplication: true
-        WKCompanionAppBundleIdentifier: app.lumen.camera
+        # SideStore re-signs Lumen and appends the free team ID to its bundle ID
+        # (app.lumen.camera -> app.lumen.camera.N2X67JY7VV) but does NOT rewrite this
+        # companion key, so it must already carry the team-suffixed ID to match.
+        WKCompanionAppBundleIdentifier: app.lumen.camera.N2X67JY7VV
         WKRunsIndependentlyOfCompanionApp: true
         WKBackgroundModes:
           - self-care
