@@ -7,6 +7,8 @@ struct CameraSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("lumen.camera.stripLocation") private var stripLocation = true
     @AppStorage("lumen.camera.haptics") private var haptics = true
+    @AppStorage("lumen.camera.autoEnhance") private var autoEnhance = true
+    @AppStorage("lumen.camera.autoEnhanceVideo") private var autoEnhanceVideo = false
     @AppStorage("lumen.camera.saveTarget") private var saveTarget = SaveTarget.immich.rawValue
     @State private var pendingBackups = NASBackup.shared.pendingCount
     @State private var immich = ImmichSettings.load()
@@ -24,6 +26,8 @@ struct CameraSettingsSheet: View {
                             Text("12 MP (smaller, better in low light)").tag(PhotoResolution.standard)
                         }
                     }
+                    Toggle("Auto-enhance photos", isOn: $autoEnhance)
+                    Toggle("Auto-enhance videos (slower saving)", isOn: $autoEnhanceVideo)
                     Toggle("Mirror selfies (front camera)", isOn: $camera.mirrorFront)
                     Toggle("Volume buttons & Camera Control take photos", isOn: $hardwareShutter)
                     Toggle("Haptic taps", isOn: $haptics)

@@ -38,6 +38,25 @@ enum PhotoSaver {
     /// back to the Photos library so nothing is ever lost (see `effectivePhotosSave`).
     static var saveTarget: SaveTarget { SaveTarget(rawValue: Prefs.string("saveTarget", SaveTarget.immich.rawValue)) ?? .immich }
 
+    static var autoEnhanceOn: Bool { Prefs.bool("autoEnhance", true) }
+
+    /// Apple's on-device auto-enhance (face-aware tone, vibrance, highlight/shadow), baked into a new HEIC.
+    /// Returns the enhanced data, or the original if it couldn't be improved. Done in the background after capture,
+    /// so it doesn't slow the shutter.
+    static func autoEnhanced(_ data: Data) -> Data {
+        guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return data }
+        let filters = AIAnalyser.autoFilters(for: image)
+        guard !filters.isEmpty else { return data }
+        var enhanced = image
+        for step in filters { enhanced = enhanced.applyingFilter(step.name, parameters: step.parameters) }
+        enhanced = enhanced.cropped(to: image.extent)
+        var properties = image.properties
+        properties[kCGImagePropertyOrientation as String] = 1
+        let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!
+        return context.heifRepresentation(of: enhanced.settingProperties(properties), format: .RGBA8, colorSpace: space,
+                                          options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92]) ?? data
+    }
+
     /// Whether this capture should also go to the Photos library. True when the target asks for
     /// Photos, or when it only asks for Immich but Immich isn't configured (so we keep a copy).
     private static func effectivePhotosSave(_ target: SaveTarget) -> Bool {

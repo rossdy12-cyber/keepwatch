@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import UIKit
 
 extension CameraModel {
@@ -233,6 +234,42 @@ extension CameraModel {
     // MARK: Slow motion
 
     /// Stretches a high-frame-rate clip so it plays back at 30 fps (every captured frame shown), sound slowed to match.
+    /// The standard "auto enhance" look for video: lifted shadows, tamed highlights, a little more punch.
+    static var enhanceRecipe: EditRecipe {
+        var recipe = EditRecipe()
+        recipe.shadows = 0.25
+        recipe.highlights = -0.2
+        recipe.vibrance = 0.25
+        recipe.contrast = 0.1
+        recipe.clarity = 0.15
+        return recipe
+    }
+
+    /// Re-renders a finished video with the auto-enhance look baked in. Returns a new file, or nil on failure.
+    static func enhanceVideo(_ url: URL) async -> URL? {
+        let asset = AVURLAsset(url: url)
+        let recipe = enhanceRecipe
+        do {
+            guard try await asset.loadTracks(withMediaType: .video).first != nil else { return nil }
+            let composition = try await AVVideoComposition.videoComposition(with: asset) { request in
+                let output = PhotoRenderer.renderVideoFrame(request.sourceImage, recipe: recipe, analysis: nil)
+                request.finish(with: output, context: nil)
+            }
+            guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHEVCHighestQuality)
+                    ?? AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return nil }
+            let output = FileManager.default.temporaryDirectory.appendingPathComponent("Lumen-enhanced-\(UUID().uuidString).mov")
+            export.outputURL = output
+            export.outputFileType = .mov
+            export.videoComposition = composition
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                export.exportAsynchronously { continuation.resume() }
+            }
+            return export.status == .completed ? output : nil
+        } catch {
+            return nil
+        }
+    }
+
     static func slowMotion(_ url: URL, capturedFPS: Double) async -> URL? {
         let asset = AVURLAsset(url: url)
         do {

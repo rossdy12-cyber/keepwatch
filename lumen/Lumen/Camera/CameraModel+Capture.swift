@@ -111,7 +111,9 @@ extension CameraModel {
         if !speed { settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions }
         // Bayer RAW is the sensor's data as it is: no multi-frame processing or flash.
         if !isBayer {
-            settings.photoQualityPrioritization = speed ? .speed : .quality
+            // .balanced (not .quality) for single shots: in good light it's visually the same but the
+            // shutter is near-instant instead of running slow multi-frame fusion. Burst stays on .speed.
+            settings.photoQualityPrioritization = speed ? .speed : .balanced
             if photoOutput.supportedFlashModes.contains(flash) { settings.flashMode = flash }
         }
         // Portrait: depth and the person cut-out go into the photo, for background blur in the editor.
@@ -497,6 +499,49 @@ extension CameraModel {
             macroFarTicks = lensPosition >= 0.4 ? macroFarTicks + 1 : 0
             if macroFarTicks >= 10 { setMacro(false, automatic: true) }
         }
+    }
+
+    // MARK: Scene presets (one-tap setups for tricky scenes)
+
+    /// Sets the camera up for a scene in one tap. Uses the normal controls, so you can still tweak after.
+    func applyScene(_ scene: CameraScene) {
+        guard !isRecording, !intervalRunning, !isBursting else { return }
+        flash = .off
+        switch scene {
+        case .fireworks:
+            setMode(.photo)
+            format = format == .jpeg ? .jpeg : .heif
+            setDrive(.longExposure)
+            longExposureSeconds = 2
+            // Focus on the far distance (fireworks are far away and autofocus hunts in the dark).
+            if manualFocusSupported { setAutoFocus(false); setLensPosition(1.0) } else { setAutoFocus(true) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.setAutoExposure(true)
+                self.setExposureBias(-0.7)   // keep the bursts and flames from blowing out; cleaner trails
+            }
+            message = "Fireworks: 2-second light trails, focus set far. Hold steady or rest the phone on something."
+        case .bonfire:
+            setMode(.photo)
+            format = format == .jpeg ? .jpeg : .heif
+            setDrive(.night)
+            setAutoFocus(true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.setAutoExposure(true)
+                self.setExposureBias(-0.3)   // brighten the dark but keep detail in the flames
+            }
+            message = "Bonfire night mode: brightens the dark and keeps the flames. Hold still for a moment per shot."
+        case .darkVideo:
+            setMode(.video)
+            setDrive(.single)
+            if videoQuality != .uhd30 { setVideoQuality(.uhd30) }
+            if stabilization != .standard { stabilization = .standard }
+            if hdrVideoAvailable { hdrVideo = true }
+            Prefs.set("autoEnhanceVideo", true)
+            setAutoFocus(true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.setAutoExposure(true) }
+            message = "Low-light video: 4K HDR, stabilised, auto-enhanced. Move slowly for the cleanest footage."
+        }
+        Haptics.success()
     }
 
     // MARK: Custom presets (C1–C3)

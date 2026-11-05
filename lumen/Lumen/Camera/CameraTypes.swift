@@ -78,6 +78,21 @@ struct MicOption: Identifiable, Hashable {
     let dataSourceID: NSNumber?
 }
 
+/// One-tap setups for tricky scenes (e.g. bonfire night).
+enum CameraScene: String, CaseIterable, Identifiable {
+    case fireworks = "Fireworks"
+    case bonfire = "Bonfire / night photo"
+    case darkVideo = "Low-light video"
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .fireworks: return "sparkles"
+        case .bonfire: return "flame"
+        case .darkVideo: return "video"
+        }
+    }
+}
+
 /// Everything a C1/C2/C3 button remembers.
 struct CameraPreset: Codable, Equatable {
     var mode: String

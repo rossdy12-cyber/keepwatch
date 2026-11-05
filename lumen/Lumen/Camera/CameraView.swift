@@ -445,6 +445,11 @@ struct CameraView: View {
                 Toggle("Zebras", isOn: $camera.zebras)
                 Toggle("False colour", isOn: $camera.falseColour)
             }
+            Section("Scenes") {
+                ForEach(CameraScene.allCases) { scene in
+                    Button { camera.applyScene(scene) } label: { Label(scene.rawValue, systemImage: scene.icon) }
+                }
+            }
             Section {
                 if DocumentScannerView.isSupported {
                     Button { showScanner = true } label: { Label("Scan a document", systemImage: "doc.viewfinder") }

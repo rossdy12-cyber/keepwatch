@@ -75,6 +75,9 @@ final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
             // Shape and look as a Photos edit for proxies and Live Photos (their files can't be changed);
             // otherwise cropped into the HEIF/JPEG. RAW files always keep the whole sensor.
             let editLater = options.editInPhotos || proxy != nil || movie != nil
+            // Auto AI enhance (Apple's on-device auto-adjust), baked into normal HEIF/JPEG shots. Skipped for
+            // RAW, proxies and Live Photos (which keep their original file). Runs after the shutter, so no lag.
+            if !editLater, PhotoSaver.autoEnhanceOn, let data = processed { processed = PhotoSaver.autoEnhanced(data) }
             if !editLater, let data = processed, options.allowCrop { processed = PhotoSaver.crop(data, to: options.aspect) }
             var resources: [(PHAssetResourceType, Data)] = []
             if let proxy {

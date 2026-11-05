@@ -126,9 +126,11 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var format: CaptureFormat = CaptureFormat(rawValue: Prefs.string("format", "HEIF")) ?? .heif {
         didSet { Prefs.set("format", format.rawValue) }
     }
-    /// Full-sensor (48 MP) vs binned (12 MP) photos.
-    @Published var resolution: PhotoResolution = PhotoResolution(rawValue: Prefs.string("resolution", "Max")) ?? .max
-    var sessionWantsMaxResolution = true
+    /// Full-sensor (48 MP) vs binned (12 MP) photos. Defaults to 12 MP: it's much faster to capture and
+    /// process (full-sensor 48 MP shots take a couple of seconds), and cleaner in low light. Opt into Max
+    /// in Camera settings when you want the extra detail.
+    @Published var resolution: PhotoResolution = PhotoResolution(rawValue: Prefs.string("resolution", "12 MP")) ?? .standard
+    var sessionWantsMaxResolution = false
     @Published var maxResolutionAvailable = false
     /// The biggest resolution this camera can shoot, as "48 MP".
     @Published var maxResolutionLabel = ""
@@ -1182,6 +1184,15 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
                     self.publishMessage("Slow motion saved (\(Int(fps.rounded())) fps played at 30, with slowed sound).")
                 } else {
                     self.publishMessage("Couldn't slow the video down; saved it at normal speed.")
+                }
+            }
+            // Auto AI enhance: re-render the clip with the enhance look baked in (optional; adds processing time).
+            if Prefs.bool("autoEnhanceVideo", false) {
+                self.publishMessage("Enhancing the video…")
+                if let enhanced = await Self.enhanceVideo(url) {
+                    url = enhanced
+                } else {
+                    self.publishMessage("Couldn't enhance the video; saved it as recorded.")
                 }
             }
             await self.saveVideo(url, location: place)
