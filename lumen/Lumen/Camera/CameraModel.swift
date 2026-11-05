@@ -1170,10 +1170,12 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
             publishMessage("Recording failed: \(error.localizedDescription)")
             return
         }
-        let place = DispatchQueue.main.sync { self.locationTagging ? self.location.latest : nil }
+        // Read the few settings we need without DispatchQueue.main.sync: this delegate can be called on the
+        // main thread, and a sync onto main from main deadlocks (the app would be killed and nothing saved).
+        let place = locationTagging ? location.latest : nil
+        let editable = slowMoEditable
         Task {
             var url = outputFileURL
-            let editable = DispatchQueue.main.sync { self.slowMoEditable }
             if recordedMode == .slowMo, fps > 31, editable {
                 // Saved at its full frame rate, sound included: Photos plays it as Slo-mo, and you can move the slow part there.
                 self.publishMessage("Slo-mo saved at \(Int(fps.rounded())) fps. In Photos, tap Edit to choose the slow part.")
