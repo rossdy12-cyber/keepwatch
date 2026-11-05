@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 enum EditorTool: String, CaseIterable, Identifiable {
-    case looks = "Looks", ai = "AI", light = "Light", colour = "Colour", detail = "Detail", selective = "Masks", crop = "Crop"
+    case looks = "Looks", ai = "AI", light = "Light", colour = "Colour", grade = "Grade", detail = "Detail", selective = "Masks", crop = "Crop"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -10,6 +10,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .ai: return "wand.and.stars"
         case .light: return "sun.max"
         case .colour: return "thermometer.medium"
+        case .grade: return "paintpalette"
         case .detail: return "triangle"
         case .selective: return "circle.lefthalf.striped.horizontal"
         case .crop: return "crop.rotate"
@@ -211,6 +212,8 @@ struct EditorView: View {
             adjustmentList(Adjustment.light)
         case .colour:
             adjustmentList(Adjustment.colour)
+        case .grade:
+            gradePanel
         case .detail:
             adjustmentList(Adjustment.detail)
         case .selective:
@@ -300,6 +303,37 @@ struct EditorView: View {
             }
             .font(.caption)
             .tint(.yellow)
+        }
+    }
+
+    // MARK: Colour grading
+
+    private var gradePanel: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ColorWheelView(title: "Shadows",
+                                       x: $model.recipe.grade.shadows.x,
+                                       y: $model.recipe.grade.shadows.y,
+                                       luma: $model.recipe.grade.shadows.luma)
+                        ColorWheelView(title: "Midtones",
+                                       x: $model.recipe.grade.midtones.x,
+                                       y: $model.recipe.grade.midtones.y,
+                                       luma: $model.recipe.grade.midtones.luma)
+                        ColorWheelView(title: "Highlights",
+                                       x: $model.recipe.grade.highlights.x,
+                                       y: $model.recipe.grade.highlights.y,
+                                       luma: $model.recipe.grade.highlights.luma)
+                    }
+                    .padding(.horizontal, 16)
+                }
+                Text("Drag each wheel to push colour into the darks, mids and brights; the slider under each sets that range's brightness. Great for film looks and matching shots.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+            }
+            .padding(.vertical, 14)
         }
     }
 

@@ -26,6 +26,8 @@ struct EditRecipe: Equatable {
     var subjectPop: Double = 0      // 0…1
     var backgroundBlur: Double = 0  // 0…1
     var noiseReduction: Double = 0  // 0…1
+    // Colour grading (3-way wheels: shadows / midtones / highlights)
+    var grade = ColorGrade()
     // Look
     var look: String = Look.none.id
     var lookAmount: Double = 1    // 0…1
@@ -67,6 +69,55 @@ struct MaskLayer: Identifiable, Equatable {
         ("Temperature", -1...1, \.temperature),
         ("Clarity", -1...1, \.clarity),
     ]
+}
+
+/// 3-way colour grading, like a colourist's wheels. Each wheel tints one tonal range.
+struct ColorGrade: Equatable {
+    var shadows = GradeWheel()
+    var midtones = GradeWheel()
+    var highlights = GradeWheel()
+    var hasEffect: Bool { shadows.hasEffect || midtones.hasEffect || highlights.hasEffect }
+}
+
+/// One colour wheel: a point in a hue/saturation disc (x,y in -1…1) plus a brightness (luma) for that range.
+struct GradeWheel: Equatable {
+    var x: Double = 0      // -1…1, right = towards red
+    var y: Double = 0      // -1…1, up = away from red (green/blue side)
+    var luma: Double = 0   // -1…1, darker…brighter for this tonal range
+
+    var hasEffect: Bool { x != 0 || y != 0 || luma != 0 }
+
+    /// The small RGB offset this wheel applies: a zero-sum colour tint, plus the brightness shift.
+    var offset: (r: Double, g: Double, b: Double) {
+        var r = 0.0, g = 0.0, b = 0.0
+        let sat = min(1, (x * x + y * y).squareRoot())
+        if sat > 0.0001 {
+            var hue = atan2(y, x) / (2 * .pi)
+            if hue < 0 { hue += 1 }
+            let (cr, cg, cb) = Self.hsvToRGB(hue, 1, 1)
+            let mean = (cr + cg + cb) / 3
+            let scale = sat * 0.3
+            r = (cr - mean) * scale
+            g = (cg - mean) * scale
+            b = (cb - mean) * scale
+        }
+        let l = luma * 0.2
+        return (r + l, g + l, b + l)
+    }
+
+    static func hsvToRGB(_ h: Double, _ s: Double, _ v: Double) -> (Double, Double, Double) {
+        let sector = min(5, max(0, Int(h * 6)))
+        let f = h * 6 - Double(Int(h * 6))
+        let p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s)
+        switch sector {
+        case 0: return (v, t, p)
+        case 1: return (q, v, p)
+        case 2: return (p, v, t)
+        case 3: return (p, q, v)
+        case 4: return (t, p, v)
+        default: return (v, p, q)
+        }
+    }
 }
 
 enum CropAspect: String, CaseIterable, Identifiable {

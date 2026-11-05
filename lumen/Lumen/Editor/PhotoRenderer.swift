@@ -124,6 +124,19 @@ enum PhotoRenderer {
     static let context = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!,
                                              .cacheIntermediates: false])
 
+    /// 3-way colour grading kernel: adds each wheel's colour offset, weighted by the pixel's luminance.
+    static let gradeKernel: CIColorKernel? = CIColorKernel(source: """
+    kernel vec4 lumenGrade(__sample s, vec3 shadow, vec3 mid, vec3 high) {
+        vec3 c = s.rgb;
+        float L = dot(c, vec3(0.299, 0.587, 0.114));
+        float ws = clamp(1.0 - L * 2.0, 0.0, 1.0);
+        float wh = clamp(L * 2.0 - 1.0, 0.0, 1.0);
+        float wm = clamp(1.0 - ws - wh, 0.0, 1.0);
+        c += shadow * ws + mid * wm + high * wh;
+        return vec4(clamp(c, 0.0, 1.0), s.a);
+    }
+    """)
+
     /// - scale: 1 for full resolution, smaller for the on-screen preview.
     static func render(_ source: PhotoSource, recipe: EditRecipe, scale: CGFloat, analysis: AIAnalysis? = nil) -> CIImage? {
         guard let base = develop(source, recipe: recipe, scale: scale) else { return nil }
@@ -282,6 +295,18 @@ enum PhotoRenderer {
         }
         if recipe.vibrance != 0 {
             image = image.applyingFilter("CIVibrance", parameters: ["inputAmount": recipe.vibrance])
+        }
+        // 3-way colour grading (shadows / midtones / highlights), weighted by luminance.
+        if recipe.grade.hasEffect, let kernel = gradeKernel {
+            func vec(_ wheel: GradeWheel) -> CIVector {
+                let o = wheel.offset
+                return CIVector(x: o.r, y: o.g, z: o.b)
+            }
+            if let graded = kernel.apply(extent: image.extent, arguments: [
+                image, vec(recipe.grade.shadows), vec(recipe.grade.midtones), vec(recipe.grade.highlights)
+            ]) {
+                image = graded.cropped(to: image.extent)
+            }
         }
         // The look, blended in.
         if recipe.look != Look.none.id, recipe.lookAmount > 0 {
