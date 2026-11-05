@@ -100,7 +100,9 @@ TXT
 
 chroot "$ROOT" /bin/bash -euo pipefail <<'CHROOT'
 systemctl enable jarvis-setup.service jarvis-tailscale.service jarvis-voice.service ssh.service >/dev/null 2>&1
-systemctl enable tailscaled.service >/dev/null 2>&1 || true
+# tailscaled stays disabled; jarvis-tailscale starts it on demand only when Tailscale is actually used,
+# so the old Pi 1 (which can't run Tailscale) never tries to.
+systemctl disable tailscaled.service >/dev/null 2>&1 || true
 # jarvis.txt makes the login, so skip the first-boot "create a user" prompt.
 systemctl mask userconfig.service >/dev/null 2>&1 || true
 # Debian's default would otherwise open a console wizard asking for a keyboard layout.
