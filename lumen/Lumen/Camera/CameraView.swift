@@ -56,6 +56,7 @@ struct CameraView: View {
             camera.start()
             level.start()
             NASBackup.shared.kick()
+            ImmichBackup.shared.kick()
         }
         .onChange(of: control) { _, value in
             camera.loupe = value == .focus
@@ -103,7 +104,7 @@ struct CameraView: View {
             ActivitySheet(items: [scan.url])
         }
         .fullScreenCover(isPresented: $showGallery) {
-            GalleryView { source in editing = source }
+            ImmichGalleryView { source in editing = source }
         }
     }
 
@@ -707,6 +708,8 @@ struct CameraView: View {
                     editing = EditSource(videoURL: url)
                 } else if let id = camera.lastAssetID {
                     editing = EditSource(assetID: id)
+                } else if let data = camera.lastPhotoData {
+                    editing = EditSource(data: data)
                 }
             } label: {
                 Group {

@@ -66,6 +66,7 @@ extension CameraModel {
         case .success(let saved):
             if let thumbnail = saved.thumbnail { lastThumbnail = thumbnail }
             lastAssetID = saved.assetID
+            lastPhotoData = saved.editData
             lastWasVideo = false
         case .failure(let error):
             message = error.localizedDescription
@@ -312,7 +313,7 @@ extension CameraModel {
                 let shaped = options.allowCrop ? PhotoSaver.crop(data, to: options.aspect) : data
                 let id = try await PhotoSaver.savePhoto([(.photo, shaped)], location: options.location)
                 for frame in extras { _ = try? await PhotoSaver.savePhoto([(.photo, frame)], location: options.location) }
-                finishStack(.success(SavedPhoto(assetID: id, thumbnail: PhotoSaver.thumbnail(shaped, look: options.look))))
+                finishStack(.success(SavedPhoto(assetID: id, thumbnail: PhotoSaver.thumbnail(shaped, look: options.look), editData: shaped)))
                 if let id { await PhotoSaver.applyLook(options.look, toAsset: id) }
             } catch {
                 finishStack(.failure(error))

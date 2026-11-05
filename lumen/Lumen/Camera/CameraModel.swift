@@ -258,6 +258,8 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var loupe = false { didSet { updateAssist() } }
     @Published var lastThumbnail: UIImage?
     @Published var lastAssetID: String?
+    /// The last photo's data, kept so it still opens from the thumbnail when it wasn't saved to Photos (Immich-only).
+    @Published var lastPhotoData: Data?
     @Published var isCapturing = false
     @Published var message: String?
 
@@ -499,7 +501,12 @@ final class CameraModel: NSObject, ObservableObject {
             photoOutput.isResponsiveCaptureEnabled = true
             if photoOutput.isFastCapturePrioritizationSupported { photoOutput.isFastCapturePrioritizationEnabled = true }
         }
-        if photoOutput.isAutoDeferredPhotoDeliverySupported { photoOutput.isAutoDeferredPhotoDeliveryEnabled = !portraitSession }
+        // Deferred delivery hands back a "proxy" that Photos finalises later. When we're uploading to
+        // Immich we never hand it to Photos, so turn it off and take the finished HEIC straight away.
+        let immichActive = PhotoSaver.saveTarget.wantsImmich && ImmichBackup.shared.isConfigured
+        if photoOutput.isAutoDeferredPhotoDeliverySupported {
+            photoOutput.isAutoDeferredPhotoDeliveryEnabled = !portraitSession && !immichActive
+        }
         if photoOutput.isLivePhotoCaptureSupported {
             photoOutput.isLivePhotoCaptureEnabled = liveSession && sessionMode == .photo
             if photoOutput.isLivePhotoCaptureEnabled { photoOutput.isLivePhotoAutoTrimmingEnabled = true }

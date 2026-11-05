@@ -21,8 +21,28 @@ final class AssetIDBox {
     var value: String?
 }
 
+/// Where new photos and videos are saved.
+enum SaveTarget: String, CaseIterable, Identifiable {
+    case photos = "Photos library"
+    case immich = "Immich (save space)"
+    case both = "Both"
+    var id: String { rawValue }
+    var wantsImmich: Bool { self != .photos }
+    var wantsPhotos: Bool { self != .immich }
+}
+
 enum PhotoSaver {
     static let context = CIContext()
+
+    /// The chosen save target. Defaults to Immich-only; if Immich isn't set up yet we fall
+    /// back to the Photos library so nothing is ever lost (see `effectivePhotosSave`).
+    static var saveTarget: SaveTarget { SaveTarget(rawValue: Prefs.string("saveTarget", SaveTarget.immich.rawValue)) ?? .immich }
+
+    /// Whether this capture should also go to the Photos library. True when the target asks for
+    /// Photos, or when it only asks for Immich but Immich isn't configured (so we keep a copy).
+    private static func effectivePhotosSave(_ target: SaveTarget) -> Bool {
+        target.wantsPhotos || (target.wantsImmich && !ImmichBackup.shared.isConfigured)
+    }
 
     // MARK: Cropping
 
@@ -58,6 +78,15 @@ enum PhotoSaver {
 
     /// Adds a photo to the library (and the Lumen album, and the NAS backup queue). Returns its Photos ID.
     static func savePhoto(_ resources: [(PHAssetResourceType, Data)], location: CLLocation?, pairedVideo: URL? = nil) async throws -> String? {
+        let target = saveTarget
+        if target.wantsImmich && ImmichBackup.shared.isConfigured {
+            ImmichBackup.shared.add(resources: resources, pairedVideo: pairedVideo)
+        }
+        // Separate "back up originals to my NAS" feature (independent of the save target).
+        NASBackup.shared.add(resources: resources, pairedVideo: pairedVideo)
+        // Immich-only (and Immich is set up): don't touch the Photos library at all — saves space, no prompt.
+        guard effectivePhotosSave(target) else { return nil }
+
         let album = albumEnabled ? await lumenAlbum() : nil
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else { throw CaptureError.noPhotosAccess }
@@ -76,11 +105,15 @@ enum PhotoSaver {
                 if let album { PHAssetCollectionChangeRequest(for: album)?.addAssets([placeholder] as NSArray) }
             }
         }
-        NASBackup.shared.add(resources: resources, pairedVideo: pairedVideo)
         return box.value
     }
 
     static func saveVideo(_ url: URL, location: CLLocation?) async throws {
+        let target = saveTarget
+        if target.wantsImmich && ImmichBackup.shared.isConfigured { ImmichBackup.shared.add(video: url) }
+        NASBackup.shared.add(video: url)
+        guard effectivePhotosSave(target) else { return }
+
         let album = albumEnabled ? await lumenAlbum() : nil
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else { throw CaptureError.noPhotosAccess }
@@ -94,7 +127,6 @@ enum PhotoSaver {
                 PHAssetCollectionChangeRequest(for: album)?.addAssets([placeholder] as NSArray)
             }
         }
-        NASBackup.shared.add(video: url)
     }
 
     /// The "Lumen" album, made the first time (needs full Photos access; without it photos just go to the library).

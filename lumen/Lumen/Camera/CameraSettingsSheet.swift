@@ -7,7 +7,12 @@ struct CameraSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("lumen.camera.stripLocation") private var stripLocation = true
     @AppStorage("lumen.camera.haptics") private var haptics = true
+    @AppStorage("lumen.camera.saveTarget") private var saveTarget = SaveTarget.immich.rawValue
     @State private var pendingBackups = NASBackup.shared.pendingCount
+    @State private var immich = ImmichSettings.load()
+    @State private var immichTest: String?
+    @State private var testingImmich = false
+    @State private var pendingImmich = ImmichBackup.shared.pendingCount
 
     var body: some View {
         NavigationStack {
@@ -32,6 +37,51 @@ struct CameraSettingsSheet: View {
                 } footer: {
                     Text("Lumen remembers your last mode, format, drive, shape, look and grid. Max resolution uses the full sensor (48 MP on the main camera); 12 MP is smaller and cleaner in low light. Hold a volume button in Burst for continuous shots. On iPhone 16, press Camera Control lightly for zoom, exposure and look. The album needs full Photos access.")
                 }
+
+                Section {
+                    Picker("Save photos to", selection: $saveTarget) {
+                        ForEach(SaveTarget.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                    TextField("Immich address", text: $immich.address)
+                        .textContentType(.URL).keyboardType(.URL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    SecureField("API key", text: $immich.key)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Button {
+                        testingImmich = true
+                        immichTest = nil
+                        Task {
+                            do {
+                                let who = try await ImmichClient(settings: immich).check()
+                                immichTest = "Connected as \(who)."
+                                ImmichBackup.shared.kick()
+                            } catch {
+                                immichTest = error.localizedDescription
+                            }
+                            testingImmich = false
+                            pendingImmich = ImmichBackup.shared.pendingCount
+                        }
+                    } label: {
+                        HStack {
+                            Text("Test connection")
+                            if testingImmich { Spacer(); ProgressView() }
+                        }
+                    }
+                    .disabled(!immich.isConfigured || testingImmich)
+                    if let immichTest { Text(immichTest).font(.footnote).foregroundStyle(.secondary) }
+                    if pendingImmich > 0 {
+                        LabeledContent("Waiting to upload", value: "\(pendingImmich)")
+                        Button("Upload now") {
+                            ImmichBackup.shared.kick()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { pendingImmich = ImmichBackup.shared.pendingCount }
+                        }
+                    }
+                } header: {
+                    Text("Immich")
+                } footer: {
+                    Text("Get an API key from Immich → Account Settings → API Keys. With “Immich (save space)”, new photos upload straight to Immich and skip the iPhone’s Photos library — they wait on the phone until Immich has them, then they’re gone from the phone. If Immich isn’t set up yet, photos are kept in Photos so nothing is lost. The in-app Library browses Immich.")
+                }
+                .onChange(of: immich) { _ in immich.save() }
 
                 Section {
                     Toggle("Back up originals to my NAS", isOn: $camera.nasBackup)

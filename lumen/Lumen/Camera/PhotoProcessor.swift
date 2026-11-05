@@ -6,6 +6,8 @@ import UIKit
 struct SavedPhoto {
     let assetID: String?
     let thumbnail: UIImage?
+    /// Full-size data for re-opening the shot from its thumbnail when there's no Photos asset (Immich-only).
+    var editData: Data? = nil
 }
 
 enum CaptureError: LocalizedError {
@@ -90,7 +92,9 @@ final class PhotoProcessor: NSObject, AVCapturePhotoCaptureDelegate {
                 let thumbnail = preview.flatMap {
                     PhotoSaver.thumbnail($0, look: options.look, aspect: editLater && options.allowCrop ? options.aspect : .fourThree)
                 } ?? Self.rawThumbnail(raw)
-                completion(.success(SavedPhoto(assetID: id, thumbnail: thumbnail)))
+                // A proxy isn't a finished image, so only offer re-opening from a real HEIF/JPEG (or RAW).
+                let editData = proxy == nil ? (processed ?? raw) : nil
+                completion(.success(SavedPhoto(assetID: id, thumbnail: thumbnail, editData: editData)))
                 if let id {
                     if editLater {
                         // Live Photos keep their shape: cropping one here would turn off its movie.
