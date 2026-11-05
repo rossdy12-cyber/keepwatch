@@ -23,8 +23,6 @@ targets:
       - path: Shared
     dependencies:
       - target: LumenControls
-      - target: JarvisWatch
-        embed: true
     settings:
       base:
         PRODUCT_NAME: Lumen
@@ -92,42 +90,11 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
-  # J.A.R.V.I.S. Apple Watch app, carried inside Lumen so it installs on the Watch via the companion
-  # (no extra free-account app slot needed). Sources are shared with OmniContainer's watch app.
-  JarvisWatch:
-    type: application
-    platform: watchOS
-    deploymentTarget: "10.0"
-    sources:
-      - path: ../omnicontainer/OmniWatch
-    settings:
-      base:
-        PRODUCT_NAME: JarvisWatch
-        # Must begin with the team-suffixed host ID (app.lumen.camera.N2X67JY7VV) + a dot,
-        # because SideStore renames the host app but leaves this nested ID untouched.
-        PRODUCT_BUNDLE_IDENTIFIER: app.lumen.camera.N2X67JY7VV.watchkitapp
-        TARGETED_DEVICE_FAMILY: "4"
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: ""
-        CODE_SIGNING_REQUIRED: "NO"
-        CODE_SIGNING_ALLOWED: "NO"
-        DEVELOPMENT_TEAM: ""
-    info:
-      path: JarvisWatch/Info.plist
-      properties:
-        CFBundleDisplayName: "J.A.R.V.I.S."
-        CFBundleShortVersionString: $(MARKETING_VERSION)
-        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        WKApplication: true
-        # SideStore re-signs Lumen and appends the free team ID to its bundle ID
-        # (app.lumen.camera -> app.lumen.camera.N2X67JY7VV) but does NOT rewrite this
-        # companion key, so it must already carry the team-suffixed ID to match.
-        WKCompanionAppBundleIdentifier: app.lumen.camera.N2X67JY7VV
-        WKRunsIndependentlyOfCompanionApp: true
-        WKBackgroundModes:
-          - self-care
-          - mindfulness
-          - workout-processing
-        NSHealthShareUsageDescription: "J.A.R.V.I.S. shows your live heart rate and steps on its Watch faces."
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
+  # NOTE: The J.A.R.V.I.S. Apple Watch app was briefly embedded here to ride onto the Watch via
+  # Lumen's companion slot. That route is parked: free sideloaders (SideStore) can't provision a
+  # watch app ("integrity could not be verified"), and Xcode 27 (needed for the watchOS 27 SDK /
+  # device support) is Apple-Silicon only, so it won't run on the current Ryzen Hackintosh. The
+  # watch sources live in omnicontainer/OmniWatch for whenever Apple Silicon or a paid account
+  # (TestFlight) is available. Re-add a `JarvisWatch` watchOS target + `embed: true` dependency to
+  # revive it, using the plain app.lumen.camera / app.lumen.camera.watchkitapp convention for an
+  # Xcode-signed build (the N2X67JY7VV suffixes were a SideStore-only workaround).

@@ -31,7 +31,7 @@ jobs:
       - name: Build the app (no code signing)
         run: |
           set -o pipefail
-          # No -sdk override: the Lumen app builds for iphoneos and the embedded JarvisWatch app for watchos.
+          # Build for a generic iOS destination (no -sdk override needed).
           xcodebuild \
             -project Lumen.xcodeproj \
             -target Lumen \
