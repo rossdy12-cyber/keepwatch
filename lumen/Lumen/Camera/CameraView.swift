@@ -30,6 +30,7 @@ struct CameraView: View {
     @State private var showSettings = false
     @State private var showScanner = false
     @State private var scanToShare: ScanFile?
+    @State private var showGallery = false
     @State private var shutterHeld = false
 
     var body: some View {
@@ -100,6 +101,9 @@ struct CameraView: View {
         }
         .sheet(item: $scanToShare) { scan in
             ActivitySheet(items: [scan.url])
+        }
+        .fullScreenCover(isPresented: $showGallery) {
+            GalleryView { source in editing = source }
         }
     }
 
@@ -728,10 +732,10 @@ struct CameraView: View {
             shutterButton
 
             HStack(spacing: 18) {
-                PhotosPicker(selection: $libraryItem, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
+                Button { showGallery = true } label: {
                     Image(systemName: "photo.on.rectangle")
                 }
-                .accessibilityLabel("Edit a photo or video from your library")
+                .accessibilityLabel("Browse and edit your library")
                 Button { flipCamera() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath.camera")
                 }
