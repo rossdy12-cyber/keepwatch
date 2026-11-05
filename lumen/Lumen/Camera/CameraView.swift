@@ -353,6 +353,7 @@ struct CameraView: View {
             case .photo:
                 photoTopItems
             }
+            scenesMenu
             assistMenu
             Button { showSettings = true } label: { Image(systemName: "gearshape") }
                 .accessibilityLabel("Camera settings")
@@ -430,6 +431,20 @@ struct CameraView: View {
         .accessibilityLabel("Look")
     }
 
+    /// One-tap scene setups (Fireworks, Bonfire, Low-light video) — its own button so it's easy to find.
+    private var scenesMenu: some View {
+        Menu {
+            Section("Scenes") {
+                ForEach(CameraScene.allCases) { scene in
+                    Button { camera.applyScene(scene) } label: { Label(scene.rawValue, systemImage: scene.icon) }
+                }
+            }
+        } label: {
+            Image(systemName: "sparkles")
+        }
+        .accessibilityLabel("Scenes")
+    }
+
     private var assistMenu: some View {
         Menu {
             Picker("Grid", selection: $gridStyle) {
@@ -444,11 +459,6 @@ struct CameraView: View {
                 Toggle("Focus peaking", isOn: $camera.peaking)
                 Toggle("Zebras", isOn: $camera.zebras)
                 Toggle("False colour", isOn: $camera.falseColour)
-            }
-            Section("Scenes") {
-                ForEach(CameraScene.allCases) { scene in
-                    Button { camera.applyScene(scene) } label: { Label(scene.rawValue, systemImage: scene.icon) }
-                }
             }
             Section {
                 if DocumentScannerView.isSupported {
