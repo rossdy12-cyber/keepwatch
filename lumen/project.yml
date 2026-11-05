@@ -103,7 +103,9 @@ targets:
     settings:
       base:
         PRODUCT_NAME: JarvisWatch
-        PRODUCT_BUNDLE_IDENTIFIER: app.lumen.camera.watchkitapp
+        # Must begin with the team-suffixed host ID (app.lumen.camera.N2X67JY7VV) + a dot,
+        # because SideStore renames the host app but leaves this nested ID untouched.
+        PRODUCT_BUNDLE_IDENTIFIER: app.lumen.camera.N2X67JY7VV.watchkitapp
         TARGETED_DEVICE_FAMILY: "4"
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: ""
