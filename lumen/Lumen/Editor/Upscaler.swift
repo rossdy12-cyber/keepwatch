@@ -73,6 +73,26 @@ struct UpscaleClient {
         return limits[String(scale)] ?? (scale == 4 ? 1 : 4)
     }
 
+    /// Sends the photo and a mask (white = remove) to the NAS for AI object removal.
+    /// Body is: 4-byte big-endian image length, then the image JPEG, then the mask PNG.
+    func startInpaint(image: Data, mask: Data) async throws -> String {
+        var body = Data()
+        var length = UInt32(image.count).bigEndian
+        withUnsafeBytes(of: &length) { body.append(contentsOf: $0) }
+        body.append(image)
+        body.append(mask)
+        var request = URLRequest(url: try url("inpaint"))
+        request.httpMethod = "POST"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        let (data, status) = try await fetch(request)
+        guard status == 200, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let job = json["job"] as? String else {
+            throw UpscaleError.server(Self.errorText(data) ?? "The NAS refused the removal (HTTP \(status)).")
+        }
+        return job
+    }
+
     func start(jpeg: Data, scale: Int) async throws -> String {
         var request = URLRequest(url: try url("upscale", [URLQueryItem(name: "scale", value: String(scale))]))
         request.httpMethod = "POST"

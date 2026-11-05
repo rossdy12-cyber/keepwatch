@@ -221,6 +221,71 @@ def shrink(image, limit):
         image = image.resize((int(image.width * factor), int(image.height * factor)), Image.LANCZOS)
     return image
 
+# ---------------------------------------------------------------------------------------------- inpainting
+
+# How big a photo object-removal works on (bigger ones are shrunk first).
+INPAINT_MAX_MP = {"cpu": float(os.environ.get("INPAINT_MAX_MEGAPIXELS", "6")),
+                  "gpu": float(os.environ.get("GPU_INPAINT_MAX_MEGAPIXELS", "16"))}
+_LAMA = None
+_LAMA_FAILED = False
+
+
+def get_lama(device):
+    """Loads the LaMa inpainting model once; returns None if it isn't installed (then OpenCV is used)."""
+    global _LAMA, _LAMA_FAILED
+    if _LAMA is not None or _LAMA_FAILED:
+        return _LAMA
+    try:
+        from simple_lama_inpainting import SimpleLama
+        _LAMA = SimpleLama(device=torch.device(device))
+        log("LaMa inpainting ready on %s" % device)
+    except Exception as error:
+        _LAMA_FAILED = True
+        log("LaMa not available (%s); using OpenCV inpainting instead" % error)
+    return _LAMA
+
+
+def _split_inpaint(blob):
+    if len(blob) < 4:
+        raise ValueError("inpaint request too short")
+    length = int.from_bytes(blob[:4], "big")
+    if length <= 0 or 4 + length > len(blob):
+        raise ValueError("bad inpaint framing")
+    return blob[4:4 + length], blob[4 + length:]
+
+
+def run_inpaint(blob, device="cpu", progress=None):
+    """blob = 4-byte image length, image JPEG, mask PNG (white = remove). Returns a JPEG of the cleaned photo."""
+    image_bytes, mask_bytes = _split_inpaint(blob)
+    image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
+    image = shrink(image, INPAINT_MAX_MP["gpu" if device != "cpu" else "cpu"])
+    mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
+    if mask.size != image.size:
+        mask = mask.resize(image.size, Image.NEAREST)
+    if progress:
+        progress(0.1)
+    lama = get_lama(device)
+    if lama is not None:
+        result = lama(image, mask)
+        if not isinstance(result, Image.Image):
+            import numpy as np
+            result = Image.fromarray(np.asarray(result))
+        result = result.convert("RGB")
+    else:
+        import numpy as np
+        import cv2
+        bgr = np.array(image)[:, :, ::-1].copy()
+        binary = (np.array(mask) > 127).astype(np.uint8) * 255
+        binary = cv2.dilate(binary, np.ones((5, 5), np.uint8), iterations=2)
+        filled = cv2.inpaint(bgr, binary, 6, cv2.INPAINT_TELEA)
+        result = Image.fromarray(filled[:, :, ::-1])
+    if progress:
+        progress(0.95)
+    buffer = io.BytesIO()
+    result.save(buffer, "JPEG", quality=95, subsampling=0)
+    return buffer.getvalue()
+
+
 
 def requeue_stale():
     """A GPU worker that went quiet mid-job: hand its job back (to the NAS processor)."""
@@ -273,6 +338,11 @@ def cpu_worker():
         if not job:
             continue
         try:
+            if job.get("kind") == "inpaint":
+                log("Job %s: removing objects on the NAS processor" % job["id"])
+                result = run_inpaint(job["input"], "cpu", lambda fraction: job.__setitem__("progress", fraction))
+                finish(job, result)
+                continue
             image = shrink(ImageOps.exif_transpose(Image.open(io.BytesIO(job["input"]))), MAX_INPUT_MP[job["scale"]])
             log("Job %s: %dx%d at %dx on the NAS processor" % (job["id"], image.width, image.height, job["scale"]))
             result = upscale(image, job["scale"], lambda fraction: job.__setitem__("progress", fraction))
@@ -327,6 +397,15 @@ class Handler(BaseHTTPRequestHandler):
             with jobs_lock:
                 jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0.0, "scale": scale, "input": data,
                                 "created": time.time()}
+            return self.reply(200, {"job": job_id})
+        if parts == ["inpaint"]:
+            data = self.body(120_000_000)
+            if not data:
+                return self.reply(413, {"error": "Send the photo and mask (under 120 MB)"})
+            job_id = secrets.token_hex(8)
+            with jobs_lock:
+                jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0.0, "kind": "inpaint",
+                                "input": data, "created": time.time()}
             return self.reply(200, {"job": job_id})
         # The GPU worker reporting back: /worker/progress/<id>, /worker/result/<id>, /worker/fail/<id>
         if len(parts) == 3 and parts[0] == "worker":
@@ -435,9 +514,11 @@ class Handler(BaseHTTPRequestHandler):
                 job = take_job(for_gpu=True, worker_name=name)
                 if job:
                     log("Job %s: sent to %s" % (job["id"], name))
-                    return self.reply(200, job["input"], "application/octet-stream", {
-                        "X-Job": job["id"], "X-Scale": job["scale"],
-                        "X-Max-Megapixels": GPU_MAX_INPUT_MP[job["scale"]]})
+                    headers = {"X-Job": job["id"], "X-Kind": job.get("kind", "upscale")}
+                    if job.get("kind") != "inpaint":
+                        headers["X-Scale"] = job["scale"]
+                        headers["X-Max-Megapixels"] = GPU_MAX_INPUT_MP[job["scale"]]
+                    return self.reply(200, job["input"], "application/octet-stream", headers)
                 if time.time() > deadline:
                     return self.reply(204)
                 time.sleep(0.5)
@@ -526,17 +607,38 @@ def run(job, scale, limit, data):
     log("Job %s done: %dx%d in %.0f s" % (job, result.width, result.height, time.time() - started))
 
 
+def run_inpaint(job, data):
+    log("Job %s: removing objects" % job)
+    started, last = time.time(), [0.0]
+
+    def progress(fraction):
+        if time.time() - last[0] > 1:
+            last[0] = time.time()
+            try:
+                post("/worker/progress/" + job, progress="%.3f" % fraction)
+            except Exception:
+                pass
+
+    result = core.run_inpaint(data, DEVICE, progress)
+    post("/worker/result/" + job, result)
+    log("Job %s done in %.0f s" % (job, time.time() - started))
+
+
 while True:
     try:
         with urllib.request.urlopen(url("/worker/claim", name=NAME, device=DEVICE_NAME), timeout=40) as response:
             if response.status == 204:
                 continue
             job = response.headers["X-Job"]
-            scale = int(response.headers["X-Scale"])
+            kind = response.headers.get("X-Kind", "upscale")
+            scale = int(response.headers["X-Scale"]) if kind != "inpaint" else 0
             limit = float(response.headers.get("X-Max-Megapixels") or 12)
             data = response.read()
         try:
-            run(job, scale, limit, data)
+            if kind == "inpaint":
+                run_inpaint(job, data)
+            else:
+                run(job, scale, limit, data)
         except Exception as error:
             log("Job %s failed: %s" % (job, error))
             traceback.print_exc()
@@ -580,6 +682,7 @@ $VenvPython = "$Dir\venv\Scripts\python.exe"
 # PyTorch 2.5.1 with CUDA 12.1 still supports older cards such as the GTX 900 series.
 & $VenvPython -m pip install --quiet "torch==2.5.1" --index-url https://download.pytorch.org/whl/cu121
 & $VenvPython -m pip install --quiet numpy pillow
+& $VenvPython -m pip install --quiet opencv-python-headless simple-lama-inpainting   # object removal (optional)
 
 Write-Host "== Downloading the worker from the NAS"
 Invoke-WebRequest "$Hub/worker/upscaler.py?token=$Key" -OutFile "$Dir\upscaler.py" -UseBasicParsing
@@ -613,6 +716,7 @@ echo "== Setting up PyTorch for the graphics card (about 2.5 GB, first time only
 "$DIR/venv/bin/pip" install --quiet --upgrade pip
 "$DIR/venv/bin/pip" install --quiet "torch==2.5.1" --index-url https://download.pytorch.org/whl/cu121
 "$DIR/venv/bin/pip" install --quiet numpy pillow
+"$DIR/venv/bin/pip" install --quiet opencv-python-headless simple-lama-inpainting || true   # object removal (optional)
 curl -sSL "$HUB/worker/upscaler.py?token=$KEY" -o "$DIR/upscaler.py"
 curl -sSL "$HUB/worker/worker.py?token=$KEY" -o "$DIR/worker.py"
 printf '{"hub": "%s", "token": "%s", "name": "%s"}\n' "$HUB" "$KEY" "$(hostname)" > "$DIR/config.json"

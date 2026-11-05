@@ -43,6 +43,12 @@ final class EditorModel: ObservableObject {
     @Published private(set) var upscaleProgress: Double = 0
     @Published private(set) var imageSize: CGSize = .zero
     private var upscaleTask: Task<Void, Never>?
+    @Published private(set) var inpainting = false
+    @Published private(set) var inpaintStatus = ""
+    @Published private(set) var inpaintProgress: Double = 0
+    /// The JPEG the object-removal canvas is painting on (and what we send to the NAS).
+    private var inpaintImageData: Data?
+    private var inpaintTask: Task<Void, Never>?
 
     private var source: PhotoSource?
     /// The person cut-out recorded with Portrait photos (better than guessing).
@@ -154,6 +160,122 @@ final class EditorModel: ObservableObject {
     }
 
     /// "GPU (DESKTOP-ABC)" -> "your PC's GPU (DESKTOP-ABC)"; anything else -> "your NAS".
+    // MARK: AI object removal on the NAS
+
+    /// Renders the current edit (without crop/straighten) for the removal canvas, and remembers it to send.
+    func prepareRemoval() async -> UIImage? {
+        guard let source else { return nil }
+        var recipe = self.recipe
+        recipe.aspect = .original
+        recipe.straighten = 0
+        let analysis = self.analysis
+        return await withCheckedContinuation { continuation in
+            renderQueue.async {
+                guard let image = PhotoRenderer.render(source, recipe: recipe, scale: 1, analysis: analysis),
+                      let cg = PhotoRenderer.cgImage(image) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let ui = UIImage(cgImage: cg)
+                let data = ui.jpegData(compressionQuality: 0.95)
+                Task { @MainActor in self.inpaintImageData = data }
+                continuation.resume(returning: ui)
+            }
+        }
+    }
+
+    /// Sends the painted mask (normalised strokes) to the NAS, then carries on from the cleaned-up photo.
+    func removeObjects(strokes: [[CGPoint]], brush: Double, pixelSize: CGSize) {
+        guard !inpainting, let jpeg = inpaintImageData, !strokes.isEmpty else { return }
+        inpaintTask = Task { await runInpaint(jpeg: jpeg, strokes: strokes, brush: brush, size: pixelSize) }
+    }
+
+    func cancelInpaint() {
+        inpaintTask?.cancel()
+        inpaintTask = nil
+        inpainting = false
+        inpaintStatus = ""
+    }
+
+    private func runInpaint(jpeg: Data, strokes: [[CGPoint]], brush: Double, size: CGSize) async {
+        inpainting = true
+        inpaintProgress = 0
+        inpaintStatus = "Preparing…"
+        defer {
+            inpainting = false
+            if !Task.isCancelled { inpaintStatus = "" }
+        }
+        do {
+            let width = Int(size.width), height = Int(size.height)
+            guard let mask = Self.maskPNG(strokes: strokes, brush: brush, width: width, height: height) else {
+                throw UpscaleError.server("Couldn't build the mask.")
+            }
+            let client = UpscaleClient(settings: upscaler)
+            inpaintStatus = "Uploading…"
+            let job = try await client.startInpaint(image: jpeg, mask: mask)
+            var status = try await client.status(job)
+            while status.state == "queued" || status.state == "working" {
+                try Task.checkCancellation()
+                inpaintProgress = status.progress
+                inpaintStatus = status.state == "queued"
+                    ? "Waiting…"
+                    : "Removing on \(Self.processorName(status.processor))… \(Int(status.progress * 100))%"
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                status = try await client.status(job)
+            }
+            guard status.state == "done" else { throw UpscaleError.server(status.error ?? "The removal failed.") }
+            inpaintStatus = "Downloading…"
+            let data = try await client.result(job)
+            guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
+                throw UpscaleError.server("The cleaned-up photo couldn't be opened.")
+            }
+            source = .image(image)
+            isRAW = false
+            analysis = nil
+            inpaintImageData = nil
+            recipe = EditRecipe()
+            await prepare()
+            message = "Objects removed. Tap Save to keep it."
+        } catch is CancellationError {
+            message = "Removal cancelled."
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    /// A black image with the brushed strokes in white (white = remove), at the photo's pixel size.
+    private static func maskPNG(strokes: [[CGPoint]], brush: Double, width: Int, height: Int) -> Data? {
+        guard width > 0, height > 0 else { return nil }
+        let w = CGFloat(width), h = CGFloat(height)
+        let radius = max(2, CGFloat(brush) * min(w, h))
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: format)
+        let image = renderer.image { context in
+            let ctx = context.cgContext
+            ctx.setFillColor(UIColor.black.cgColor)
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.setStrokeColor(UIColor.white.cgColor)
+            ctx.setFillColor(UIColor.white.cgColor)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.setLineWidth(radius * 2)
+            for stroke in strokes {
+                guard let first = stroke.first else { continue }
+                if stroke.count == 1 {
+                    ctx.fillEllipse(in: CGRect(x: first.x * w - radius, y: first.y * h - radius, width: radius * 2, height: radius * 2))
+                    continue
+                }
+                ctx.beginPath()
+                ctx.move(to: CGPoint(x: first.x * w, y: first.y * h))
+                for point in stroke.dropFirst() { ctx.addLine(to: CGPoint(x: point.x * w, y: point.y * h)) }
+                ctx.strokePath()
+            }
+        }
+        return image.pngData()
+    }
+
     private static func processorName(_ processor: String?) -> String {
         guard let processor, processor.hasPrefix("GPU") else { return "your NAS" }
         return "your PC's " + processor

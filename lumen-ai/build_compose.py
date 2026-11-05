@@ -48,6 +48,8 @@ services:
         && /data/venv/bin/pip install -q --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch==2.5.1"
         && /data/venv/bin/pip install -q --no-cache-dir numpy pillow
         && touch /data/venv/.ready-1))
+        && ([ -f /data/venv/.inpaint-1 ] || (/data/venv/bin/pip install -q --no-cache-dir opencv-python-headless simple-lama-inpainting
+        && touch /data/venv/.inpaint-1) || echo "object removal will use OpenCV (LaMa install failed; that is fine)")
         && exec /data/venv/bin/python -u /app/upscaler.py
 
 volumes:

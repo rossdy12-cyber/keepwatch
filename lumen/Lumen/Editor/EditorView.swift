@@ -23,6 +23,8 @@ struct EditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var tool: EditorTool = .looks
     @State private var selectedMaskID: String?
+    @State private var showRemove = false
+    @State private var removeImage: UIImage?
     @State private var showOriginal = false
     @State private var savedBanner = false
     @State private var confirmClose = false
@@ -79,6 +81,13 @@ struct EditorView: View {
         }
         .sheet(item: Binding(get: { model.shareURL.map(ShareItem.init) }, set: { if $0 == nil { model.shareURL = nil } })) { item in
             ActivitySheet(items: [item.url])
+        }
+        .fullScreenCover(isPresented: $showRemove) {
+            if let removeImage {
+                RemoveObjectsView(image: removeImage) { strokes, brush in
+                    model.removeObjects(strokes: strokes, brush: brush, pixelSize: removeImage.size)
+                }
+            }
         }
         .confirmationDialog("Discard your changes?", isPresented: $confirmClose, titleVisibility: .visible) {
             Button("Discard changes", role: .destructive) { dismiss() }
@@ -241,7 +250,26 @@ struct EditorView: View {
                     Spacer()
                     Button("Cancel") { model.cancelUpscale() }.font(.caption.weight(.semibold))
                 }
+            } else if model.inpainting {
+                ProgressView(value: model.inpaintProgress).tint(.yellow)
+                HStack {
+                    Text(model.inpaintStatus).font(.caption).foregroundStyle(.white.opacity(0.7))
+                    Spacer()
+                    Button("Cancel") { model.cancelInpaint() }.font(.caption.weight(.semibold))
+                }
             } else if model.upscaler.isConfigured {
+                Button {
+                    Task {
+                        removeImage = await model.prepareRemoval()
+                        if removeImage != nil { showRemove = true }
+                    }
+                } label: {
+                    Label("Remove objects", systemImage: "wand.and.stars.inverse")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 9)
+                        .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                }
+                .disabled(model.loading)
                 HStack(spacing: 10) {
                     ForEach([2, 4], id: \.self) { scale in
                         Button { model.upscale(scale: scale) } label: {
