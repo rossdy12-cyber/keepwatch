@@ -23,6 +23,8 @@ targets:
       - path: Shared
     dependencies:
       - target: LumenControls
+      - target: JarvisWatch
+        embed: true
     settings:
       base:
         PRODUCT_NAME: Lumen
@@ -89,3 +91,38 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  # J.A.R.V.I.S. Apple Watch app, carried inside Lumen so it installs on the Watch via the companion
+  # (no extra free-account app slot needed). Sources are shared with OmniContainer's watch app.
+  JarvisWatch:
+    type: application
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - path: ../omnicontainer/OmniWatch
+    settings:
+      base:
+        PRODUCT_NAME: JarvisWatch
+        PRODUCT_BUNDLE_IDENTIFIER: app.lumen.camera.watchkitapp
+        TARGETED_DEVICE_FAMILY: "4"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+    info:
+      path: JarvisWatch/Info.plist
+      properties:
+        CFBundleDisplayName: "J.A.R.V.I.S."
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: app.lumen.camera
+        WKRunsIndependentlyOfCompanionApp: true
+        WKBackgroundModes:
+          - self-care
+          - mindfulness
+          - workout-processing
+        NSHealthShareUsageDescription: "J.A.R.V.I.S. shows your live heart rate and steps on its Watch faces."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
