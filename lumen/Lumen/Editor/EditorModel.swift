@@ -38,6 +38,9 @@ final class EditorModel: ObservableObject {
     @Published var upscaler = UpscalerSettings.load() {
         didSet { upscaler.save() }
     }
+    @Published var export = ExportOptions.load() {
+        didSet { export.save() }
+    }
     @Published private(set) var upscaling = false
     @Published private(set) var upscaleStatus = ""
     @Published private(set) var upscaleProgress: Double = 0
@@ -417,7 +420,7 @@ final class EditorModel: ObservableObject {
 
     /// Saves a full-resolution copy to Photos (the original stays as it was).
     func save() async -> Bool {
-        guard let data = await fullResolutionHEIC() else {
+        guard let data = await exportData() else {
             message = "Couldn't create the edited photo."
             return false
         }
@@ -437,13 +440,13 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    /// Writes the full-resolution edit to a file for the share sheet.
+    /// Writes the full-resolution edit to a file for the share sheet, in the chosen export format.
     func prepareShare() async {
-        guard let data = await fullResolutionHEIC(forSharing: true) else {
+        guard let data = await exportData() else {
             message = "Couldn't create the edited photo."
             return
         }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Lumen \(Self.stamp()).heic")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Lumen \(Self.stamp()).\(export.format.ext)")
         do {
             try data.write(to: url)
             shareURL = url
@@ -452,18 +455,21 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    /// Sharing leaves out where the photo was taken (unless that's switched off in the camera settings).
-    private func fullResolutionHEIC(forSharing: Bool = false) async -> Data? {
+    /// Renders and encodes the finished photo using the current export options.
+    private func exportData() async -> Data? {
         guard let source else { return nil }
         saving = true
         defer { saving = false }
         let recipe = self.recipe
         let analysis = self.analysis
+        let options = self.export
         var properties = metadata
         properties[kCGImagePropertyOrientation as String] = 1
         properties.removeValue(forKey: kCGImagePropertyPixelWidth as String)
         properties.removeValue(forKey: kCGImagePropertyPixelHeight as String)
-        if forSharing && (UserDefaults.standard.object(forKey: "lumen.camera.stripLocation") as? Bool ?? true) {
+        if options.stripMetadata {
+            properties = [kCGImagePropertyOrientation as String: 1]
+        } else if options.stripLocation {
             properties.removeValue(forKey: kCGImagePropertyGPSDictionary as String)
         }
         return await withCheckedContinuation { continuation in
@@ -472,7 +478,7 @@ final class EditorModel: ObservableObject {
                     continuation.resume(returning: nil)
                     return
                 }
-                continuation.resume(returning: PhotoRenderer.heic(image, properties: properties))
+                continuation.resume(returning: PhotoRenderer.encode(image, options: options, properties: properties))
             }
         }
     }

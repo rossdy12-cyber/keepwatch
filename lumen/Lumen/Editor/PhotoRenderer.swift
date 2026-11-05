@@ -425,4 +425,32 @@ enum PhotoRenderer {
                                           colorSpace: CGColorSpace(name: CGColorSpace.displayP3)!,
                                           options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92])
     }
+
+    /// Encodes a finished photo in the chosen format, optionally resized, with the given metadata.
+    static func encode(_ image: CIImage, options: ExportOptions, properties: [String: Any]? = nil) -> Data? {
+        var img = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+        if options.maxDimension > 0 {
+            let longest = max(img.extent.width, img.extent.height)
+            if longest > CGFloat(options.maxDimension) {
+                let scale = CGFloat(options.maxDimension) / longest
+                img = img.applyingFilter("CILanczosScaleTransform", parameters: ["inputScale": scale, "inputAspectRatio": 1.0])
+                img = img.transformed(by: CGAffineTransform(translationX: -img.extent.minX, y: -img.extent.minY))
+            }
+        }
+        if let properties { img = img.settingProperties(properties) }
+        let space = CGColorSpace(name: CGColorSpace.displayP3)!
+        let quality = options.quality
+        switch options.format {
+        case .heic:
+            return context.heifRepresentation(of: img, format: .RGBA8, colorSpace: space,
+                                              options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality])
+        case .jpeg:
+            return context.jpegRepresentation(of: img, colorSpace: space,
+                                              options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality])
+        case .png:
+            return context.pngRepresentation(of: img, format: .RGBA8, colorSpace: space, options: [:])
+        case .tiff:
+            return context.tiffRepresentation(of: img, format: .RGBA8, colorSpace: space, options: [:])
+        }
+    }
 }

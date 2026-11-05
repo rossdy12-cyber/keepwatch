@@ -32,6 +32,7 @@ struct EditorView: View {
     @State private var confirmClose = false
     @State private var showLUTImporter = false
     @State private var lutError: String?
+    @State private var showExport = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -119,6 +120,9 @@ struct EditorView: View {
         } message: {
             Text(lutError ?? "")
         }
+        .sheet(isPresented: $showExport) {
+            ExportOptionsSheet(options: $model.export)
+        }
     }
 
     private var topBar: some View {
@@ -137,6 +141,10 @@ struct EditorView: View {
             Spacer()
             Button("Reset") { model.reset() }
                 .disabled(model.recipe.isUntouched)
+            Button { showExport = true } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .padding(.leading, 12)
             Button {
                 Task { await model.prepareShare() }
             } label: {
