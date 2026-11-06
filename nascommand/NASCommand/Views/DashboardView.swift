@@ -24,6 +24,7 @@ final class DashboardStore: ObservableObject {
         alerts = ((try? await client.alerts()) ?? alerts).filter { !($0.dismissed ?? false) }
         loading = false
         loadedOnce = true
+        NASStatus.persist(info: info, pools: pools, apps: apps, alerts: alerts)
     }
 
     func control(_ app: NASApp, _ action: TrueNASClient.AppAction, client: TrueNASClient) async {

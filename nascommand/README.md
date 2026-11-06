@@ -7,6 +7,9 @@ control of its apps — no more digging through the web UI on a phone screen.
 - **Pools:** each pool with its health (green = online, red = degraded).
 - **Apps:** every app with its state, and a tap to **Start / Stop / Restart (Redeploy)**.
 - **Alerts:** active TrueNAS alerts, newest first.
+- **Home Screen widget:** overall health, apps running, pools and alerts at a glance.
+- **Background alerts:** a local notification when a pool goes degraded or an app stops (best-effort, when iOS
+  grants a background refresh; allow notifications when asked).
 - Pull to refresh. Everything is read live from the TrueNAS REST API.
 
 ## Setup

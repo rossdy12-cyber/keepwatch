@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct NASCommandApp: App {
@@ -10,6 +11,13 @@ struct NASCommandApp: App {
                 .environmentObject(settings)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
+                .task {
+                    _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                    BackgroundRefresh.schedule()
+                }
+        }
+        .backgroundTask(.appRefresh(BackgroundRefresh.identifier)) {
+            await BackgroundRefresh.run()
         }
     }
 }

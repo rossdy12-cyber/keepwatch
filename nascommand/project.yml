@@ -20,6 +20,9 @@ targets:
     platform: iOS
     sources:
       - path: NASCommand
+      - path: Shared
+    dependencies:
+      - target: NASCommandWidget
     settings:
       base:
         PRODUCT_NAME: NAS Command
@@ -30,6 +33,7 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGNING_ALLOWED: "NO"
         DEVELOPMENT_TEAM: ""
+        CODE_SIGN_ENTITLEMENTS: NASCommand.entitlements
     info:
       path: NASCommand/Info.plist
       properties:
@@ -46,7 +50,39 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        # Reaches TrueNAS over your domain, Tailscale or LAN IP (often plain http on the LAN).
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         NSLocalNetworkUsageDescription: NAS Command connects to your TrueNAS server on your network.
+        # Background checks for pool/app problems, posted as local notifications.
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - app.nascommand.refresh
+
+  NASCommandWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: NASCommandWidget
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: NASCommandWidget
+        PRODUCT_BUNDLE_IDENTIFIER: app.nascommand.client.widget
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+        SKIP_INSTALL: "YES"
+        CODE_SIGN_ENTITLEMENTS: NASCommandWidget.entitlements
+    info:
+      path: NASCommandWidget/Info.plist
+      properties:
+        CFBundleDisplayName: NAS Command
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
