@@ -117,7 +117,7 @@ private struct FolderBrowser: View {
             Task { await uploadSelected() }
         }
         .fullScreenCover(item: $viewerItem) { item in
-            MediaViewer(item: item)
+            MediaViewer(item: item, items: browser.items)
                 .environmentObject(browser)
         }
         .alert("New folder", isPresented: $isShowingNewFolder) {
@@ -248,31 +248,31 @@ struct VaultCell: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            ZStack {
-                if item.isDirectory {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(Color.accentColor.opacity(0.18))
-                        .aspectRatio(1, contentMode: .fit)
-                    Image(systemName: "folder.fill")
-                        .font(.title2)
-                        .foregroundStyle(Color.accentColor)
-                } else if item.isImage || item.isVideo {
-                    AuthenticatedImage(item: item)
-                        .aspectRatio(1, contentMode: .fit)
-                        .clipShape(.rect(cornerRadius: 14))
-                    if item.isVideo {
-                        Image(systemName: "play.circle.fill")
-                            .font(.largeTitle)
-                            .foregroundStyle(.white)
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    GeometryReader { geometry in
+                        ZStack {
+                            Color.accentColor.opacity(0.12)
+                            if item.isDirectory {
+                                Image(systemName: "folder.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(Color.accentColor)
+                            } else if item.isImage {
+                                AuthenticatedImage(item: item)
+                            } else if item.isVideo {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.largeTitle)
+                                    .foregroundStyle(Color.accentColor)
+                            } else {
+                                Image(systemName: "doc").foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
                     }
-                } else {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(.gray.opacity(0.18))
-                        .aspectRatio(1, contentMode: .fit)
-                    Image(systemName: "doc")
-                        .foregroundStyle(.secondary)
                 }
-            }
+                .clipShape(RoundedRectangle(cornerRadius: 14))
             Text(item.name)
                 .font(.caption)
                 .foregroundStyle(.primary)
