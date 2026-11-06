@@ -70,6 +70,23 @@ relationships). Without it, the conversations are just added as searchable knowl
 **Auto-memory** does the rest over time: as you chat, Jarvis notes lasting new facts by itself (turn it off with
 `AUTO_MEMORY=false`).
 
+## Homelab skills (optional)
+
+Fill these in (Apps → jarvis-core → Edit) and Jarvis answers questions about your own systems from **live data** —
+both in the iPhone app and on the Pi:
+
+- *"Is the NAS okay?"* / *"what's down?"* / *"how are the pools?"* → checks TrueNAS (pools, apps, alerts, uptime).
+- *"Any camera events?"* / *"who's at the front door?"* → checks Frigate's recent detections.
+
+| Setting | What it is |
+|---|---|
+| `TRUENAS_URL` | Your TrueNAS URL, e.g. `http://192.168.1.2`. |
+| `TRUENAS_API_KEY` | A TrueNAS API key (your username top-right → API Keys → Add). |
+| `FRIGATE_URL` | Your Frigate URL, e.g. `https://100.85.127.42:8971`. |
+| `FRIGATE_USER` / `FRIGATE_PASS` | A Frigate login (a viewer account is enough). |
+
+Leave any of them blank to turn that skill off. The data is fetched fresh only when you actually ask.
+
 ### Managing memory by hand (HTTP)
 
 ```bash

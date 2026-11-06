@@ -34,6 +34,14 @@ services:
       AUTH_TOKEN: ""
       # Optional: override Jarvis's personality. Leave empty for the built-in butler persona.
       PERSONA: ""
+      # --- Homelab skills (optional) ---
+      # Fill these in and Jarvis answers "is the NAS okay?" and "any camera events?" from live data.
+      # TrueNAS: your server URL + an API key (username top-right -> API Keys). Frigate: its URL + a viewer login.
+      TRUENAS_URL: ""
+      TRUENAS_API_KEY: ""
+      FRIGATE_URL: ""
+      FRIGATE_USER: ""
+      FRIGATE_PASS: ""
       TZ: Europe/London
     command:
       - sh
@@ -108,6 +116,13 @@ configs:
       KB_LIMIT = int(os.environ.get("KB_LIMIT", "6"))                 # knowledge chunks injected per reply
       AUTO_MEMORY = os.environ.get("AUTO_MEMORY", "true").lower() in ("1", "true", "yes")
       AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "").strip()           # optional: require Authorization: Bearer <token>
+
+      # Homelab skills: Jarvis answers "is the NAS okay?" / "any camera events?" from live data when these are set.
+      TRUENAS_URL = os.environ.get("TRUENAS_URL", "").rstrip("/")
+      TRUENAS_API_KEY = os.environ.get("TRUENAS_API_KEY", "").strip()
+      FRIGATE_URL = os.environ.get("FRIGATE_URL", "").rstrip("/")
+      FRIGATE_USER = os.environ.get("FRIGATE_USER", "").strip()
+      FRIGATE_PASS = os.environ.get("FRIGATE_PASS", "")
 
       USER_AGENT = "JarvisCore/1.0"
 
@@ -409,6 +424,129 @@ configs:
 
       # ---------------------------------------------------------------------------------------------- building a reply
 
+      # ---------------------------------------------------------------------------------------------- homelab skills
+      # When the user asks about the NAS or the cameras, fetch live status and hand it to the model so it answers
+      # naturally and accurately. Both the iPhone app and the Raspberry Pi get this, since both talk to this core.
+
+      TRUENAS_WORDS = re.compile(
+          r"\b(nas|truenas|server|pool|pools|disk|disks|storage|apps?|docker|jellyfin|navidrome|immich|plex|"
+          r"container|containers|uptime|degraded|healthy|everything (ok|okay|alright|running|fine))\b", re.I)
+      CAMERA_WORDS = re.compile(
+          r"\b(camera|cameras|cctv|frigate|events?|motion|detections?|driveway|front ?door|"
+          r"who.?s (at|there|about)|anyone (there|about|around)|intruder|doorbell)\b", re.I)
+
+
+      def _uptime(seconds):
+          try:
+              total = int(seconds or 0)
+          except Exception:
+              return "a while"
+          days, total = divmod(total, 86400)
+          hours, total = divmod(total, 3600)
+          minutes = total // 60
+          if days:
+              return "%dd %dh" % (days, hours)
+          if hours:
+              return "%dh %dm" % (hours, minutes)
+          return "%dm" % minutes
+
+
+      def _truenas_get(path):
+          request = urllib.request.Request(TRUENAS_URL + "/api/v2.0" + path,
+                                           headers={"Authorization": "Bearer " + TRUENAS_API_KEY, "User-Agent": USER_AGENT})
+          with urllib.request.urlopen(request, timeout=12) as response:
+              return json.loads(response.read() or b"null")
+
+
+      def truenas_summary():
+          if not (TRUENAS_URL and TRUENAS_API_KEY):
+              return None
+          try:
+              info = _truenas_get("/system/info") or {}
+              pools = _truenas_get("/pool") or []
+              apps = _truenas_get("/app") or []
+              alerts = [a for a in (_truenas_get("/alert/list") or []) if not a.get("dismissed")]
+          except Exception as error:
+              return "the NAS didn't answer (%s)" % error
+          bad_pools = [p.get("name") for p in pools
+                       if (p.get("status") or "").upper() != "ONLINE" or p.get("healthy") is False]
+          running = [a for a in apps if (a.get("state") or "").upper() == "RUNNING"]
+          stopped = [a.get("name") for a in apps if (a.get("state") or "").upper() not in ("RUNNING", "DEPLOYING")]
+          parts = ["host %s, up %s" % (info.get("hostname", "nas"), _uptime(info.get("uptime_seconds")))]
+          parts.append("pools all healthy" if not bad_pools else "POOL PROBLEM: " + ", ".join(p for p in bad_pools if p))
+          parts.append("%d of %d apps running%s" % (len(running), len(apps),
+                       "" if not stopped else " (stopped: " + ", ".join(s for s in stopped[:8] if s) + ")"))
+          if alerts:
+              parts.append("%d active alert%s, e.g. %s" % (len(alerts), "" if len(alerts) == 1 else "s",
+                           (alerts[0].get("formatted") or "")[:160]))
+          else:
+              parts.append("no active alerts")
+          return "; ".join(parts) + "."
+
+
+      _frigate_cookie = {"value": None}
+
+
+      def _frigate_login():
+          body = json.dumps({"user": FRIGATE_USER, "password": FRIGATE_PASS}).encode()
+          request = urllib.request.Request(FRIGATE_URL + "/api/login", data=body, method="POST",
+                                           headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
+          with urllib.request.urlopen(request, timeout=12) as response:
+              for header, value in response.getheaders():
+                  if header.lower() == "set-cookie" and value.startswith("frigate_token="):
+                      _frigate_cookie["value"] = value.split(";", 1)[0]
+
+
+      def _frigate_get(path, retry=True):
+          headers = {"User-Agent": USER_AGENT}
+          if _frigate_cookie["value"]:
+              headers["Cookie"] = _frigate_cookie["value"]
+          try:
+              with urllib.request.urlopen(urllib.request.Request(FRIGATE_URL + path, headers=headers), timeout=12) as response:
+                  return json.loads(response.read() or b"null")
+          except urllib.error.HTTPError as error:
+              if error.code in (401, 403) and retry and FRIGATE_USER:
+                  _frigate_login()
+                  return _frigate_get(path, retry=False)
+              raise
+
+
+      def frigate_summary():
+          if not FRIGATE_URL:
+              return None
+          try:
+              events = _frigate_get("/api/events?limit=6&include_thumbnails=0") or []
+          except Exception as error:
+              return "the cameras didn't answer (%s)" % error
+          if not events:
+              return "no camera events recently."
+          now = time.time()
+          told = []
+          for event in events[:6]:
+              label = event.get("label", "something")
+              camera = (event.get("camera") or "a camera").replace("_", " ")
+              minutes = max(0, int((now - (event.get("start_time") or now)) / 60))
+              when = "just now" if minutes == 0 else ("%d min ago" % minutes if minutes < 60 else "%dh ago" % (minutes // 60))
+              told.append("%s on %s %s" % (label, camera, when))
+          return "; ".join(told) + "."
+
+
+      def homelab_context(message):
+          """When the message is about the NAS or cameras, fetch live status to hand to the model. Else None."""
+          blocks = []
+          if TRUENAS_URL and TRUENAS_API_KEY and TRUENAS_WORDS.search(message):
+              summary = truenas_summary()
+              if summary:
+                  blocks.append("NAS: " + summary)
+          if FRIGATE_URL and CAMERA_WORDS.search(message):
+              summary = frigate_summary()
+              if summary:
+                  blocks.append("Cameras: " + summary)
+          if not blocks:
+              return None
+          return "Live status of the user's home systems right now (use it to answer; it is current):\n" + "\n".join(blocks)
+
+
       def build_system_prompt(message):
           parts = [PERSONA]
           facts = all_facts()
@@ -422,6 +560,9 @@ configs:
           if chunks:
               notes = "\n\n".join(("[%s]\n%s" % (c["title"], c["text"])) if c["title"] else c["text"] for c in chunks)
               parts.append("Relevant notes from your knowledge base (use if helpful, otherwise ignore):\n" + notes)
+          live = homelab_context(message)
+          if live:
+              parts.append(live)
           return "\n\n".join(parts)
 
 

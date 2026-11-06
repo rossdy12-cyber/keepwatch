@@ -44,6 +44,14 @@ services:
       AUTH_TOKEN: ""
       # Optional: override Jarvis's personality. Leave empty for the built-in butler persona.
       PERSONA: ""
+      # --- Homelab skills (optional) ---
+      # Fill these in and Jarvis answers "is the NAS okay?" and "any camera events?" from live data.
+      # TrueNAS: your server URL + an API key (username top-right -> API Keys). Frigate: its URL + a viewer login.
+      TRUENAS_URL: ""
+      TRUENAS_API_KEY: ""
+      FRIGATE_URL: ""
+      FRIGATE_USER: ""
+      FRIGATE_PASS: ""
       TZ: Europe/London
     command:
       - sh
