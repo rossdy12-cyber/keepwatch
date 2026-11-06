@@ -1,0 +1,56 @@
+name: Build Vault IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "vault/**"
+      - ".github/workflows/build-vault-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Vault Xcode project
+        working-directory: vault
+        run: xcodegen generate
+
+      - name: Build unsigned Vault app
+        working-directory: vault
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Vault.xcodeproj \
+            -target Vault \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: vault
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Vault.app out/Payload/
+          cd out
+          zip -qry Vault.ipa Payload
+          ls -lh Vault.ipa
+
+      - name: Upload Vault IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vault-ipa
+          path: vault/out/Vault.ipa
+          retention-days: 30
