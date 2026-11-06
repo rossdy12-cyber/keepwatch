@@ -213,7 +213,7 @@ final class VaultModel: ObservableObject {
 
         let basePath = settings.baseURL?.path ?? "/"
 
-        return WebDAVParser(basePath: basePath, currentFolder: folder).parse(data)
+        return WebDAVParser(basePath: basePath, currentFolder: folder).parse(data: data)
     }
 
     private func validate(_ response: URLResponse) throws {
