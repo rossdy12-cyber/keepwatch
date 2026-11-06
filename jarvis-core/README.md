@@ -89,7 +89,7 @@ app/hub).
 |---|---|
 | `LLM_API_KEY` | Your provider's API key. **Required.** |
 | `LLM_BASE_URL` / `LLM_MODEL` | Which provider and model (see table above). |
-| `LLM_TEMPERATURE` | Higher = more creative, lower = more focused. `0.6` default. |
+| `LLM_TEMPERATURE` | Leave **empty** for Claude models (they reject a non-default temperature). Set e.g. `0.7` only for OpenAI. |
 | `AUTO_MEMORY` | `true` (default): learn durable facts from chats automatically. `false` to stop. |
 | `EMBED_MODEL` | Optional embeddings model (e.g. `text-embedding-3-small`) for *semantic* knowledge search. Empty = keyword search, no extra cost. |
 | `PERSONA` | Override Jarvis's personality. Empty = the built-in dry-witted butler. |

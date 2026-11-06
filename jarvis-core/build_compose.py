@@ -32,7 +32,8 @@ services:
       LLM_BASE_URL: https://api.openai.com/v1
       LLM_API_KEY: ""            # <-- put your provider API key here
       LLM_MODEL: gpt-4o-mini
-      LLM_TEMPERATURE: "0.6"
+      # Leave empty for Claude models (they reject a non-default temperature). Set e.g. "0.7" for OpenAI.
+      LLM_TEMPERATURE: ""
       # --- Memory ---
       # Jarvis notes durable facts from your chats automatically. "false" to turn that off.
       AUTO_MEMORY: "true"
