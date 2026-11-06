@@ -12,28 +12,31 @@ struct MediaViewer: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
             Color.black.ignoresSafeArea()
 
-            if item.isVideo {
-                if let player {
-                    VideoPlayer(player: player)
-                        .ignoresSafeArea()
-                } else if isLoading {
-                    ProgressView("Preparing video…")
-                } else if let errorMessage {
-                    ContentUnavailableView(
-                        "Cannot play video",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(errorMessage)
-                    )
+            GeometryReader { geometry in
+                Group {
+                    if item.isVideo {
+                        if let player {
+                            VideoPlayer(player: player)
+                        } else if isLoading {
+                            ProgressView("Preparing video…")
+                        } else if let errorMessage {
+                            ContentUnavailableView(
+                                "Cannot play video",
+                                systemImage: "exclamationmark.triangle",
+                                description: Text(errorMessage)
+                            )
+                        }
+                    } else {
+                        AuthenticatedImage(item: item, contentMode: .fit)
+                    }
                 }
-            } else {
-                AuthenticatedImage(item: item)
-                    .aspectRatio(contentMode: .fit)
-                    .ignoresSafeArea()
+                .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
             }
-
+        }
+        .overlay(alignment: .topTrailing) {
             Button {
                 dismiss()
             } label: {
@@ -42,6 +45,7 @@ struct MediaViewer: View {
                     .foregroundStyle(.white)
                     .padding()
             }
+            .accessibilityLabel("Close viewer")
         }
         .task {
             if item.isVideo {
@@ -79,6 +83,7 @@ struct AuthenticatedImage: View {
     @EnvironmentObject private var vault: VaultModel
 
     let item: VaultItem
+    var contentMode: ContentMode = .fill
 
     @State private var image: Image?
     @State private var failed = false
@@ -88,7 +93,7 @@ struct AuthenticatedImage: View {
             if let image {
                 image
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: contentMode)
             } else if failed {
                 Image(systemName: "photo")
                     .foregroundStyle(.secondary)
