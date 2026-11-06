@@ -1,0 +1,52 @@
+# XcodeGen project description. The "Build NAS Command IPA" workflow turns this into
+# NASCommand.xcodeproj with `xcodegen generate`.
+name: NASCommand
+options:
+  bundleIdPrefix: app.nascommand
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  NASCommand:
+    type: application
+    platform: iOS
+    sources:
+      - path: NASCommand
+    settings:
+      base:
+        PRODUCT_NAME: NAS Command
+        PRODUCT_BUNDLE_IDENTIFIER: app.nascommand.client
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+    info:
+      path: NASCommand/Info.plist
+      properties:
+        CFBundleDisplayName: NAS Command
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UIUserInterfaceStyle: Dark
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Reaches TrueNAS over your domain, Tailscale or LAN IP (often plain http on the LAN).
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSLocalNetworkUsageDescription: NAS Command connects to your TrueNAS server on your network.
