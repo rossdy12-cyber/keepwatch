@@ -191,7 +191,9 @@ final class VaultModel: ObservableObject {
             throw VaultError.missingCredentials
         }
 
-        var request = URLRequest(url: try url(for: folder))
+        let directoryURL = try url(for: folder)
+            .appendingPathComponent("", isDirectory: true)
+        var request = URLRequest(url: directoryURL)
         request.httpMethod = "PROPFIND"
         request.setValue(auth, forHTTPHeaderField: "Authorization")
         request.setValue("1", forHTTPHeaderField: "Depth")
