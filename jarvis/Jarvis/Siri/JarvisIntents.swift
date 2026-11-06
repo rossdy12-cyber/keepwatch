@@ -28,6 +28,20 @@ struct AskJarvisIntent: AppIntent, ForegroundContinuableIntent {
     }
 }
 
+/// Opens Jarvis and starts listening immediately — made for the iPhone Action Button (Settings → Action Button
+/// → Shortcut → Talk to Jarvis). One press, then just speak.
+struct TalkToJarvisIntent: AppIntent {
+    static var title: LocalizedStringResource = "Talk to Jarvis"
+    static var description = IntentDescription("Open Jarvis and start listening straight away. Ideal for the Action Button.")
+    static var openAppWhenRun = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        AppActions.shared.startListening = true
+        return .result()
+    }
+}
+
 struct ShuffleMusicIntent: AudioPlaybackIntent {
     static var title: LocalizedStringResource = "Shuffle my music"
     static var description = IntentDescription("Shuffle your Navidrome library.")
@@ -69,9 +83,15 @@ struct JarvisShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: AskJarvisIntent(),
-            phrases: ["Ask \(.applicationName)", "Talk to \(.applicationName)", "Tell \(.applicationName)", "Hey \(.applicationName)"],
+            phrases: ["Ask \(.applicationName)", "Tell \(.applicationName)", "Hey \(.applicationName)"],
             shortTitle: "Ask Jarvis",
             systemImageName: "waveform.circle"
+        )
+        AppShortcut(
+            intent: TalkToJarvisIntent(),
+            phrases: ["Talk to \(.applicationName)", "Start talking to \(.applicationName)", "Open \(.applicationName) and listen"],
+            shortTitle: "Talk to Jarvis",
+            systemImageName: "mic.circle"
         )
         AppShortcut(
             intent: ShuffleMusicIntent(),

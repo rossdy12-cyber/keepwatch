@@ -32,11 +32,12 @@ struct JarvisApp: App {
 }
 
 enum AppTab: Hashable {
-    case chat, settings
+    case chat, memory, settings
 }
 
 struct RootView: View {
     @EnvironmentObject private var settings: JarvisSettings
+    @ObservedObject private var actions = AppActions.shared
     @State private var tab: AppTab = .chat
 
     var body: some View {
@@ -44,12 +45,19 @@ struct RootView: View {
             ChatView(openSettings: { tab = .settings })
                 .tabItem { Label("Jarvis", systemImage: "waveform.circle") }
                 .tag(AppTab.chat)
+            MemoryView()
+                .tabItem { Label("Memory", systemImage: "brain") }
+                .tag(AppTab.memory)
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(AppTab.settings)
         }
         .onAppear {
             if !settings.isConfigured { tab = .settings }
+        }
+        .onChange(of: actions.startListening) { want in
+            // The "Talk to Jarvis" Action Button opens straight onto the chat screen.
+            if want { tab = .chat }
         }
     }
 }

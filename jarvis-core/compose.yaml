@@ -543,6 +543,17 @@ configs:
           delete_fact(fact_id)
           return {"deleted": True}
 
+      class PinIn(BaseModel):
+          pinned: bool = True
+
+      @app.post("/api/memory/facts/{fact_id}/pin")
+      def set_fact_pin(fact_id: int, body: PinIn, request: Request):
+          check_auth(request)
+          with db_lock:
+              db.execute("UPDATE facts SET pinned=? WHERE id=?", (1 if body.pinned else 0, fact_id))
+              db.commit()
+          return {"id": fact_id, "pinned": body.pinned}
+
 
       @app.get("/api/knowledge")
       def list_knowledge(request: Request):
