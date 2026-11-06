@@ -1,0 +1,71 @@
+name: Build Stash IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "stash/**"
+      - ".github/workflows/build-stash-ipa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: stash
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Stash.xcodeproj \
+            -target Stash \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet \
+            build
+
+      - name: Package Payload/Stash.app into Stash.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Stash.app out/Payload/
+          cd out
+          zip -qry Stash.ipa Payload
+          ls -lh Stash.ipa
+
+      - name: Upload the .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stash-ipa
+          path: stash/out/Stash.ipa
+          retention-days: 30
+
+      - name: Publish Stash.ipa to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create stash-ipa-latest out/Stash.ipa \
+            --title "Stash iOS App (Latest IPA)" \
+            --notes "Unsigned Stash.ipa for SideStore / AltStore / Sideloadly, pre-configured for TrueNAS Stash (http://100.85.127.42:9999)." \
+            || gh release upload stash-ipa-latest out/Stash.ipa --clobber
