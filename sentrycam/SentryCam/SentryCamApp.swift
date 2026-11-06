@@ -1,17 +1,37 @@
 import SwiftUI
 
+/// Routes `sentrycam://event/<id>` and `sentrycam://camera/<name>` (from a Frigate push or the widget).
+@MainActor
+final class DeepLinkRouter: ObservableObject {
+    @Published var eventID: String?
+    @Published var camera: String?
+
+    func handle(_ url: URL) {
+        guard url.scheme?.lowercased() == "sentrycam" else { return }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        switch url.host?.lowercased() {
+        case "event": eventID = parts.first
+        case "camera": camera = parts.first?.removingPercentEncoding
+        default: break
+        }
+    }
+}
+
 @main
 struct SentryCamApp: App {
     @StateObject private var settings = FrigateSettings.shared
     @StateObject private var store = FrigateStore()
+    @StateObject private var router = DeepLinkRouter()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(settings)
                 .environmentObject(store)
+                .environmentObject(router)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
+                .onOpenURL { router.handle($0) }
         }
     }
 }
@@ -19,6 +39,7 @@ struct SentryCamApp: App {
 struct RootView: View {
     @EnvironmentObject private var settings: FrigateSettings
     @EnvironmentObject private var store: FrigateStore
+    @EnvironmentObject private var router: DeepLinkRouter
     @State private var tab = 0
 
     var body: some View {
@@ -29,6 +50,8 @@ struct RootView: View {
         }
         .task(id: settings.address + settings.username) { await store.start(settings) }
         .onAppear { if !settings.isConfigured { tab = 2 } }
+        .onChange(of: router.eventID) { if $0 != nil { tab = 1 } }
+        .onChange(of: router.camera) { if $0 != nil { tab = 0 } }
     }
 }
 

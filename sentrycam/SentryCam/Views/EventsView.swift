@@ -3,6 +3,7 @@ import SwiftUI
 struct EventsView: View {
     @EnvironmentObject private var settings: FrigateSettings
     @EnvironmentObject private var store: FrigateStore
+    @EnvironmentObject private var router: DeepLinkRouter
     @State private var clip: FrigateEvent?
 
     var body: some View {
@@ -25,6 +26,12 @@ struct EventsView: View {
             .navigationTitle("Events")
             .refreshable { await store.reloadEvents(settings) }
             .sheet(item: $clip) { event in ClipPlayer(client: settings.client, event: event) }
+            .onChange(of: router.eventID) { id in
+                if let id {
+                    clip = store.events.first { $0.id == id } ?? FrigateEvent.placeholder(id: id)
+                    router.eventID = nil
+                }
+            }
         }
     }
 }

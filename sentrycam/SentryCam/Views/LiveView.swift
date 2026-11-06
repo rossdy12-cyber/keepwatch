@@ -3,6 +3,7 @@ import SwiftUI
 struct LiveView: View {
     @EnvironmentObject private var settings: FrigateSettings
     @EnvironmentObject private var store: FrigateStore
+    @EnvironmentObject private var router: DeepLinkRouter
     @State private var fullCamera: String?
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
@@ -52,6 +53,9 @@ struct LiveView: View {
                 if let cam = fullCamera {
                     FullScreenCamera(client: settings.client, camera: cam) { fullCamera = nil }
                 }
+            }
+            .onChange(of: router.camera) { cam in
+                if let cam { fullCamera = cam; router.camera = nil }
             }
         }
     }

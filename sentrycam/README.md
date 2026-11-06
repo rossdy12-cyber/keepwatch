@@ -7,6 +7,9 @@ directly with a standalone Frigate (no Home Assistant needed).
 - **Events:** Frigate's AI detections with thumbnails, object + confidence + camera + time; tap to **play the
   recorded clip right in the app**.
 - **Tapo patrol (optional):** resume/pause/log your PTZ patrol container, if you run the NAS agent for it.
+- **Home Screen widget:** the latest camera snapshot + newest event; tap it to open the app.
+- **Tap a Frigate push → the clip:** set `SENTRYCAM_LINK: "true"` in your `frigate-ntfy` app, and tapping the
+  notification opens that exact clip in SentryCam (via `sentrycam://event/<id>`).
 - Pull to refresh.
 
 ## Setup

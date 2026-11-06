@@ -1,4 +1,5 @@
 import Foundation
+import WidgetKit
 
 struct FrigateEvent: Identifiable {
     let id: String
@@ -19,6 +20,11 @@ struct FrigateEvent: Identifiable {
         startTime = (json["start_time"] as? Double) ?? Date().timeIntervalSince1970
         hasClip = (json["has_clip"] as? Bool) ?? false
         hasSnapshot = (json["has_snapshot"] as? Bool) ?? false
+    }
+
+    /// A minimal event for a deep link (`sentrycam://event/<id>`) when the full event isn't in memory.
+    static func placeholder(id: String) -> FrigateEvent {
+        FrigateEvent(json: ["id": id, "camera": "camera", "label": "event", "has_clip": true])!
     }
 }
 
@@ -127,10 +133,25 @@ final class FrigateStore: ObservableObject {
             if settings.needsLogin { try await client.login() }
             cameras = try await client.cameras()
             events = try await client.events(limit: 50)
+            await updateWidget(client)
         } catch {
             status = describeError(error)
         }
         loading = false
+    }
+
+    /// Saves the latest snapshot + newest event to the App Group so the widget can show them.
+    private func updateWidget(_ client: FrigateClient) async {
+        var snapshot: Data?
+        if let camera = cameras.first {
+            snapshot = try? await client.imageData(client.snapshotPath(camera, height: 400))
+        }
+        let last = events.first.map {
+            SharedStore.LastEvent(id: $0.id, label: $0.label, camera: $0.camera,
+                                  time: Date(timeIntervalSince1970: $0.startTime))
+        }
+        SharedStore.save(event: last, snapshot: snapshot)
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     func reloadEvents(_ settings: FrigateSettings) async {
