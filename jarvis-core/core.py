@@ -23,6 +23,7 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.error
 import urllib.request
 
 from typing import List, Optional
@@ -145,8 +146,12 @@ def _post_json(url, payload, api_key, timeout=120):
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read() or b"{}")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", "replace")[:600]
+        raise RuntimeError("HTTP %s from the LLM provider: %s" % (error.code, body))
 
 
 def llm_chat(messages, temperature=None, max_tokens=None, timeout=120):
