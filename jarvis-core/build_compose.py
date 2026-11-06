@@ -15,7 +15,6 @@ compose = """# J.A.R.V.I.S. core: the brain (with memory) behind the Jarvis iPho
 services:
   jarvis-core:
     image: python:3.11-slim
-    container_name: jarvis-core
     restart: unless-stopped
     ports:
       - "8998:8998"

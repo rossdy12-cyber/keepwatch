@@ -5,7 +5,6 @@
 services:
   jarvis-core:
     image: python:3.11-slim
-    container_name: jarvis-core
     restart: unless-stopped
     ports:
       - "8998:8998"
