@@ -28,8 +28,8 @@ services:
     environment:
       # --- The brain: any OpenAI-compatible chat API ---
       # OpenAI:       LLM_BASE_URL=https://api.openai.com/v1          LLM_MODEL=gpt-4o-mini
-      # Anthropic:    LLM_BASE_URL=https://api.anthropic.com/v1       LLM_MODEL=claude-3-5-haiku-latest
-      # OpenRouter:   LLM_BASE_URL=https://openrouter.ai/api/v1       LLM_MODEL=anthropic/claude-3.5-sonnet
+      # Anthropic:    LLM_BASE_URL=https://api.anthropic.com/v1       LLM_MODEL=claude-haiku-5-5
+      # OpenRouter:   LLM_BASE_URL=https://openrouter.ai/api/v1       LLM_MODEL=anthropic/claude-haiku-5.5
       LLM_BASE_URL: https://api.openai.com/v1
       LLM_API_KEY: ""            # <-- put your provider API key here
       LLM_MODEL: gpt-4o-mini

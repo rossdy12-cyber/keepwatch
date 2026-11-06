@@ -21,7 +21,7 @@ It replaces the old Ollama core. Your app and Pi keep pointing at the same addre
    | Provider | `LLM_BASE_URL` | `LLM_MODEL` (examples) |
    |---|---|---|
    | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini`, `gpt-4o` |
-   | Anthropic (Claude) | `https://api.anthropic.com/v1` | `claude-3-5-haiku-latest`, `claude-3-5-sonnet-latest` |
+   | Anthropic (Claude) | `https://api.anthropic.com/v1` | `claude-haiku-5-5` (cheapest), `claude-sonnet-5-5` |
    | OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.1-70b-instruct` |
 
 3. First start installs FastAPI (a minute); then it's quick. Check **Logs** for *"J.A.R.V.I.S. core starting"*.
