@@ -444,6 +444,7 @@ final class GlucoStore: NSObject, ObservableObject {
         if dexcomSessionID == nil {
             outerLoop: for region in regionsToTry {
                 let base = region.baseURL
+                let regionAppId = (region == .jp) ? "d8665ade-9673-4e27-9ff6-92db4ce13d13" : appId
                 for accountName in candidates {
                     do {
                         guard let authURL = URL(string: "\(base)/General/AuthenticatePublisherAccount") else { continue }
@@ -455,7 +456,7 @@ final class GlucoStore: NSObject, ObservableObject {
                         let authBody: [String: String] = [
                             "accountName": accountName,
                             "password": password,
-                            "applicationId": appId
+                            "applicationId": regionAppId
                         ]
                         authReq.httpBody = try JSONSerialization.data(withJSONObject: authBody)
                         let (authData, authResp) = try await URLSession.shared.data(for: authReq)
@@ -474,7 +475,7 @@ final class GlucoStore: NSObject, ObservableObject {
                                     let loginBody: [String: String] = [
                                         "accountId": accountId,
                                         "password": password,
-                                        "applicationId": appId
+                                        "applicationId": regionAppId
                                     ]
                                     loginReq.httpBody = try JSONSerialization.data(withJSONObject: loginBody)
                                     let (loginData, loginResp) = try await URLSession.shared.data(for: loginReq)
@@ -490,11 +491,14 @@ final class GlucoStore: NSObject, ObservableObject {
                                     }
                                 }
                             }
-                        } else {
+                        } else if region == dexcomRegion || lastErrorCode.isEmpty {
                             if let errJson = try? JSONSerialization.jsonObject(with: authData) as? [String: Any] {
-                                lastErrorCode = errJson["Code"] as? String ?? "HTTP \(status1)"
-                                lastErrorMessage = errJson["Message"] as? String ?? ""
-                            } else {
+                                let code = errJson["Code"] as? String ?? "HTTP \(status1)"
+                                if code != "ApplicationNotAuthenticated" || lastErrorCode.isEmpty {
+                                    lastErrorCode = code
+                                    lastErrorMessage = errJson["Message"] as? String ?? ""
+                                }
+                            } else if lastErrorCode.isEmpty {
                                 lastErrorCode = "HTTP \(status1)"
                             }
                         }

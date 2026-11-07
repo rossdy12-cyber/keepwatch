@@ -176,13 +176,14 @@ def sync_dexcom_to_nightscout(cfg: dict):
     try:
         for reg in ordered_regions:
             h = host_map[reg]
+            reg_app_id = "d8665ade-9673-4e27-9ff6-92db4ce13d13" if reg == "jp" else DEXCOM_APP_ID
             for cand in candidates:
                 append_log(f"Dexcom Share: Authenticating ({reg.upper()} -> {h} as '{cand}')...")
                 auth_url = f"{h}/ShareWebServices/Services/General/AuthenticatePublisherAccount"
                 auth_body = json.dumps({
                     "accountName": cand,
                     "password": password,
-                    "applicationId": DEXCOM_APP_ID,
+                    "applicationId": reg_app_id,
                 }).encode("utf-8")
                 req = urllib.request.Request(
                     auth_url,
@@ -198,7 +199,7 @@ def sync_dexcom_to_nightscout(cfg: dict):
                         login_body = json.dumps({
                             "accountId": account_id,
                             "password": password,
-                            "applicationId": DEXCOM_APP_ID,
+                            "applicationId": reg_app_id,
                         }).encode("utf-8")
                         req2 = urllib.request.Request(
                             login_url,
@@ -214,9 +215,11 @@ def sync_dexcom_to_nightscout(cfg: dict):
                             break
                 except urllib.error.HTTPError as he:
                     err_body = he.read().decode("utf-8", "ignore")
-                    last_err = f"HTTP {he.code}: {err_body[:180]}"
+                    if reg == region or not last_err:
+                        last_err = f"HTTP {he.code}: {err_body[:180]}"
                 except Exception as ex:
-                    last_err = str(ex)
+                    if reg == region or not last_err:
+                        last_err = str(ex)
             if session_id:
                 break
 
@@ -581,7 +584,99 @@ class PortalHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def do_HEAD(self):
+        parsed_path = urllib.parse.urlparse(self.path).path
+        ipa_dir = "/config/ipas"
+        if parsed_path.startswith("/download/"):
+            fname = urllib.parse.unquote(parsed_path[len("/download/"):]).strip("/")
+            fpath = os.path.join(ipa_dir, os.path.basename(fname))
+            if os.path.isfile(fpath) and fpath.lower().endswith(".ipa"):
+                size = os.path.getsize(fpath)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(fpath)}"')
+                self.send_header("Content-Length", str(size))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                return
+            self.send_error(404, "IPA file not found")
+            return
+        self.send_response(200)
+        self.end_headers()
+
     def do_GET(self):
+        parsed_path = urllib.parse.urlparse(self.path).path
+        ipa_dir = "/config/ipas"
+
+        if parsed_path.startswith("/download/"):
+            fname = urllib.parse.unquote(parsed_path[len("/download/"):]).strip("/")
+            fpath = os.path.join(ipa_dir, os.path.basename(fname))
+            if os.path.isfile(fpath) and fpath.lower().endswith(".ipa"):
+                size = os.path.getsize(fpath)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(fpath)}"')
+                self.send_header("Content-Length", str(size))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                with open(fpath, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                return
+            self.send_error(404, "IPA file not found")
+            return
+
+        if parsed_path in ("/ipa", "/ipas", "/GlucoPulse.ipa"):
+            if parsed_path == "/GlucoPulse.ipa":
+                self.send_response(302)
+                self.send_header("Location", "/download/GlucoPulse.ipa")
+                self.end_headers()
+                return
+            host = self.headers.get("Host", "100.85.127.42:1338")
+            base_url = f"http://{host}"
+            files = []
+            if os.path.isdir(ipa_dir):
+                for fn in sorted(os.listdir(ipa_dir)):
+                    if fn.lower().endswith(".ipa"):
+                        fp = os.path.join(ipa_dir, fn)
+                        sz = os.path.getsize(fp)
+                        files.append((fn, f"{sz/(1024*1024):.2f} MB" if sz >= 1048576 else f"{sz/1024:.0f} KB"))
+            cards = ""
+            for fn, sz_str in files:
+                dl_url = f"{base_url}/download/{urllib.parse.quote(fn)}"
+                sidestore_url = f"sidestore://install?url={urllib.parse.quote(dl_url, safe='')}"
+                altstore_url = f"altstore://install?url={urllib.parse.quote(dl_url, safe='')}"
+                badge = '<span style="background:#10b981;color:#052e16;font-size:11px;font-weight:800;padding:3px 8px;border-radius:999px;margin-left:8px;">DEXCOM G7 FIXED</span>' if fn == "GlucoPulse.ipa" else ""
+                cards += f"""
+                <div style="background:#151d2e;border:1px solid #26324d;border-radius:16px;padding:18px;margin-bottom:14px;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div style="font-size:18px;font-weight:700;color:#fff;">{fn}{badge}</div>
+                    <div style="color:#94a3b8;font-size:13px;">{sz_str}</div>
+                  </div>
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
+                    <a href="/download/{urllib.parse.quote(fn)}" style="flex:1;min-width:140px;text-align:center;background:#3b82f6;color:#fff;text-decoration:none;font-weight:700;padding:12px 16px;border-radius:12px;">⬇ Download .IPA</a>
+                    <a href="{sidestore_url}" style="flex:1;min-width:130px;text-align:center;background:#8b5cf6;color:#fff;text-decoration:none;font-weight:700;padding:12px 16px;border-radius:12px;">⚡ SideStore</a>
+                    <a href="{altstore_url}" style="flex:1;min-width:130px;text-align:center;background:#1e293b;border:1px solid #334155;color:#e2e8f0;text-decoration:none;font-weight:600;padding:12px 16px;border-radius:12px;">📲 AltStore</a>
+                  </div>
+                </div>"""
+            page = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ross IPA Hub</title></head>
+            <body style="background:#0b0f19;color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:680px;margin:0 auto;padding:24px 16px;">
+              <h1 style="margin:0 0 6px 0;font-size:24px;">📱 Ross IPA Server</h1>
+              <p style="color:#94a3b8;margin:0 0 20px 0;font-size:14px;">Tap <b>Download .IPA</b> to save directly to your iPhone Files app, or tap <b>SideStore / AltStore</b> to sideload directly.</p>
+              {cards}
+              <p style="margin-top:20px;"><a href="/" style="color:#38bdf8;text-decoration:none;">← Back to GlucoPulse Bridge Settings</a></p>
+            </body></html>"""
+            data = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if self.path.startswith("/sync"):
             threading.Thread(target=run_full_sync_cycle, daemon=True).start()
             self.send_response(302)
