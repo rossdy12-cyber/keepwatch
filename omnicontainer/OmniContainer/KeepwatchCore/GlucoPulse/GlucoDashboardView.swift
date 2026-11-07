@@ -160,10 +160,16 @@ struct GlucoDashboardView: View {
                 Image(systemName: "dot.radiowaves.left.and.right")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(GlucoTheme.tandemCyan)
-                Text(store.g7BLEStatus)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(GlucoTheme.textSecondary)
-                    .lineLimit(2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(store.g7BLEStatus)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(GlucoTheme.inRangeGreen)
+                        .lineLimit(1)
+                    Text(store.tandemBLEStatus)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(GlucoTheme.tandemCyan)
+                        .lineLimit(1)
+                }
                 Spacer()
                 Button {
                     store.forceBLEPollNow()
@@ -175,6 +181,7 @@ struct GlucoDashboardView: View {
                         .background(GlucoTheme.tandemCyan.opacity(0.22), in: Capsule())
                         .foregroundStyle(GlucoTheme.tandemCyan)
                 }
+                .fixedSize()
             }
         }
         .padding(18)

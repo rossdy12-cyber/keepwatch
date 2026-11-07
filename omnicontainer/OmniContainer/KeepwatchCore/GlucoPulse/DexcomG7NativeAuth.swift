@@ -688,3 +688,400 @@ final class DexcomG7NativeAuthenticator {
         return d
     }
 }
+
+
+// MARK: - Tandem t:slim X2 Native BLE Authenticator (EC-JPAKE 6-Digit + HMAC-SHA1 16-Char + Packetizer)
+
+final class TandemPumpNativeAuthenticator {
+    private static let aliceParty = Data([0x63, 0x6C, 0x69, 0x65, 0x6E, 0x74]) // "client"
+    private static let bobParty   = Data([0x73, 0x65, 0x72, 0x76, 0x65, 0x72]) // "server"
+    private static let derivedSecretKey = "gluco.v2.tandem.jpakeDerivedSecret"
+    private static let serverNonceKey   = "gluco.v2.tandem.jpakeServerNonce"
+
+    var pairingCode: String = ""
+    var appInstanceId: UInt16 = 0
+
+    private var privateKey1: G7U256?
+    private var publicKey1: G7ECPoint?
+    private var privateKey2: G7U256?
+    private var publicKey2: G7ECPoint?
+
+    private var clientRound1a = Data()
+    private var clientRound1b = Data()
+    private var serverRound1a = Data()
+    private var serverRound1b = Data()
+
+    private var remoteXm1: G7ECPoint?
+    private var remoteXm2: G7ECPoint?
+
+    private(set) var derivedSecret: Data?
+    private(set) var serverNonce3: Data?
+    private(set) var clientNonce4: Data?
+    private(set) var isAuthenticated: Bool = false
+
+    init(pairingCode: String = "") {
+        self.pairingCode = pairingCode
+        if let savedSecret = UserDefaults.standard.data(forKey: Self.derivedSecretKey), savedSecret.count == 32 {
+            self.derivedSecret = savedSecret
+        }
+        if let savedNonce = UserDefaults.standard.data(forKey: Self.serverNonceKey), savedNonce.count == 8 {
+            self.serverNonce3 = savedNonce
+        }
+    }
+
+    var cleanPairingCode: String {
+        pairingCode.uppercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    var isSixDigitMode: Bool {
+        let c = cleanPairingCode
+        return c.count == 6 && c.allSatisfy { $0.isNumber }
+    }
+
+    var isSixteenCharMode: Bool {
+        cleanPairingCode.count == 16
+    }
+
+    func resetSession(clearPersistedSecret: Bool = false) {
+        privateKey1 = nil
+        publicKey1 = nil
+        privateKey2 = nil
+        publicKey2 = nil
+        clientRound1a.removeAll()
+        clientRound1b.removeAll()
+        serverRound1a.removeAll()
+        serverRound1b.removeAll()
+        remoteXm1 = nil
+        remoteXm2 = nil
+        clientNonce4 = nil
+        isAuthenticated = false
+        if clearPersistedSecret {
+            derivedSecret = nil
+            serverNonce3 = nil
+            UserDefaults.standard.removeObject(forKey: Self.derivedSecretKey)
+            UserDefaults.standard.removeObject(forKey: Self.serverNonceKey)
+        }
+    }
+
+    // MARK: - 1. Start Auth Request (6-digit EC-JPAKE or 16-char CentralChallenge)
+
+    func makeInitialAuthMessage() -> (opCode: UInt8, cargo: [UInt8], description: String)? {
+        let code = cleanPairingCode
+        if isSixDigitMode {
+            // If we already have a confirmed 32-byte derivedSecret, try fast Jpake3SessionKeyRequest (opCode 38)
+            if let secret = derivedSecret, secret.count == 32 {
+                return (38, [0x00, 0x00], "Tandem EC-JPAKE fast session key confirm (op 38)…")
+            }
+            guard prepareECJPAKERound1() else { return nil }
+            var cargo = [UInt8](repeating: 0, count: 167)
+            cargo[0] = UInt8(appInstanceId & 0xFF)
+            cargo[1] = UInt8((appInstanceId >> 8) & 0xFF)
+            let bytes = [UInt8](clientRound1a.prefix(165))
+            for i in 0..<bytes.count { cargo[2 + i] = bytes[i] }
+            return (32, cargo, "Tandem EC-JPAKE Round 1a sent (op 32)…")
+        } else {
+            // CentralChallengeRequest (opCode = 16, size = 10: appInstanceId[2] + random[8])
+            var rand8 = [UInt8](repeating: 0, count: 8)
+            _ = SecRandomCopyBytes(kSecRandomDefault, 8, &rand8)
+            var cargo: [UInt8] = [0x01, 0x00]
+            cargo.append(contentsOf: rand8)
+            let desc = code.count == 16
+                ? "Tandem CentralChallenge sent (op 16) with 16-char code…"
+                : "Tandem CentralChallenge probe sent (op 16)…"
+            return (16, cargo, desc)
+        }
+    }
+
+    // MARK: - 2. Handle AUTHORIZATION (7B83FFF9) Response Messages
+
+    func handleAuthorizationResponse(opCode: UInt8, cargo: [UInt8]) -> (nextOpCode: UInt8, nextCargo: [UInt8], statusText: String)? {
+        switch opCode {
+        case 17: // CentralChallengeResponse (30B: appInstanceId[2], centralChallengeHash[20], hmacKey[8])
+            guard cargo.count >= 30 else { return nil }
+            let appIdLo = cargo[0]
+            let appIdHi = cargo[1]
+            let hmacKey = Data(cargo[22..<30])
+            let code = cleanPairingCode
+            guard code.count == 16, let codeData = code.data(using: .utf8) else {
+                return nil
+            }
+            let hash20 = Self.hmacSHA1(key: hmacKey, data: codeData)
+            guard hash20.count == 20 else { return nil }
+            var nextCargo: [UInt8] = [appIdLo, appIdHi]
+            nextCargo.append(contentsOf: hash20)
+            return (18, nextCargo, "Tandem PumpChallenge HMAC-SHA1 sent (op 18)…")
+
+        case 19: // PumpChallengeResponse (3B: appInstanceId[2], success[1])
+            guard cargo.count >= 3 else { return nil }
+            if cargo[2] == 1 {
+                isAuthenticated = true
+                return (0, [], "Tandem 16-char BLE authentication succeeded!")
+            } else {
+                return (0, [], "Tandem rejected 16-char pairing code — check Pump Bluetooth Settings.")
+            }
+
+        case 33: // Jpake1aResponse (167B: appInstanceId[2], serverRound1a[165])
+            guard cargo.count >= 2 else { return nil }
+            var padded = cargo
+            if padded.count < 167 {
+                padded.append(contentsOf: [UInt8](repeating: 0, count: 167 - padded.count))
+            }
+            serverRound1a = Data(padded[2..<167])
+            var nextCargo = [UInt8](repeating: 0, count: 167)
+            nextCargo[0] = UInt8(appInstanceId & 0xFF)
+            nextCargo[1] = UInt8((appInstanceId >> 8) & 0xFF)
+            let bytes = [UInt8](clientRound1b.prefix(165))
+            for i in 0..<bytes.count { nextCargo[2 + i] = bytes[i] }
+            return (34, nextCargo, "Tandem EC-JPAKE Round 1b sent (op 34)…")
+
+        case 35: // Jpake1bResponse (167B: appInstanceId[2], serverRound1b[165])
+            guard cargo.count >= 2 else { return nil }
+            var padded = cargo
+            if padded.count < 167 {
+                padded.append(contentsOf: [UInt8](repeating: 0, count: 167 - padded.count))
+            }
+            serverRound1b = Data(padded[2..<167])
+            guard let round2 = processServerRound1AndMakeRound2() else {
+                return (0, [], "Tandem EC-JPAKE Round 1 verification failed.")
+            }
+            var nextCargo = [UInt8](repeating: 0, count: 167)
+            nextCargo[0] = UInt8(appInstanceId & 0xFF)
+            nextCargo[1] = UInt8((appInstanceId >> 8) & 0xFF)
+            let bytes = [UInt8](round2.prefix(165))
+            for i in 0..<bytes.count { nextCargo[2 + i] = bytes[i] }
+            return (36, nextCargo, "Tandem EC-JPAKE Round 2 sent (op 36)…")
+
+        case 37: // Jpake2Response (170B: appInstanceId[2], curveHeader[3]=03 00 17, serverRound2[165])
+            guard cargo.count >= 5 else { return nil }
+            var padded = cargo
+            if padded.count < 170 {
+                padded.append(contentsOf: [UInt8](repeating: 0, count: 170 - padded.count))
+            }
+            let serverR2 = Data(padded[2..<170])
+            guard processServerRound2AndDeriveSecret(serverR2) else {
+                return (0, [], "Tandem EC-JPAKE Round 2 failed — check 6-digit pairing code!")
+            }
+            return (38, [0x00, 0x00], "Tandem EC-JPAKE Session Key request sent (op 38)…")
+
+        case 39: // Jpake3SessionKeyResponse (18B: appInstanceId[2], nonce[8], reserved[8])
+            guard cargo.count >= 10, let secret = derivedSecret, secret.count == 32 else { return nil }
+            let nonce3 = Data(cargo[2..<10])
+            self.serverNonce3 = nonce3
+            var cNonce = [UInt8](repeating: 0, count: 8)
+            _ = SecRandomCopyBytes(kSecRandomDefault, 8, &cNonce)
+            let clientNonceData = Data(cNonce)
+            self.clientNonce4 = clientNonceData
+
+            let hkdfKey = Self.hkdfBuild(nonce: nonce3, keyMaterial: secret)
+            let digest = Self.hmacSHA256(key: hkdfKey, data: clientNonceData)
+            var nextCargo = [UInt8](repeating: 0, count: 50)
+            nextCargo[0] = UInt8(appInstanceId & 0xFF)
+            nextCargo[1] = UInt8((appInstanceId >> 8) & 0xFF)
+            for i in 0..<8 { nextCargo[2 + i] = cNonce[i] }
+            // bytes 10..<18 are 8 reserved zero bytes
+            let dBytes = [UInt8](digest.prefix(32))
+            for i in 0..<dBytes.count { nextCargo[18 + i] = dBytes[i] }
+            return (40, nextCargo, "Tandem EC-JPAKE Key Confirmation sent (op 40)…")
+
+        case 41: // Jpake4KeyConfirmationResponse (50B: appInstanceId[2], serverNonce4[8], reserved[8], hashDigest[32])
+            guard cargo.count >= 50,
+                  let secret = derivedSecret,
+                  let nonce3 = serverNonce3 else { return nil }
+            let serverNonce4 = Data(cargo[2..<10])
+            let serverDigest = Data(cargo[18..<50])
+            let hkdfKey = Self.hkdfBuild(nonce: nonce3, keyMaterial: secret)
+            let expected = Self.hmacSHA256(key: hkdfKey, data: serverNonce4)
+            if expected == serverDigest {
+                isAuthenticated = true
+                UserDefaults.standard.set(secret, forKey: Self.derivedSecretKey)
+                UserDefaults.standard.set(nonce3, forKey: Self.serverNonceKey)
+                return (0, [], "Tandem 6-digit EC-JPAKE pairing complete!")
+            } else {
+                resetSession(clearPersistedSecret: true)
+                return (0, [], "Tandem EC-JPAKE confirmation mismatch — re-enter 6-digit code.")
+            }
+
+        default:
+            return nil
+        }
+    }
+
+    // MARK: - mbedTLS EC-JPAKE (165-Byte TLS Format) Primitives
+
+    private func prepareECJPAKERound1() -> Bool {
+        guard let kp1 = G7ECPoint.generateKeyPair(),
+              let kp2 = G7ECPoint.generateKeyPair(),
+              let r1a = makeTLSJpakeKeyShare(privateKey: kp1.privateKey, publicKey: kp1.publicKey, base: .generator, party: Self.aliceParty),
+              let r1b = makeTLSJpakeKeyShare(privateKey: kp2.privateKey, publicKey: kp2.publicKey, base: .generator, party: Self.aliceParty) else {
+            return false
+        }
+        privateKey1 = kp1.privateKey
+        publicKey1 = kp1.publicKey
+        privateKey2 = kp2.privateKey
+        publicKey2 = kp2.publicKey
+        clientRound1a = r1a
+        clientRound1b = r1b
+        return true
+    }
+
+    private func processServerRound1AndMakeRound2() -> Data? {
+        var combined = Data()
+        combined.append(serverRound1a)
+        combined.append(serverRound1b)
+        var offset = 0
+        guard let share1 = parseTLSJpakeKeyShare(combined, offset: &offset),
+              validateTLSZeroKnowledge(share1, base: .generator, party: Self.bobParty),
+              let share2 = parseTLSJpakeKeyShare(combined, offset: &offset),
+              validateTLSZeroKnowledge(share2, base: .generator, party: Self.bobParty),
+              let pub1 = publicKey1, let priv2 = privateKey2 else {
+            return nil
+        }
+        remoteXm1 = share1.publicKey
+        remoteXm2 = share2.publicKey
+
+        guard let cleanData = cleanPairingCode.data(using: .utf8), !cleanData.isEmpty else { return nil }
+        let pwScalar = G7U256(bigEndianBytes: cleanData)
+        let x2s = G7U256.modMul(priv2, pwScalar, .N)
+
+        guard let sum1 = G7ECPoint.add(pub1, share1.publicKey),
+              let baseG = G7ECPoint.add(sum1, share2.publicKey),
+              let localPub2 = G7ECPoint.multiply(baseG, scalar: x2s),
+              let round2Data = makeTLSJpakeKeyShare(privateKey: x2s, publicKey: localPub2, base: baseG, party: Self.aliceParty) else {
+            return nil
+        }
+        return round2Data
+    }
+
+    private func processServerRound2AndDeriveSecret(_ data: Data) -> Bool {
+        var offset = 0
+        let bytes = [UInt8](data)
+        // Skip optional 3-byte TLS curve identifier (0x03, 0x00, 0x17)
+        if bytes.count >= 3 && bytes[0] == 0x03 && bytes[1] == 0x00 && bytes[2] == 0x17 {
+            offset = 3
+        }
+        guard let shareS = parseTLSJpakeKeyShare(data, offset: &offset),
+              let pub1 = publicKey1, let pub2 = publicKey2, let priv2 = privateKey2,
+              let rXm1 = remoteXm1, let rXm2 = remoteXm2,
+              let sumAB = G7ECPoint.add(pub1, pub2),
+              let baseBob = G7ECPoint.add(sumAB, rXm1),
+              validateTLSZeroKnowledge(shareS, base: baseBob, party: Self.bobParty),
+              let cleanData = cleanPairingCode.data(using: .utf8), !cleanData.isEmpty else {
+            return false
+        }
+        let pwScalar = G7U256(bigEndianBytes: cleanData)
+        let x2s = G7U256.modMul(priv2, pwScalar, .N)
+        guard let subPt = G7ECPoint.multiply(rXm2, scalar: x2s),
+              let diffPt = G7ECPoint.subtract(shareS.publicKey, subPt),
+              let keyPt = G7ECPoint.multiply(diffPt, scalar: priv2) else {
+            return false
+        }
+        self.derivedSecret = Data(SHA256.hash(data: keyPt.x.bigEndianData))
+        return true
+    }
+
+    private func makeTLSJpakeKeyShare(privateKey: G7U256, publicKey: G7ECPoint, base: G7ECPoint, party: Data) -> Data? {
+        let v = G7ECPoint.randomScalarModN()
+        guard let proofPt = G7ECPoint.multiply(base, scalar: v) else { return nil }
+        let h = tlsZKHash(base: base, gv: proofPt, pub: publicKey, party: party)
+        let prod = G7U256.modMul(h, privateKey, .N)
+        let r = G7U256.modSub(v, prod, .N)
+
+        var out = Data(capacity: 165)
+        out.append(0x41)
+        out.append(0x04)
+        out.append(publicKey.raw64Data)
+        out.append(0x41)
+        out.append(0x04)
+        out.append(proofPt.raw64Data)
+        out.append(0x20)
+        out.append(r.bigEndianData)
+        return out
+    }
+
+    private func parseTLSJpakeKeyShare(_ data: Data, offset: inout Int) -> DexcomG7NativeAuthenticator.PakePacket? {
+        let bytes = [UInt8](data)
+        guard offset + 2 <= bytes.count else { return nil }
+        let pubLen = Int(bytes[offset])
+        offset += 1
+        guard pubLen == 65, offset + pubLen <= bytes.count, bytes[offset] == 0x04 else { return nil }
+        let pubData = Data(bytes[(offset + 1)..<(offset + 65)])
+        offset += 65
+
+        guard offset + 2 <= bytes.count else { return nil }
+        let vLen = Int(bytes[offset])
+        offset += 1
+        guard vLen == 65, offset + vLen <= bytes.count, bytes[offset] == 0x04 else { return nil }
+        let vData = Data(bytes[(offset + 1)..<(offset + 65)])
+        offset += 65
+
+        guard offset + 1 <= bytes.count else { return nil }
+        let rLen = Int(bytes[offset])
+        offset += 1
+        guard rLen > 0 && rLen <= 32, offset + rLen <= bytes.count else { return nil }
+        let rData = Data(bytes[offset..<(offset + rLen)])
+        offset += rLen
+
+        guard let pubPt = G7ECPoint(raw64Bytes: pubData),
+              let proofPt = G7ECPoint(raw64Bytes: vData) else { return nil }
+        let scalar = G7U256(bigEndianBytes: rData)
+        return DexcomG7NativeAuthenticator.PakePacket(publicKey: pubPt, proofPoint: proofPt, proofScalar: scalar)
+    }
+
+    private func tlsZKHash(base: G7ECPoint, gv: G7ECPoint, pub: G7ECPoint, party: Data) -> G7U256 {
+        var input = Data()
+        func appendField(_ field: Data) {
+            var beLen = UInt32(field.count).bigEndian
+            withUnsafeBytes(of: &beLen) { input.append(contentsOf: $0) }
+            input.append(field)
+        }
+        func uncompressed(_ pt: G7ECPoint) -> Data {
+            var d = Data([0x04])
+            d.append(pt.raw64Data)
+            return d
+        }
+        appendField(uncompressed(base))
+        appendField(uncompressed(gv))
+        appendField(uncompressed(pub))
+        appendField(party)
+        let digest = Data(SHA256.hash(data: input))
+        return G7U256.modReduce(G7U256(bigEndianBytes: digest), .N)
+    }
+
+    private func validateTLSZeroKnowledge(_ pkt: DexcomG7NativeAuthenticator.PakePacket, base: G7ECPoint, party: Data) -> Bool {
+        let h = tlsZKHash(base: base, gv: pkt.proofPoint, pub: pkt.publicKey, party: party)
+        guard let left = G7ECPoint.multiply(base, scalar: pkt.proofScalar),
+              let right = G7ECPoint.multiply(pkt.publicKey, scalar: h),
+              let combined = G7ECPoint.add(left, right) else {
+            return false
+        }
+        return combined == pkt.proofPoint
+    }
+
+    // MARK: - Crypto Helpers (HMAC-SHA1, HMAC-SHA256, HKDF)
+
+    static func hmacSHA1(key: Data, data: Data) -> Data {
+        var mac = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+        key.withUnsafeBytes { keyPtr in
+            data.withUnsafeBytes { dataPtr in
+                CCHmac(
+                    CCHmacAlgorithm(kCCHmacAlgSHA1),
+                    keyPtr.baseAddress, key.count,
+                    dataPtr.baseAddress, data.count,
+                    &mac
+                )
+            }
+        }
+        return Data(mac)
+    }
+
+    static func hmacSHA256(key: Data, data: Data) -> Data {
+        let symKey = SymmetricKey(data: key)
+        let code = HMAC<SHA256>.authenticationCode(for: data, using: symKey)
+        return Data(code)
+    }
+
+    static func hkdfBuild(nonce: Data, keyMaterial: Data) -> Data {
+        let prk = hmacSHA256(key: nonce, data: keyMaterial)
+        return hmacSHA256(key: prk, data: Data([0x01]))
+    }
+}

@@ -81,9 +81,20 @@ struct GlucoPumpHistoryView: View {
                 }
             }
 
-            Text(store.g7BLEStatus)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(GlucoTheme.inRangeGreen)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Circle().fill(GlucoTheme.inRangeGreen).frame(width: 6, height: 6)
+                    Text("G7 Sensor: \(store.g7BLEStatus)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(GlucoTheme.inRangeGreen)
+                }
+                HStack(spacing: 6) {
+                    Circle().fill(GlucoTheme.tandemCyan).frame(width: 6, height: 6)
+                    Text("Tandem Pump: \(store.tandemBLEStatus)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(GlucoTheme.tandemCyan)
+                }
+            }
 
             HStack(spacing: 8) {
                 Image(systemName: "key.radiowaves.forward.fill")
@@ -97,7 +108,7 @@ struct GlucoPumpHistoryView: View {
                         .foregroundStyle(GlucoTheme.textSecondary)
                 }
                 Spacer()
-                TextField("4-digit code", text: $store.g7PairingCode)
+                TextField("8222", text: $store.g7PairingCode)
                     .keyboardType(.numberPad)
                     .multilineTextAlignment(.center)
                     .font(.system(size: 14, weight: .heavy, design: .monospaced))
@@ -106,6 +117,32 @@ struct GlucoPumpHistoryView: View {
                     .frame(width: 96)
                     .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 8))
                     .foregroundStyle(GlucoTheme.inRangeGreen)
+            }
+            .padding(10)
+            .background(GlucoTheme.cardElevated.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
+
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundStyle(GlucoTheme.tandemCyan)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Tandem Pump BLE Code (If t:connect closed)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(GlucoTheme.textPrimary)
+                    Text("Pump: Options → Device Settings → Bluetooth → Pair Device")
+                        .font(.system(size: 10))
+                        .foregroundStyle(GlucoTheme.textSecondary)
+                }
+                Spacer()
+                TextField("6 or 16 char", text: $store.tandemPairingCode)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.characters)
+                    .multilineTextAlignment(.center)
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(width: 116)
+                    .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 8))
+                    .foregroundStyle(GlucoTheme.tandemCyan)
             }
             .padding(10)
             .background(GlucoTheme.cardElevated.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))

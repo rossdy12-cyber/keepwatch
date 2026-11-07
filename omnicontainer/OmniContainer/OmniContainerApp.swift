@@ -873,6 +873,7 @@ struct OmniRootContainerView: View {
 
     private var omniTopDockBar: some View {
         VStack(spacing: 4) {
+            ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 Button {
                     workspace.activeAppID = "home"
@@ -881,7 +882,9 @@ struct OmniRootContainerView: View {
                         Image(systemName: "square.grid.3x3.fill")
                         Text("Apps")
                             .font(.caption.bold())
+                            .lineLimit(1)
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 6)
                     .background(workspace.activeAppID == "home" ? Color.cyan : Color.white.opacity(0.1))
@@ -1006,8 +1009,10 @@ struct OmniRootContainerView: View {
                         .cornerRadius(8)
                 }
             }
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 10)
             .padding(.top, 6)
+            }
 
             if workspace.splitScreenEnabled && workspace.activeAppID != "home" {
                 HStack(spacing: 6) {
