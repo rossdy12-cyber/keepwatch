@@ -229,6 +229,7 @@ final class GlucoStore: NSObject, ObservableObject {
 
     @Published var isSyncing: Bool = false
     @Published var dexcomConnected: Bool = false
+    @Published var dexcomDiagnostic: String = ""
     @Published var tandemConnected: Bool = false
     @Published var statusBanner: String = "Read-Only Monitor · Dexcom G7 + Tandem t:slim X2"
     @Published var bleDevices: [BLEPeripheralDevice] = []
@@ -390,73 +391,170 @@ final class GlucoStore: NSObject, ObservableObject {
 
     // MARK: - 1. Direct Dexcom G7 Share Cloud API
 
+    private static func candidateAccountNames(for rawInput: String) -> [String] {
+        let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var candidates: [String] = [trimmed]
+        let lower = trimmed.lowercased()
+        if !candidates.contains(lower) { candidates.append(lower) }
+
+        let compact = trimmed.replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "(", with: "")
+            .replacingOccurrences(of: ")", with: "")
+        if !candidates.contains(compact) { candidates.append(compact) }
+
+        let digitsOnly = compact.filter { $0.isNumber }
+        if compact.hasPrefix("07") && digitsOnly.count == 11 {
+            let ukIntl = "+44" + String(digitsOnly.dropFirst())
+            let ukNoPlus = "44" + String(digitsOnly.dropFirst())
+            if !candidates.contains(ukIntl) { candidates.append(ukIntl) }
+            if !candidates.contains(ukNoPlus) { candidates.append(ukNoPlus) }
+        } else if compact.hasPrefix("+44") && digitsOnly.count >= 11 {
+            let localUK = "0" + String(digitsOnly.dropFirst(2))
+            if !candidates.contains(localUK) { candidates.append(localUK) }
+        } else if compact.hasPrefix("447") && digitsOnly.count == 12 {
+            let ukIntl = "+" + digitsOnly
+            let localUK = "0" + String(digitsOnly.dropFirst(2))
+            if !candidates.contains(ukIntl) { candidates.append(ukIntl) }
+            if !candidates.contains(localUK) { candidates.append(localUK) }
+        }
+        return candidates
+    }
+
     func syncDexcomShare() async -> Bool {
         let appId = "d89443d2-327c-4a6f-89e5-496bbb0317db"
-        let base = dexcomRegion.baseURL
+        let userAgent = "Dexcom Share/3.0.2.11 CFNetwork/672.0.2 Darwin/14.0.0"
+        let password = dexcomPassword
+        let candidates = Self.candidateAccountNames(for: dexcomUsername)
+        guard !candidates.isEmpty, !password.isEmpty else {
+            dexcomDiagnostic = "Please enter your Dexcom username/email/phone and password."
+            return false
+        }
+
+        var regionsToTry: [DexcomRegion] = [dexcomRegion]
+        for r in DexcomRegion.allCases where r != dexcomRegion {
+            regionsToTry.append(r)
+        }
+
+        var activeBase = dexcomRegion.baseURL
+        var lastErrorCode = ""
+        var lastErrorMessage = ""
+
+        if dexcomSessionID == nil {
+            outerLoop: for region in regionsToTry {
+                let base = region.baseURL
+                for accountName in candidates {
+                    do {
+                        guard let authURL = URL(string: "\(base)/General/AuthenticatePublisherAccount") else { continue }
+                        var authReq = URLRequest(url: authURL, timeoutInterval: 15)
+                        authReq.httpMethod = "POST"
+                        authReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        authReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                        authReq.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                        let authBody: [String: String] = [
+                            "accountName": accountName,
+                            "password": password,
+                            "applicationId": appId
+                        ]
+                        authReq.httpBody = try JSONSerialization.data(withJSONObject: authBody)
+                        let (authData, authResp) = try await URLSession.shared.data(for: authReq)
+                        let status1 = (authResp as? HTTPURLResponse)?.statusCode ?? 0
+
+                        if (200..<300).contains(status1) {
+                            let accountId = String(data: authData, encoding: .utf8)?
+                                .trimmingCharacters(in: CharacterSet(charactersIn: "\" \n\r")) ?? ""
+                            if !accountId.isEmpty && accountId != "00000000-0000-0000-0000-000000000000" {
+                                if let loginURL = URL(string: "\(base)/General/LoginPublisherAccountById") {
+                                    var loginReq = URLRequest(url: loginURL, timeoutInterval: 15)
+                                    loginReq.httpMethod = "POST"
+                                    loginReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                                    loginReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                                    loginReq.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                                    let loginBody: [String: String] = [
+                                        "accountId": accountId,
+                                        "password": password,
+                                        "applicationId": appId
+                                    ]
+                                    loginReq.httpBody = try JSONSerialization.data(withJSONObject: loginBody)
+                                    let (loginData, loginResp) = try await URLSession.shared.data(for: loginReq)
+                                    if let http2 = loginResp as? HTTPURLResponse, (200..<300).contains(http2.statusCode) {
+                                        let sessionId = String(data: loginData, encoding: .utf8)?
+                                            .trimmingCharacters(in: CharacterSet(charactersIn: "\" \n\r")) ?? ""
+                                        if !sessionId.isEmpty && sessionId != "00000000-0000-0000-0000-000000000000" {
+                                            dexcomSessionID = sessionId
+                                            activeBase = base
+                                            if dexcomRegion != region { dexcomRegion = region }
+                                            break outerLoop
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            if let errJson = try? JSONSerialization.jsonObject(with: authData) as? [String: Any] {
+                                lastErrorCode = errJson["Code"] as? String ?? "HTTP \(status1)"
+                                lastErrorMessage = errJson["Message"] as? String ?? ""
+                            } else {
+                                lastErrorCode = "HTTP \(status1)"
+                            }
+                        }
+
+                        if let byNameURL = URL(string: "\(base)/General/LoginPublisherAccountByName") {
+                            var nameReq = URLRequest(url: byNameURL, timeoutInterval: 15)
+                            nameReq.httpMethod = "POST"
+                            nameReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                            nameReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                            nameReq.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                            nameReq.httpBody = try JSONSerialization.data(withJSONObject: authBody)
+                            let (nameData, nameResp) = try await URLSession.shared.data(for: nameReq)
+                            if let httpN = nameResp as? HTTPURLResponse, (200..<300).contains(httpN.statusCode) {
+                                let sessionId = String(data: nameData, encoding: .utf8)?
+                                    .trimmingCharacters(in: CharacterSet(charactersIn: "\" \n\r")) ?? ""
+                                if !sessionId.isEmpty && sessionId != "00000000-0000-0000-0000-000000000000" {
+                                    dexcomSessionID = sessionId
+                                    activeBase = base
+                                    if dexcomRegion != region { dexcomRegion = region }
+                                    break outerLoop
+                                }
+                            }
+                        }
+                    } catch {
+                        lastErrorMessage = error.localizedDescription
+                    }
+                }
+            }
+        }
+
+        guard let sid = dexcomSessionID else {
+            if lastErrorCode == "AccountPasswordInvalid" || lastErrorCode == "SSO_AuthenticateAccountNotFound" {
+                dexcomDiagnostic = "Dexcom Share rejected login (\(lastErrorCode)). Note: (1) In the Dexcom G7 iPhone app ? Connections ? Share, 'Share' MUST be turned ON with at least 1 follower (you can invite your own email) before Dexcom activates Share API access for your account. (2) If your Dexcom ID is a UK phone number, try +447... or check your exact Username under Dexcom G7 ? Profile ? Account."
+            } else if !lastErrorCode.isEmpty {
+                dexcomDiagnostic = "Dexcom Share error (\(lastErrorCode)): \(lastErrorMessage)"
+            } else {
+                dexcomDiagnostic = "Could not reach Dexcom Share (\(lastErrorMessage))."
+            }
+            return false
+        }
 
         do {
-            if dexcomSessionID == nil {
-                // Step 1: AuthenticatePublisherAccount -> returns accountId
-                guard let authURL = URL(string: "\(base)/General/AuthenticatePublisherAccount") else { return false }
-                var authReq = URLRequest(url: authURL, timeoutInterval: 15)
-                authReq.httpMethod = "POST"
-                authReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                authReq.setValue("application/json", forHTTPHeaderField: "Accept")
-                let authBody: [String: String] = [
-                    "accountName": dexcomUsername.trimmingCharacters(in: .whitespacesAndNewlines),
-                    "password": dexcomPassword,
-                    "applicationId": appId
-                ]
-                authReq.httpBody = try JSONSerialization.data(withJSONObject: authBody)
-                let (authData, authResp) = try await URLSession.shared.data(for: authReq)
-                guard let http1 = authResp as? HTTPURLResponse, (200..<300).contains(http1.statusCode) else {
-                    return false
-                }
-                let accountId = String(data: authData, encoding: .utf8)?
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "\" \n\r")) ?? ""
-                guard !accountId.isEmpty, accountId != "00000000-0000-0000-0000-000000000000" else {
-                    return false
-                }
-
-                // Step 2: LoginPublisherAccountById -> returns sessionId
-                guard let loginURL = URL(string: "\(base)/General/LoginPublisherAccountById") else { return false }
-                var loginReq = URLRequest(url: loginURL, timeoutInterval: 15)
-                loginReq.httpMethod = "POST"
-                loginReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                loginReq.setValue("application/json", forHTTPHeaderField: "Accept")
-                let loginBody: [String: String] = [
-                    "accountId": accountId,
-                    "password": dexcomPassword,
-                    "applicationId": appId
-                ]
-                loginReq.httpBody = try JSONSerialization.data(withJSONObject: loginBody)
-                let (loginData, loginResp) = try await URLSession.shared.data(for: loginReq)
-                guard let http2 = loginResp as? HTTPURLResponse, (200..<300).contains(http2.statusCode) else {
-                    return false
-                }
-                let sessionId = String(data: loginData, encoding: .utf8)?
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "\" \n\r")) ?? ""
-                guard !sessionId.isEmpty, sessionId != "00000000-0000-0000-0000-000000000000" else {
-                    return false
-                }
-                dexcomSessionID = sessionId
-            }
-
-            guard let sid = dexcomSessionID,
-                  let egvURL = URL(string: "\(base)/Publisher/ReadPublisherLatestGlucoseValues?sessionId=\(sid)&minutes=1440&maxCount=288") else {
+            guard let egvURL = URL(string: "\(activeBase)/Publisher/ReadPublisherLatestGlucoseValues?sessionId=\(sid)&minutes=1440&maxCount=288") else {
                 return false
             }
             var egvReq = URLRequest(url: egvURL, timeoutInterval: 15)
             egvReq.httpMethod = "POST"
+            egvReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
             egvReq.setValue("application/json", forHTTPHeaderField: "Accept")
+            egvReq.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             let (egvData, egvResp) = try await URLSession.shared.data(for: egvReq)
             guard let http3 = egvResp as? HTTPURLResponse, (200..<300).contains(http3.statusCode) else {
                 dexcomSessionID = nil
+                dexcomDiagnostic = "Session expired ? tap Connect & Sync again."
                 return false
             }
 
             guard let arr = try JSONSerialization.jsonObject(with: egvData) as? [[String: Any]] else {
-                return false
+                dexcomDiagnostic = "Connected to Dexcom Share, but response format was unexpected."
+                return true
             }
 
             var parsed: [GlucoseReading] = []
@@ -470,11 +568,15 @@ final class GlucoStore: NSObject, ObservableObject {
 
             if !parsed.isEmpty {
                 readings = parsed.sorted { $0.timestamp < $1.timestamp }
+                dexcomDiagnostic = "Connected to Dexcom Share (\(readings.count) readings loaded)."
+                return true
+            } else {
+                dexcomDiagnostic = "Dexcom login succeeded! However, 0 readings were returned ? open the Dexcom G7 app ? Connections ? Share and make sure Share is turned ON with at least 1 follower."
                 return true
             }
-            return false
         } catch {
             dexcomSessionID = nil
+            dexcomDiagnostic = "Error fetching Dexcom readings: \(error.localizedDescription)"
             return false
         }
     }

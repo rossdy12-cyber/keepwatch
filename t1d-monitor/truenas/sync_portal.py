@@ -29,7 +29,7 @@ NS_SECRET = os.environ.get("NS_SECRET", "glucopulse2026")
 NS_SECRET_SHA1 = hashlib.sha1(NS_SECRET.encode("utf-8")).hexdigest()
 TZ_NAME = os.environ.get("TZ", "Europe/London")
 
-DEXCOM_APP_ID = "d89443d2-327c-4a6f-89e5-496b0317db02"
+DEXCOM_APP_ID = "d89443d2-327c-4a6f-89e5-496bbb0317db"
 DEXCOM_TREND_DIRECTIONS = {
     "None": "NONE",
     "DoubleUp": "DoubleUp",
@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     "tconnect_password": "",
     "tconnect_region": "EU",
     "pump_serial": "",
-    "tconnect_features": "BASAL BOLUS PUMP_EVENTS PROFILES",
+    "tconnect_features": "BASAL BOLUS PUMP_EVENTS PROFILES CGM",
     "dexcom_username": "",
     "dexcom_password": "",
     "dexcom_region": "ous",
@@ -127,49 +127,101 @@ def ns_request(path: str, method: str = "GET", payload=None):
         return json.loads(raw) if raw.strip() else None
 
 
+def _candidate_dexcom_usernames(raw: str) -> list:
+    trimmed = raw.strip()
+    if not trimmed:
+        return []
+    cands = [trimmed]
+    if trimmed.lower() not in cands:
+        cands.append(trimmed.lower())
+    compact = trimmed.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if compact not in cands:
+        cands.append(compact)
+    digits = "".join(ch for ch in compact if ch.isdigit())
+    if compact.startswith("07") and len(digits) == 11:
+        for v in ["+44" + digits[1:], "44" + digits[1:]]:
+            if v not in cands:
+                cands.append(v)
+    elif compact.startswith("+44") and len(digits) >= 11:
+        local_uk = "0" + digits[2:]
+        if local_uk not in cands:
+            cands.append(local_uk)
+    elif compact.startswith("447") and len(digits) == 12:
+        for v in ["+" + digits, "0" + digits[2:]]:
+            if v not in cands:
+                cands.append(v)
+    return cands
+
+
 def sync_dexcom_to_nightscout(cfg: dict):
     username = cfg.get("dexcom_username", "").strip()
-    password = cfg.get("dexcom_password", "").strip()
+    password = cfg.get("dexcom_password", "")
     region = cfg.get("dexcom_region", "ous").strip()
     if not username or not password:
         return
 
-    host = {
+    host_map = {
+        "ous": "https://shareous1.dexcom.com",
         "us": "https://share2.dexcom.com",
         "jp": "https://share.dexcom.jp",
-    }.get(region, "https://shareous1.dexcom.com")
+    }
+    ordered_regions = [region] + [r for r in ["ous", "us", "jp"] if r != region]
+    candidates = _candidate_dexcom_usernames(username)
+    ua = "Dexcom Share/3.0.2.11 CFNetwork/672.0.2 Darwin/14.0.0"
 
-    append_log(f"Dexcom Share: Authenticating ({region.upper()} -> {host})...")
+    session_id = None
+    host = host_map.get(region, "https://shareous1.dexcom.com")
+    last_err = ""
+
     try:
-        auth_url = f"{host}/ShareWebServices/Services/General/AuthenticatePublisherAccount"
-        auth_body = json.dumps({
-            "accountName": username,
-            "password": password,
-            "applicationId": DEXCOM_APP_ID,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            auth_url,
-            data=auth_body,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            account_id = resp.read().decode("utf-8").strip().strip('"')
+        for reg in ordered_regions:
+            h = host_map[reg]
+            for cand in candidates:
+                append_log(f"Dexcom Share: Authenticating ({reg.upper()} -> {h} as '{cand}')...")
+                auth_url = f"{h}/ShareWebServices/Services/General/AuthenticatePublisherAccount"
+                auth_body = json.dumps({
+                    "accountName": cand,
+                    "password": password,
+                    "applicationId": DEXCOM_APP_ID,
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    auth_url,
+                    data=auth_body,
+                    headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": ua},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        account_id = resp.read().decode("utf-8").strip().strip('"')
+                    if account_id and account_id != "00000000-0000-0000-0000-000000000000":
+                        login_url = f"{h}/ShareWebServices/Services/General/LoginPublisherAccountById"
+                        login_body = json.dumps({
+                            "accountId": account_id,
+                            "password": password,
+                            "applicationId": DEXCOM_APP_ID,
+                        }).encode("utf-8")
+                        req2 = urllib.request.Request(
+                            login_url,
+                            data=login_body,
+                            headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": ua},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req2, timeout=15) as resp2:
+                            sid = resp2.read().decode("utf-8").strip().strip('"')
+                        if sid and sid != "00000000-0000-0000-0000-000000000000":
+                            session_id = sid
+                            host = h
+                            break
+                except urllib.error.HTTPError as he:
+                    err_body = he.read().decode("utf-8", "ignore")
+                    last_err = f"HTTP {he.code}: {err_body[:180]}"
+                except Exception as ex:
+                    last_err = str(ex)
+            if session_id:
+                break
 
-        login_url = f"{host}/ShareWebServices/Services/General/LoginPublisherAccountById"
-        login_body = json.dumps({
-            "accountId": account_id,
-            "password": password,
-            "applicationId": DEXCOM_APP_ID,
-        }).encode("utf-8")
-        req2 = urllib.request.Request(
-            login_url,
-            data=login_body,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req2, timeout=15) as resp2:
-            session_id = resp2.read().decode("utf-8").strip().strip('"')
+        if not session_id:
+            raise RuntimeError(f"Dexcom Share rejected login ({last_err}). Ensure 'Share' is turned ON with >=1 follower in the Dexcom G7 app (Connections -> Share).")
 
         egv_url = (
             f"{host}/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues"

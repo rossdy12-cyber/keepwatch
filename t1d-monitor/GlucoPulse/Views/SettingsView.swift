@@ -53,10 +53,8 @@ struct SettingsView: View {
                         Task {
                             let ok = await store.syncDexcomShare()
                             store.dexcomConnected = ok
-                            if ok { store.demoMode = false }
-                            syncFeedback = ok
-                                ? "Connected to Dexcom Share (\(store.readings.count) readings loaded)"
-                                : "Dexcom login failed — verify Share is enabled in the G7 app and check region/credentials."
+                            if ok && !store.readings.isEmpty { store.demoMode = false }
+                            syncFeedback = store.dexcomDiagnostic
                         }
                     } label: {
                         HStack {
