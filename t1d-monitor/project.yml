@@ -1,0 +1,63 @@
+# XcodeGen project description for GlucoPulse (Dexcom G7 + Tandem t:slim X2 Monitor).
+name: GlucoPulse
+options:
+  bundleIdPrefix: app.truenas
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  GlucoPulse:
+    type: application
+    platform: iOS
+    sources:
+      - path: GlucoPulse
+    settings:
+      base:
+        PRODUCT_NAME: GlucoPulse
+        PRODUCT_BUNDLE_IDENTIFIER: app.truenas.glucopulse
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+    info:
+      path: GlucoPulse/Info.plist
+      properties:
+        CFBundleDisplayName: GlucoPulse
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIBackgroundModes:
+          - fetch
+          - bluetooth-central
+        NSBluetoothAlwaysUsageDescription: GlucoPulse monitors nearby Dexcom G7 and Tandem t:slim X2 Bluetooth LE signal status (read-only).
+        NSLocalNetworkUsageDescription: GlucoPulse connects to your Nightscout or TrueNAS bridge over your local network or Tailscale.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true

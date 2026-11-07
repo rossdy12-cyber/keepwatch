@@ -1,0 +1,71 @@
+name: Build GlucoPulse IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "t1d-monitor/**"
+      - ".github/workflows/build-glucopulse-ipa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: t1d-monitor
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project GlucoPulse.xcodeproj \
+            -target GlucoPulse \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet \
+            build
+
+      - name: Package Payload/GlucoPulse.app into GlucoPulse.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/GlucoPulse.app out/Payload/
+          cd out
+          zip -qry GlucoPulse.ipa Payload
+          ls -lh GlucoPulse.ipa
+
+      - name: Upload the .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlucoPulse-ipa
+          path: t1d-monitor/out/GlucoPulse.ipa
+          retention-days: 30
+
+      - name: Publish GlucoPulse.ipa to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create glucopulse-ipa-latest out/GlucoPulse.ipa \
+            --title "GlucoPulse — Dexcom G7 & Tandem t:slim X2 Monitor (Latest IPA)" \
+            --notes "Unsigned GlucoPulse.ipa read-only monitor for Dexcom G7 and Tandem t:slim X2." \
+            || gh release upload glucopulse-ipa-latest out/GlucoPulse.ipa --clobber
