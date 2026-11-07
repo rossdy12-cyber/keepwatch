@@ -742,6 +742,16 @@ final class TandemPumpNativeAuthenticator {
         cleanPairingCode.count == 16
     }
 
+    var hasSavedSecret: Bool {
+        (derivedSecret?.count ?? 0) == 32
+    }
+
+    var hasCredentialsOrSecret: Bool {
+        hasSavedSecret || isSixDigitMode || isSixteenCharMode
+    }
+
+    private(set) var triedFastConfirmInSession: Bool = false
+
     func resetSession(clearPersistedSecret: Bool = false) {
         privateKey1 = nil
         publicKey1 = nil
@@ -755,6 +765,7 @@ final class TandemPumpNativeAuthenticator {
         remoteXm2 = nil
         clientNonce4 = nil
         isAuthenticated = false
+        triedFastConfirmInSession = false
         if clearPersistedSecret {
             derivedSecret = nil
             serverNonce3 = nil
@@ -766,30 +777,32 @@ final class TandemPumpNativeAuthenticator {
     // MARK: - 1. Start Auth Request (6-digit EC-JPAKE or 16-char CentralChallenge)
 
     func makeInitialAuthMessage() -> (opCode: UInt8, cargo: [UInt8], description: String)? {
-        let code = cleanPairingCode
+        // 1. If we already have a confirmed 32-byte EC-JPAKE derivedSecret, use fast Jpake3SessionKeyRequest (opCode 38)
+        if let secret = derivedSecret, secret.count == 32, !triedFastConfirmInSession {
+            triedFastConfirmInSession = true
+            return (38, [0x00, 0x00], "Tandem EC-JPAKE fast session key confirm (op 38)…")
+        }
+        // 2. Full 6-digit EC-JPAKE bootstrap (Jpake1aRequest = opCode 32)
         if isSixDigitMode {
-            // If we already have a confirmed 32-byte derivedSecret, try fast Jpake3SessionKeyRequest (opCode 38)
-            if let secret = derivedSecret, secret.count == 32 {
-                return (38, [0x00, 0x00], "Tandem EC-JPAKE fast session key confirm (op 38)…")
-            }
             guard prepareECJPAKERound1() else { return nil }
             var cargo = [UInt8](repeating: 0, count: 167)
             cargo[0] = UInt8(appInstanceId & 0xFF)
             cargo[1] = UInt8((appInstanceId >> 8) & 0xFF)
             let bytes = [UInt8](clientRound1a.prefix(165))
             for i in 0..<bytes.count { cargo[2 + i] = bytes[i] }
-            return (32, cargo, "Tandem EC-JPAKE Round 1a sent (op 32)…")
-        } else {
-            // CentralChallengeRequest (opCode = 16, size = 10: appInstanceId[2] + random[8])
+            return (32, cargo, "Tandem 6-digit EC-JPAKE Round 1a sent (op 32)…")
+        }
+        // 3. 16-character CentralChallengeRequest (opCode 16 -> PumpChallengeRequest opCode 18)
+        if isSixteenCharMode {
             var rand8 = [UInt8](repeating: 0, count: 8)
             _ = SecRandomCopyBytes(kSecRandomDefault, 8, &rand8)
             var cargo: [UInt8] = [0x01, 0x00]
             cargo.append(contentsOf: rand8)
-            let desc = code.count == 16
-                ? "Tandem CentralChallenge sent (op 16) with 16-char code…"
-                : "Tandem CentralChallenge probe sent (op 16)…"
-            return (16, cargo, desc)
+            return (16, cargo, "Tandem 16-char CentralChallenge sent (op 16)…")
         }
+        // Never send unsolicited CentralChallengeRequest (16) without a pairing code, as the pump
+        // immediately closes the BLE connection if already authenticated or on JPAKE-only firmware.
+        return nil
     }
 
     // MARK: - 2. Handle AUTHORIZATION (7B83FFF9) Response Messages

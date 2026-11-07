@@ -140,9 +140,19 @@ struct PumpHistoryView: View {
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
-                    .frame(width: 116)
+                    .frame(width: 104)
                     .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 8))
                     .foregroundStyle(GlucoTheme.tandemCyan)
+                Button {
+                    store.submitTandemPairingCode()
+                } label: {
+                    Text("Pair")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(GlucoTheme.tandemCyan, in: Capsule())
+                        .foregroundStyle(.black)
+                }
             }
             .padding(10)
             .background(GlucoTheme.cardElevated.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))

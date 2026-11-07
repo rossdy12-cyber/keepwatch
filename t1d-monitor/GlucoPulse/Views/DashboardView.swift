@@ -168,7 +168,7 @@ struct DashboardView: View {
                     Text(store.tandemBLEStatus)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(GlucoTheme.tandemCyan)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
                 Spacer()
                 Button {
@@ -222,6 +222,44 @@ struct DashboardView: View {
                 .padding(.vertical, 4)
                 .background(GlucoTheme.controlIQPurple.opacity(0.2), in: Capsule())
                 .foregroundStyle(GlucoTheme.controlIQPurple)
+            }
+
+            if !store.tandemConnected || store.tandemNeedsPairingCode {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.shield.fill")
+                        .foregroundStyle(GlucoTheme.tandemCyan)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Pump BLE Pairing Code (1-Time Setup)")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(GlucoTheme.textPrimary)
+                        Text("Pump: Options → Device Settings → Bluetooth → Pair Device")
+                            .font(.system(size: 9))
+                            .foregroundStyle(GlucoTheme.textSecondary)
+                    }
+                    Spacer()
+                    TextField("6 or 16 char", text: $store.tandemPairingCode)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.characters)
+                        .multilineTextAlignment(.center)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 5)
+                        .frame(width: 96)
+                        .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 8))
+                        .foregroundStyle(GlucoTheme.tandemCyan)
+                    Button {
+                        store.submitTandemPairingCode()
+                    } label: {
+                        Text("Pair")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(GlucoTheme.tandemCyan, in: Capsule())
+                            .foregroundStyle(.black)
+                    }
+                }
+                .padding(10)
+                .background(GlucoTheme.cardElevated.opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
             }
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {

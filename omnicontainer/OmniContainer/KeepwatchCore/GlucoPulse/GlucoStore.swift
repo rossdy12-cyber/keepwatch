@@ -325,14 +325,13 @@ final class GlucoStore: NSObject, ObservableObject {
             tandemAuthenticator.pairingCode = trimmed
             let clean = tandemAuthenticator.cleanPairingCode
             if clean.count == 6 || clean.count == 16 {
-                tandemAuthenticator.resetSession(clearPersistedSecret: true)
-                for (_, p) in tandemPeripherals where p.state == .connected {
-                    startTandemBLEAuth(on: p)
-                }
+                tandemNeedsPairingCode = false
+                submitTandemPairingCode()
             }
         }
     }
 
+    @Published var tandemNeedsPairingCode: Bool = false
     @Published var isSyncing: Bool = false
     @Published var dexcomConnected: Bool = false
     @Published var dexcomDiagnostic: String = ""
@@ -358,6 +357,7 @@ final class GlucoStore: NSObject, ObservableObject {
     private var allDiscoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var discoveredServicePeripherals: Set<UUID> = []
     private var lastTandemPollAt: [UUID: Date] = [:]
+    private var lastTandemConnectAttemptAt: [UUID: Date] = [:]
     private var tandemTxId: UInt8 = 0
     private var tandemPacketBuffers: [UInt8: [UInt8]] = [:]
     private var tandemAuthPacketBuffers: [UInt8: [UInt8]] = [:]
@@ -371,6 +371,7 @@ final class GlucoStore: NSObject, ObservableObject {
     private var tandemGattReady: Bool = false
     private var tandemRequestQueue: [UInt8] = []
     private var tandemRequestInFlight: Bool = false
+    private var tandemRequestGeneration: UInt64 = 0
     private var tandemTxMismatchRetries: Int = 0
     private var tandemRepliesReceivedCount: Int = 0
     private var tandemAuthInProgress: Bool = false
@@ -1074,9 +1075,44 @@ final class GlucoStore: NSObject, ObservableObject {
         }
     }
 
+    func submitTandemPairingCode() {
+        let trimmed = tandemPairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(trimmed, forKey: Self.tandemPairingCodeKey)
+        tandemAuthenticator.pairingCode = trimmed
+        tandemAuthenticator.resetSession(clearPersistedSecret: true)
+        tandemNeedsPairingCode = false
+        lastTandemConnectAttemptAt.removeAll()
+
+        guard let central = centralManager else {
+            startDirectG7BLE()
+            return
+        }
+        var foundAny = false
+        for (_, p) in tandemPeripherals {
+            foundAny = true
+            if p.state == .connected {
+                if tandemAuthChar != nil {
+                    startTandemBLEAuth(on: p)
+                } else {
+                    p.discoverServices(nil)
+                }
+            } else {
+                tandemBLEStatus = "Connecting to \(p.name ?? "t:slim X2") to pair with code \(tandemAuthenticator.cleanPairingCode)…"
+                central.connect(p, options: [
+                    CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                    CBConnectPeripheralOptionNotifyOnNotificationKey: true
+                ])
+            }
+        }
+        if !foundAny {
+            pollConnectedG7Peripherals()
+        }
+    }
+
     func forceBLEPollNow() {
         discoveredServicePeripherals.removeAll()
         lastTandemPollAt.removeAll()
+        lastTandemConnectAttemptAt.removeAll()
         g7InitialPacketSent = false
         g7ChallengeResponseSent = false
         tandemTxMismatchRetries = 0
@@ -1084,9 +1120,14 @@ final class GlucoStore: NSObject, ObservableObject {
         pollConnectedG7Peripherals()
         for (_, p) in tandemPeripherals where p.state == .connected {
             tandemBLEStatus = "Re-discovering Tandem GATT services & polling live status…"
-            p.discoverServices(nil)
-            if tandemCurrentStatusChar != nil {
-                requestTandemLiveStatus(on: p)
+            if tandemCurrentStatusChar != nil && tandemAuthChar != nil {
+                if tandemAuthenticator.hasCredentialsOrSecret && !tandemAuthenticator.isAuthenticated {
+                    startTandemBLEAuth(on: p)
+                } else {
+                    requestTandemLiveStatus(on: p)
+                }
+            } else {
+                p.discoverServices(nil)
             }
         }
         for (_, p) in g7Peripherals where p.state == .connected {
@@ -1320,14 +1361,25 @@ final class GlucoStore: NSObject, ObservableObject {
                 peripheral.discoverServices(nil)
             } else if tandemGattReady && !tandemRequestInFlight && !tandemAuthInProgress {
                 let lastPoll = lastTandemPollAt[peripheral.identifier] ?? .distantPast
-                if Date().timeIntervalSince(lastPoll) >= 15 {
-                    requestTandemLiveStatus(on: peripheral)
+                if Date().timeIntervalSince(lastPoll) >= 20 {
+                    if tandemAuthenticator.hasCredentialsOrSecret && !tandemAuthenticator.isAuthenticated {
+                        startTandemBLEAuth(on: peripheral)
+                    } else if !tandemNeedsPairingCode {
+                        requestTandemLiveStatus(on: peripheral)
+                    }
                 }
             }
         } else if peripheral.state == .disconnected {
+            let now = Date()
+            let lastAttempt = lastTandemConnectAttemptAt[peripheral.identifier] ?? .distantPast
+            let cooldown: TimeInterval = (tandemNeedsPairingCode && !tandemAuthenticator.hasCredentialsOrSecret) ? 18.0 : 4.0
+            guard now.timeIntervalSince(lastAttempt) >= cooldown else { return }
+            lastTandemConnectAttemptAt[peripheral.identifier] = now
             discoveredServicePeripherals.remove(peripheral.identifier)
             tandemGattReady = false
-            tandemBLEStatus = "Connecting to \(name)…"
+            if !tandemNeedsPairingCode || tandemAuthenticator.hasCredentialsOrSecret {
+                tandemBLEStatus = "Connecting to \(name)…"
+            }
             central.connect(peripheral, options: [
                 CBConnectPeripheralOptionNotifyOnConnectionKey: true,
                 CBConnectPeripheralOptionNotifyOnNotificationKey: true
@@ -1622,9 +1674,13 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
                 self.pumpStatus.pumpSerialNumber = pumpName
                 self.tandemGattReady = false
                 self.tandemRequestInFlight = false
+                self.tandemRequestGeneration &+= 1
                 self.tandemAuthInProgress = false
+                self.tandemAuthenticator.pairingCode = self.tandemPairingCode
+                self.tandemAuthenticator.resetSession(clearPersistedSecret: false)
                 self.tandemTxId = 0
                 self.tandemTxMismatchRetries = 0
+                self.tandemRepliesReceivedCount = 0
                 self.tandemPacketBuffers.removeAll()
                 self.tandemAuthPacketBuffers.removeAll()
                 self.pendingTandemNotifyUUIDs.removeAll()
@@ -1667,20 +1723,35 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             if isTandem {
                 self.tandemGattReady = false
                 self.tandemRequestInFlight = false
+                self.tandemRequestGeneration &+= 1
                 self.tandemAuthInProgress = false
-                self.tandemBLEStatus = "t:slim X2 disconnected · Reconnecting…"
+                self.lastTandemConnectAttemptAt[p.identifier] = Date()
+                let pumpName = self.pumpStatus.pumpSerialNumber.isEmpty ? (rawName.isEmpty ? "t:slim X2" : rawName) : self.pumpStatus.pumpSerialNumber
+                if !self.tandemAuthenticator.hasCredentialsOrSecret && self.tandemRepliesReceivedCount == 0 {
+                    self.tandemNeedsPairingCode = true
+                    self.tandemBLEStatus = "iOS paired with \(pumpName) · Enter 6-digit/16-char Pump Pairing Code (Options → Device Settings → Bluetooth → Pair Device) below!"
+                    return
+                } else {
+                    self.tandemBLEStatus = "\(pumpName) disconnected · Reconnecting in 3s…"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                        guard let self, self.g7DirectBLEEnabled, p.state == .disconnected else { return }
+                        central.connect(p, options: [
+                            CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                            CBConnectPeripheralOptionNotifyOnNotificationKey: true
+                        ])
+                    }
+                    return
+                }
             } else {
                 self.g7WriteGeneration &+= 1
             }
             if self.g7DirectBLEEnabled {
-                if !isTandem {
-                    let name = rawName.isEmpty ? self.g7BLEConnectedName : rawName
-                    if self.lastBLEGlucoseDate == nil {
-                        if self.g7Authenticator.hasConfirmedSharedKey {
-                            self.g7BLEStatus = "Paired with \(name) · Waiting for next 5-min G7 wake tick…"
-                        } else {
-                            self.g7BLEStatus = "Waiting for next 5-min G7 wake from \(name) (Code \(self.g7PairingCode))…"
-                        }
+                let name = rawName.isEmpty ? self.g7BLEConnectedName : rawName
+                if self.lastBLEGlucoseDate == nil {
+                    if self.g7Authenticator.hasConfirmedSharedKey {
+                        self.g7BLEStatus = "Paired with \(name) · Waiting for next 5-min G7 wake tick…"
+                    } else {
+                        self.g7BLEStatus = "Waiting for next 5-min G7 wake from \(name) (Code \(self.g7PairingCode))…"
                     }
                 }
                 central.connect(p, options: [
@@ -1775,17 +1846,9 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
                 case Self.tandemControlCharUUID:
                     self.tandemControlChar = ch
                     foundTandem = true
-                    if !ch.isNotifying {
-                        self.pendingTandemNotifyUUIDs.insert(ch.uuid)
-                        p.setNotifyValue(true, for: ch)
-                    }
                 case Self.tandemControlStreamCharUUID:
                     self.tandemControlStreamChar = ch
                     foundTandem = true
-                    if !ch.isNotifying {
-                        self.pendingTandemNotifyUUIDs.insert(ch.uuid)
-                        p.setNotifyValue(true, for: ch)
-                    }
 
                 case Self.disManufacturerCharUUID, Self.disModelNumberCharUUID, Self.disSerialNumberCharUUID, Self.disSoftwareRevCharUUID:
                     p.readValue(for: ch)
@@ -1927,12 +1990,38 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
     private func onTandemNotificationsReady(peripheral: CBPeripheral) {
         guard !tandemGattReady else { return }
         tandemGattReady = true
+        tandemAuthenticator.pairingCode = tandemPairingCode
         let pumpName = pumpStatus.pumpSerialNumber.isEmpty ? (peripheral.name ?? "t:slim X2") : pumpStatus.pumpSerialNumber
-        tandemBLEStatus = "Connected to \(pumpName) · Subscribed to FFF6..FFFD · Requesting live CGM & IOB…"
-        // Wait 300ms after final CCCD notification write before sending first request
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+
+        // CRITICAL: If we have a saved JPAKE secret or a 6-digit/16-char pairing code, we MUST
+        // authenticate on AUTHORIZATION (7B83FFF9) FIRST within the pump's 5-second window!
+        if tandemAuthenticator.hasCredentialsOrSecret && !tandemAuthenticator.isAuthenticated {
+            tandemNeedsPairingCode = false
+            tandemBLEStatus = "Connected to \(pumpName) · Authenticating Tandem BLE session…"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self, peripheral.state == .connected else { return }
+                self.startTandemBLEAuth(on: peripheral)
+            }
+            return
+        }
+
+        if tandemAuthenticator.isAuthenticated {
+            tandemNeedsPairingCode = false
+            tandemBLEStatus = "Connected to \(pumpName) · Requesting live CGM & IOB…"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self, peripheral.state == .connected else { return }
+                self.requestTandemLiveStatus(on: peripheral)
+            }
+            return
+        }
+
+        // Otherwise (no pairing code entered yet in GlucoPulse), send ONE single probe (opCode 34)
+        // in case the official t:connect app is sharing an already-authenticated BLE link.
+        tandemBLEStatus = "Connected to \(pumpName) · Checking shared BLE session…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self, peripheral.state == .connected else { return }
-            self.requestTandemLiveStatus(on: peripheral)
+            self.tandemRequestQueue = [34]
+            self.sendNextTandemStatusRequest(on: peripheral)
         }
     }
 
@@ -1941,16 +2030,16 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
         guard tandemCurrentStatusChar != nil, peripheral.state == .connected else { return }
         lastTandemPollAt[peripheral.identifier] = Date()
         // Sequential queue:
-        // 32 = ApiVersionRequest
         // 34 = CurrentEGVGuiDataRequest (G7 CGM glucose + trend on pump)
-        // 60 = CGMStatusRequest (CGM session state + sensor start + transmitter battery)
         // 108 = ControlIQIOBRequest (active IOB)
         // 40 = CurrentBasalStatusRequest (active & scheduled basal rate)
         // 36 = InsulinStatusRequest (cartridge units remaining)
         // 52 = CurrentBatteryV1Request (pump battery %)
-        // 48 = LastBolusStatusRequest & 164 = LastBolusStatusV2Request
+        // 164 = LastBolusStatusV2Request & 48 = LastBolusStatusRequest
         // 56 = HomeScreenMirrorRequest (trend & Control-IQ state icons)
-        tandemRequestQueue = [32, 34, 60, 108, 40, 36, 52, 48, 164, 56]
+        // 60 = CGMStatusRequest
+        // 32 = ApiVersionRequest
+        tandemRequestQueue = [34, 108, 40, 36, 52, 164, 48, 56, 60, 32]
         if !tandemRequestInFlight {
             sendNextTandemStatusRequest(on: peripheral)
         }
@@ -1969,6 +2058,8 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
         tandemRequestInFlight = true
+        tandemRequestGeneration &+= 1
+        let gen = tandemRequestGeneration
         let op = tandemRequestQueue.removeFirst()
         let tx = tandemTxId
         tandemTxId = tandemTxId &+ 1
@@ -1978,16 +2069,24 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             peripheral.writeValue(pkt, for: ch, type: wType)
         }
 
-        // Advance after 0.65s if no response arrived for this opCode yet
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
-            guard let self, self.tandemRequestInFlight, !self.tandemAuthInProgress else { return }
+        let timeoutSec: TimeInterval = (tandemRepliesReceivedCount == 0 && !tandemAuthenticator.isAuthenticated) ? 1.4 : 0.45
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSec) { [weak self] in
+            guard let self,
+                  self.tandemRequestGeneration == gen,
+                  self.tandemRequestInFlight,
+                  !self.tandemAuthInProgress else { return }
             if !self.tandemRequestQueue.isEmpty {
                 self.sendNextTandemStatusRequest(on: peripheral)
             } else {
                 self.tandemRequestInFlight = false
                 if self.tandemRepliesReceivedCount == 0 {
-                    // Pump did not answer unauthenticated CURRENT_STATUS; initiate AUTHORIZATION check
-                    self.startTandemBLEAuth(on: peripheral)
+                    if self.tandemAuthenticator.hasCredentialsOrSecret && !self.tandemAuthenticator.isAuthenticated {
+                        self.startTandemBLEAuth(on: peripheral)
+                    } else if !self.tandemAuthenticator.hasCredentialsOrSecret {
+                        let pumpName = self.pumpStatus.pumpSerialNumber.isEmpty ? (peripheral.name ?? "t:slim X2") : self.pumpStatus.pumpSerialNumber
+                        self.tandemNeedsPairingCode = true
+                        self.tandemBLEStatus = "iOS paired with \(pumpName) · Enter 6-digit or 16-char Pump Pairing Code (Options → Device Settings → Bluetooth → Pair Device) below!"
+                    }
                 }
             }
         }
@@ -1997,21 +2096,26 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
     func startTandemBLEAuth(on peripheral: CBPeripheral) {
         guard peripheral.state == .connected,
               let authCh = tandemAuthChar else {
-            tandemBLEStatus = "Connected to \(pumpStatus.pumpSerialNumber) · Open Tandem t:connect app briefly OR enter Pump Pairing Code below."
+            tandemBLEStatus = "Connected to \(pumpStatus.pumpSerialNumber) · Enter Pump Pairing Code below."
             return
         }
+        tandemAuthenticator.pairingCode = tandemPairingCode
         guard let initMsg = tandemAuthenticator.makeInitialAuthMessage() else {
+            tandemNeedsPairingCode = true
             tandemBLEStatus = "Enter Tandem Pairing Code (Pump: Options → Device Settings → Bluetooth Settings → Pair Device)."
             return
         }
+        tandemNeedsPairingCode = false
         tandemAuthInProgress = true
+        tandemRequestInFlight = false
+        tandemRequestGeneration &+= 1
         let tx = tandemTxId
         tandemTxId = tandemTxId &+ 1
         let pkts = Self.makeTandemPackets(opCode: initMsg.opCode, txId: tx, cargo: initMsg.cargo)
         let wType: CBCharacteristicWriteType = authCh.properties.contains(.write) ? .withResponse : .withoutResponse
         tandemBLEStatus = initMsg.description
         for (idx, pkt) in pkts.enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.035 * Double(idx)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025 * Double(idx)) {
                 guard peripheral.state == .connected else { return }
                 peripheral.writeValue(pkt, for: authCh, type: wType)
             }
@@ -2023,7 +2127,9 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
         guard bytes.count >= 3 else { return }
         let packetsRemaining = bytes[0] & 0x0F
         let txId = bytes[1]
-        tandemTxId = txId &+ 1
+        if tandemTxId <= txId {
+            tandemTxId = txId &+ 1
+        }
         let chunk = Array(bytes.dropFirst(2))
 
         var accumulated = tandemAuthPacketBuffers[txId] ?? []
@@ -2044,14 +2150,23 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
         if opCode == 77 { // ErrorResponse on AUTHORIZATION
             tandemAuthInProgress = false
             let errCode = cargo.count >= 2 ? cargo[1] : 0
-            tandemBLEStatus = "t:slim X2 Auth Response (err=\(errCode)) · Open t:connect app OR enter Pump Pairing Code below."
+            // If fast session key confirm (op 38) failed because pump was re-paired, clear secret and retry full bootstrap
+            if tandemAuthenticator.triedFastConfirmInSession {
+                tandemAuthenticator.resetSession(clearPersistedSecret: true)
+                if tandemAuthenticator.isSixDigitMode {
+                    startTandemBLEAuth(on: peripheral)
+                    return
+                }
+            }
+            tandemNeedsPairingCode = true
+            tandemBLEStatus = "t:slim X2 Auth Response (err=\(errCode)) · Enter 6-digit or 16-char Pump Pairing Code below."
             return
         }
 
         if opCode == 17 && tandemAuthenticator.cleanPairingCode.count != 16 {
-            // CentralChallengeResponse arrived! Pump is ready and waiting for pairing code
             tandemAuthInProgress = false
-            tandemBLEStatus = "t:slim X2 ready · Open t:connect app in background OR enter Pump Pairing Code (Options → Device Settings → Bluetooth Settings → Pair Device)!"
+            tandemNeedsPairingCode = true
+            tandemBLEStatus = "t:slim X2 ready · Enter 16-char Pump Pairing Code (Options → Device Settings → Bluetooth Settings → Pair Device)!"
             return
         }
 
@@ -2063,7 +2178,7 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
                 let pkts = Self.makeTandemPackets(opCode: nextStep.nextOpCode, txId: tx, cargo: nextStep.nextCargo)
                 let wType: CBCharacteristicWriteType = authCh.properties.contains(.write) ? .withResponse : .withoutResponse
                 for (idx, pkt) in pkts.enumerated() {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.035 * Double(idx)) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.025 * Double(idx)) {
                         guard peripheral.state == .connected else { return }
                         peripheral.writeValue(pkt, for: authCh, type: wType)
                     }
@@ -2071,8 +2186,10 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             } else {
                 tandemAuthInProgress = false
                 if tandemAuthenticator.isAuthenticated {
-                    tandemTxId = 0
+                    tandemNeedsPairingCode = false
                     requestTandemLiveStatus(on: peripheral)
+                } else {
+                    tandemNeedsPairingCode = true
                 }
             }
         }
@@ -2128,11 +2245,10 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             let errCode = cargo.count >= 2 ? cargo[1] : 0
             if errCode == 3 { // TRANSACTION_ID_MISMATCH
                 tandemTxMismatchRetries += 1
-                if tandemTxMismatchRetries <= 32 {
-                    if reqOp != 0 {
+                if tandemTxMismatchRetries <= 40 {
+                    if reqOp != 0 && !tandemRequestQueue.contains(reqOp) {
                         tandemRequestQueue.insert(reqOp, at: 0)
                     }
-                    tandemTxId = tandemTxId &+ 1
                     tandemBLEStatus = "Syncing t:slim X2 transaction ID (txId=\(tandemTxId))…"
                     sendNextTandemStatusRequest(on: peripheral)
                 }
@@ -2140,7 +2256,12 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             } else if errCode == 9 { // INVALID_AUTHENTICATION_ERROR
                 tandemRequestQueue.removeAll()
                 tandemRequestInFlight = false
-                startTandemBLEAuth(on: peripheral)
+                if tandemAuthenticator.hasCredentialsOrSecret {
+                    startTandemBLEAuth(on: peripheral)
+                } else {
+                    tandemNeedsPairingCode = true
+                    tandemBLEStatus = "t:slim X2 requires BLE Pairing Code (Options → Device Settings → Bluetooth → Pair Device)."
+                }
                 return
             } else {
                 tandemBLEStatus = "t:slim X2 status response (op=\(reqOp), code=\(errCode)) · Continuing…"
@@ -2149,8 +2270,14 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             }
         }
 
+        let wasFirstReply = (tandemRepliesReceivedCount == 0)
         tandemRepliesReceivedCount += 1
         tandemTxMismatchRetries = 0
+        tandemNeedsPairingCode = false
+        if wasFirstReply && tandemRequestQueue.isEmpty {
+            // Shared connection probe succeeded! Queue the remaining telemetry requests
+            tandemRequestQueue = [108, 40, 36, 52, 164, 48, 56, 60, 32]
+        }
 
         if isShowingSimulatedData || demoMode {
             clearSimulatedData()
