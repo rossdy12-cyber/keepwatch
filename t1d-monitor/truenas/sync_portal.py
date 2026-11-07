@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     "tconnect_password": "",
     "tconnect_region": "EU",
     "pump_serial": "",
-    "tconnect_features": "BASAL BOLUS PUMP_EVENTS PROFILES CGM",
+    "tconnect_features": "BASAL BOLUS IOB PUMP_EVENTS PUMP_EVENTS_BASAL_SUSPENSION PROFILES CGM CGM_ALERTS DEVICE_STATUS",
     "dexcom_username": "",
     "dexcom_password": "",
     "dexcom_region": "ous",
@@ -339,54 +339,89 @@ def update_pump_devicestatus_from_treatments(cfg: dict):
 def run_tconnectsync_once(cfg: dict):
     email = cfg.get("tconnect_email", "").strip()
     password = cfg.get("tconnect_password", "").strip()
-    region = cfg.get("tconnect_region", "EU").strip()
-    features = cfg.get("tconnect_features", "BASAL BOLUS PUMP_EVENTS PROFILES").strip().split()
+    primary_region = cfg.get("tconnect_region", "EU").strip().upper() or "EU"
+    raw_features = cfg.get(
+        "tconnect_features",
+        "BASAL BOLUS IOB PUMP_EVENTS PUMP_EVENTS_BASAL_SUSPENSION PROFILES CGM CGM_ALERTS DEVICE_STATUS",
+    ).strip().split()
+
+    # Always ensure CGM, IOB, and DEVICE_STATUS are enabled so Tandem Source G7 CGM readings
+    # and pump status flow into Nightscout without needing the official Dexcom G7 app.
+    features = list(dict.fromkeys((raw_features or ["BASAL", "BOLUS", "PUMP_EVENTS", "PROFILES"]) + ["CGM", "IOB", "DEVICE_STATUS"]))
 
     if not email or not password:
         return
 
     write_tconnect_env(cfg)
-    env = os.environ.copy()
-    env["TCONNECT_EMAIL"] = email
-    env["TCONNECT_PASSWORD"] = password
-    env["TCONNECT_REGION"] = region
-    env["NS_URL"] = f"{NS_INTERNAL_URL}/"
-    env["NS_SECRET"] = NS_SECRET
-    env["TIMEZONE_NAME"] = TZ_NAME
-    if str(cfg.get("pump_serial", "")).strip():
-        env["PUMP_SERIAL_NUMBER"] = str(cfg.get("pump_serial", "")).strip()
+    alt_region = "US" if primary_region == "EU" else "EU"
+    regions_to_try = [primary_region, alt_region]
 
-    cmd = ["tconnectsync", "--features"] + (features if features else ["BASAL", "BOLUS", "PUMP_EVENTS", "PROFILES"])
-    append_log(f"Tandem tconnectsync: Running {' '.join(cmd)} (Region: {region})...")
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd="/config",
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        for line in out.splitlines():
-            if line.strip():
-                append_log(f"[tconnectsync] {line.strip()}")
+    entry_script = "/home/appuser/main.py"
+    work_dir = "/home/appuser" if os.path.isdir("/home/appuser") else "/config"
 
-        if proc.returncode == 0:
-            update_pump_devicestatus_from_treatments(cfg)
-            msg = f"Success (exit 0) — synced Tandem Source ({region}) to Nightscout"
+    for idx, region in enumerate(regions_to_try):
+        env = os.environ.copy()
+        env["TCONNECT_EMAIL"] = email
+        env["TCONNECT_PASSWORD"] = password
+        env["TCONNECT_REGION"] = region
+        env["NS_URL"] = f"{NS_INTERNAL_URL}/"
+        env["NS_SECRET"] = NS_SECRET
+        env["TIMEZONE_NAME"] = TZ_NAME
+        env["PYTHONPATH"] = "/home/appuser"
+        if str(cfg.get("pump_serial", "")).strip():
+            env["PUMP_SERIAL_NUMBER"] = str(cfg.get("pump_serial", "")).strip()
+
+        if os.path.isfile(entry_script):
+            cmd = ["python3", "-u", entry_script, "--region", region, "--features"] + features
         else:
-            msg = f"Exited with code {proc.returncode} (see logs below)"
+            cmd = ["tconnectsync", "--region", region, "--features"] + features
 
-        with state_lock:
-            sync_status["last_tconnect_run"] = datetime.now().strftime("%H:%M:%S")
-            sync_status["last_tconnect_result"] = msg
-    except Exception as e:
-        err_msg = f"Error running tconnectsync: {e}"
-        append_log(err_msg)
-        with state_lock:
-            sync_status["last_tconnect_run"] = datetime.now().strftime("%H:%M:%S")
-            sync_status["last_tconnect_result"] = err_msg
+        append_log(f"Tandem tconnectsync: Running (Region: {region}, Features: {' '.join(features)})...")
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            for line in lines:
+                append_log(f"[tconnectsync] {line}")
+
+            is_auth_err = ("401" in out or "authorization errors" in out.lower() or "invalid credentials" in out.lower())
+            if is_auth_err and idx == 0:
+                append_log(f"Tandem Source {region} returned 401; retrying with {alt_region} region...")
+                continue
+
+            has_fatal = any(k in out for k in ("Traceback (most recent call last)", "ApiException", "ApiLoginException", "Unable to read secrets"))
+            if proc.returncode == 0 or (proc.returncode == 1 and not has_fatal):
+                if region != primary_region:
+                    cfg["tconnect_region"] = region
+                    save_config(cfg)
+                update_pump_devicestatus_from_treatments(cfg)
+                added_info = "new events uploaded" if proc.returncode == 0 else "up to date (0 new events)"
+                msg = f"Success — Tandem Source ({region}) Pump + G7 CGM synced ({added_info})"
+                with state_lock:
+                    sync_status["last_tconnect_run"] = datetime.now().strftime("%H:%M:%S")
+                    sync_status["last_tconnect_result"] = msg
+                return
+            else:
+                tail = lines[-1] if lines else f"exit {proc.returncode}"
+                msg = f"Error ({region}): {tail[:180]}"
+                with state_lock:
+                    sync_status["last_tconnect_run"] = datetime.now().strftime("%H:%M:%S")
+                    sync_status["last_tconnect_result"] = msg
+                return
+        except Exception as e:
+            err_msg = f"Error running tconnectsync: {e}"
+            append_log(err_msg)
+            with state_lock:
+                sync_status["last_tconnect_run"] = datetime.now().strftime("%H:%M:%S")
+                sync_status["last_tconnect_result"] = err_msg
+            return
 
 
 def run_full_sync_cycle():
@@ -690,6 +725,31 @@ class PortalHandler(BaseHTTPRequestHandler):
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path.startswith("/api/config"):
+            cfg = load_config()
+            with state_lock:
+                st = dict(sync_status)
+            payload = {
+                "tconnect_email": cfg.get("tconnect_email", ""),
+                "has_tconnect_password": bool(cfg.get("tconnect_password", "")),
+                "tconnect_region": cfg.get("tconnect_region", "EU"),
+                "pump_serial": cfg.get("pump_serial", ""),
+                "tconnect_features": cfg.get("tconnect_features", ""),
+                "dexcom_username": cfg.get("dexcom_username", ""),
+                "has_dexcom_password": bool(cfg.get("dexcom_password", "")),
+                "dexcom_region": cfg.get("dexcom_region", "ous"),
+                "sync_interval_seconds": cfg.get("sync_interval_seconds", 300),
+                "status": st,
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -728,7 +788,74 @@ class PortalHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, api-secret")
+        self.end_headers()
+
     def do_POST(self):
+        if self.path.startswith("/api/config"):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8")
+            try:
+                incoming = json.loads(raw) if raw else {}
+            except Exception as e:
+                self.send_error(400, f"Invalid JSON: {e}")
+                return
+            cfg = load_config()
+            for field in [
+                "tconnect_email",
+                "tconnect_password",
+                "tconnect_region",
+                "pump_serial",
+                "tconnect_features",
+                "dexcom_username",
+                "dexcom_password",
+                "dexcom_region",
+            ]:
+                if field in incoming and incoming[field] is not None:
+                    val = str(incoming[field]).strip()
+                    if field in ("tconnect_password", "dexcom_password") and val == "":
+                        continue
+                    cfg[field] = val
+            save_config(cfg)
+            append_log("Configuration updated via GlucoPulse iOS App API — running immediate sync cycle.")
+            threading.Thread(target=run_full_sync_cycle, daemon=True).start()
+            with state_lock:
+                st = dict(sync_status)
+            body = json.dumps({"ok": True, "status": st}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path.startswith("/api/ble-readings"):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8")
+            try:
+                entries = json.loads(raw) if raw else []
+                if isinstance(entries, dict):
+                    entries = [entries]
+                if entries:
+                    ns_request("/api/v1/entries.json", method="POST", payload=entries)
+                    latest_mgdl = entries[0].get("sgv", 0)
+                    latest_mmol = round(float(latest_mgdl) / 18.0182, 1)
+                    append_log(f"Direct G7 BLE: Stored {len(entries)} reading(s) in Nightscout (Latest: {latest_mmol} mmol/L / {latest_mgdl} mg/dL)")
+                body = json.dumps({"ok": True, "count": len(entries)}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                append_log(f"Direct G7 BLE ingest error: {e}")
+                self.send_error(500, str(e))
+            return
+
         if self.path.startswith("/save"):
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8")

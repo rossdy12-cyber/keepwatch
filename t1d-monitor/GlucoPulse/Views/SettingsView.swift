@@ -37,6 +37,109 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Direct Dexcom G7 Bluetooth LE", isOn: $store.g7DirectBLEEnabled)
+                    HStack {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .foregroundStyle(GlucoTheme.inRangeGreen)
+                        Text(store.g7BLEStatus)
+                            .font(.caption)
+                            .foregroundStyle(GlucoTheme.textSecondary)
+                    }
+                    Button {
+                        store.startDirectG7BLE()
+                        store.pollConnectedG7Peripherals()
+                        syncFeedback = store.g7BLEStatus
+                    } label: {
+                        Label("Scan & Attach Bonded Dexcom G7 Sensor", systemImage: "wave.3.right.circle.fill")
+                            .foregroundStyle(GlucoTheme.inRangeGreen)
+                    }
+                } header: {
+                    Text("Standalone Mode 1 · Direct Dexcom G7 Bluetooth LE")
+                } footer: {
+                    Text("Reads glucose (0x4e) & 6h backfill (0x59) directly from your nearby Dexcom G7 over iOS CoreBluetooth GATT (FEBC / F8083532) without needing the official Dexcom G7 app.")
+                }
+
+                Section {
+                    Picker("Tandem Region", selection: $store.tandemRegion) {
+                        Text("UK / Europe / International (EU)").tag("EU")
+                        Text("United States (US)").tag("US")
+                    }
+                    TextField("Tandem Source Email", text: $store.tandemEmail)
+                        .keyboardType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Tandem Source Password", text: $store.tandemPassword)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("t:slim X2 Serial Number (optional)", text: $store.tandemPumpSerial)
+                        .keyboardType(.numberPad)
+
+                    Button {
+                        Task {
+                            let ok = await store.saveAndSyncTandemSource()
+                            syncFeedback = store.tandemDiagnostic.isEmpty
+                                ? (ok ? "Synced Tandem Source (G7 CGM + Pump)!" : "Tandem Source sync failed.")
+                                : store.tandemDiagnostic
+                        }
+                    } label: {
+                        HStack {
+                            Label("Save & Sync Tandem Source (G7 CGM + Pump)", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                            Spacer()
+                            if store.tandemConnected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(GlucoTheme.tandemCyan)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Standalone Mode 2 · Tandem Source (G7 CGM + t:slim X2)")
+                } footer: {
+                    Text("Your Tandem t:slim X2 pump uploads every 5-minute Dexcom G7 reading plus IOB, basal & boluses to Tandem Source. Saving here configures TrueNAS tconnectsync (:1338) with CGM enabled — no Dexcom app needed.")
+                }
+
+                Section {
+                    TextField("Nightscout or TrueNAS Bridge URL", text: $store.nightscoutURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("API Secret / Read Token (optional)", text: $store.nightscoutToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Button {
+                        Task {
+                            let ok = await store.syncNightscout()
+                            store.tandemConnected = ok
+                            if ok { store.demoMode = false }
+                            syncFeedback = ok
+                                ? "Connected to TrueNAS Nightscout (:1337)"
+                                : "Connected to Nightscout (0 entries yet — enter Tandem Source login above or wait for G7 BLE)."
+                        }
+                    } label: {
+                        HStack {
+                            Label("Refresh TrueNAS Nightscout (:1337)", systemImage: "drop.transmission")
+                            Spacer()
+                            if store.tandemConnected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(GlucoTheme.tandemCyan)
+                            }
+                        }
+                    }
+
+                    Button {
+                        showingTrueNASPortal = true
+                    } label: {
+                        Label("Open TrueNAS Bridge Web UI (:1338)", systemImage: "server.rack")
+                            .foregroundStyle(GlucoTheme.tandemCyan)
+                    }
+                } header: {
+                    Text("TrueNAS Nightscout Bridge (:1337 / :1338)")
+                }
+                .sheet(isPresented: $showingTrueNASPortal) {
+                    TandemPortalSheet(initialURL: store.truenasBridgeBaseURL, title: "TrueNAS tconnectsync Bridge")
+                }
+
+                Section {
                     Picker("Dexcom Server Region", selection: $store.dexcomRegion) {
                         ForEach(DexcomRegion.allCases) { reg in
                             Text(reg.rawValue).tag(reg)
@@ -58,7 +161,7 @@ struct SettingsView: View {
                         }
                     } label: {
                         HStack {
-                            Label("Connect & Sync Dexcom G7 Share", systemImage: "sensor.tag.radiowaves.forward.fill")
+                            Label("Verify Dexcom Share Account (Optional)", systemImage: "sensor.tag.radiowaves.forward.fill")
                             Spacer()
                             if store.dexcomConnected {
                                 Image(systemName: "checkmark.circle.fill")
@@ -67,53 +170,9 @@ struct SettingsView: View {
                         }
                     }
                 } header: {
-                    Text("Dexcom G7 (Direct Share Cloud)")
+                    Text("Optional · Dexcom Share Cloud")
                 } footer: {
-                    Text("Uses your Dexcom G7 Share account directly. Use 'UK / International (shareous1)' for UK/EU accounts.")
-                }
-
-                Section {
-                    TextField("Nightscout or TrueNAS Bridge URL", text: $store.nightscoutURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("API Secret / Read Token (optional)", text: $store.nightscoutToken)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    Button {
-                        Task {
-                            let ok = await store.syncNightscout()
-                            store.tandemConnected = ok
-                            if ok { store.demoMode = false }
-                            syncFeedback = ok
-                                ? "Connected to TrueNAS Nightscout / Tandem Bridge"
-                                : "Couldn't reach Nightscout URL."
-                        }
-                    } label: {
-                        HStack {
-                            Label("Sync TrueNAS Nightscout (:1337)", systemImage: "drop.transmission")
-                            Spacer()
-                            if store.tandemConnected {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(GlucoTheme.tandemCyan)
-                            }
-                        }
-                    }
-
-                    Button {
-                        showingTrueNASPortal = true
-                    } label: {
-                        Label("Configure TrueNAS tconnectsync (:1338)", systemImage: "server.rack")
-                            .foregroundStyle(GlucoTheme.tandemCyan)
-                    }
-                } header: {
-                    Text("TrueNAS Tandem t:slim X2 / Nightscout Bridge")
-                } footer: {
-                    Text("Pre-configured for your TrueNAS server (http://100.85.127.42:1337). Tap 'Configure TrueNAS tconnectsync (:1338)' to enter your Tandem Source login on TrueNAS.")
-                }
-                .sheet(isPresented: $showingTrueNASPortal) {
-                    TandemPortalSheet(initialURL: "http://100.85.127.42:1338", title: "TrueNAS tconnectsync Bridge")
+                    Text("Only used if you also run the official Dexcom app. Not required when using Direct G7 Bluetooth LE or Tandem Source CGM above.")
                 }
 
                 if let feedback = syncFeedback {

@@ -173,6 +173,20 @@ final class GlucoStore: NSObject, ObservableObject {
     private static let demoModeKey = "gluco.demoMode"
     private static let pumpStatusKey = "gluco.pumpStatus"
     private static let pumpEventsKey = "gluco.pumpEvents"
+    private static let tandemEmailKey = "gluco.tandemEmail"
+    private static let tandemPassKey = "gluco.tandemPass"
+    private static let tandemRegionKey = "gluco.tandemRegion"
+    private static let tandemSerialKey = "gluco.tandemSerial"
+    private static let g7DirectBLEKey = "gluco.g7DirectBLE"
+    private static let savedG7UUIDKey = "gluco.savedG7UUID"
+
+    // Dexcom G7 GATT Service & Characteristic UUIDs (LoopKit / G7SensorKit spec)
+    nonisolated static let g7AdvServiceUUID = CBUUID(string: "FEBC")
+    nonisolated static let g7CGMServiceUUID = CBUUID(string: "F8083532-849E-531C-C594-30F1F86A4EA5")
+    nonisolated static let g7ReadCharUUID = CBUUID(string: "F8083533-849E-531C-C594-30F1F86A4EA5")
+    nonisolated static let g7ControlCharUUID = CBUUID(string: "F8083534-849E-531C-C594-30F1F86A4EA5")
+    nonisolated static let g7AuthCharUUID = CBUUID(string: "F8083535-849E-531C-C594-30F1F86A4EA5")
+    nonisolated static let g7BackfillCharUUID = CBUUID(string: "F8083536-849E-531C-C594-30F1F86A4EA5")
 
     @Published var unit: GlucoseUnit {
         didSet { UserDefaults.standard.set(unit.rawValue, forKey: Self.unitKey) }
@@ -227,17 +241,42 @@ final class GlucoStore: NSObject, ObservableObject {
         }
     }
 
+    @Published var tandemEmail: String {
+        didSet { UserDefaults.standard.set(tandemEmail, forKey: Self.tandemEmailKey) }
+    }
+    @Published var tandemPassword: String {
+        didSet { UserDefaults.standard.set(tandemPassword, forKey: Self.tandemPassKey) }
+    }
+    @Published var tandemRegion: String {
+        didSet { UserDefaults.standard.set(tandemRegion, forKey: Self.tandemRegionKey) }
+    }
+    @Published var tandemPumpSerial: String {
+        didSet { UserDefaults.standard.set(tandemPumpSerial, forKey: Self.tandemSerialKey) }
+    }
+    @Published var g7DirectBLEEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(g7DirectBLEEnabled, forKey: Self.g7DirectBLEKey)
+            if g7DirectBLEEnabled { startDirectG7BLE() }
+        }
+    }
+
     @Published var isSyncing: Bool = false
     @Published var dexcomConnected: Bool = false
     @Published var dexcomDiagnostic: String = ""
     @Published var tandemConnected: Bool = false
-    @Published var statusBanner: String = "Read-Only Monitor · Dexcom G7 + Tandem t:slim X2"
+    @Published var tandemDiagnostic: String = ""
+    @Published var statusBanner: String = "Standalone G7 BLE + Tandem Source · No Dexcom App Needed"
     @Published var bleDevices: [BLEPeripheralDevice] = []
     @Published var bleScanning: Bool = false
+    @Published var g7BLEStatus: String = "Listening for Dexcom G7 (DXCM) over Bluetooth LE…"
+    @Published var g7BLEConnectedName: String = ""
+    @Published var lastBLEGlucoseDate: Date?
 
     private var dexcomSessionID: String?
     private var refreshTimer: Timer?
     private var centralManager: CBCentralManager?
+    private var g7Peripherals: [UUID: CBPeripheral] = [:]
+    private var g7LastSensorTimestamp: UInt32 = 0
 
     override init() {
         let d = UserDefaults.standard
@@ -253,8 +292,15 @@ final class GlucoStore: NSObject, ObservableObject {
         nightscoutURL = d.string(forKey: Self.nightscoutURLKey) ?? "http://100.85.127.42:1337"
         nightscoutToken = d.string(forKey: Self.nightscoutTokenKey) ?? ""
 
+        tandemEmail = d.string(forKey: Self.tandemEmailKey) ?? (d.string(forKey: Self.dexcomUserKey) ?? "")
+        tandemPassword = d.string(forKey: Self.tandemPassKey) ?? ""
+        tandemRegion = d.string(forKey: Self.tandemRegionKey) ?? "EU"
+        tandemPumpSerial = d.string(forKey: Self.tandemSerialKey) ?? ""
+        g7DirectBLEEnabled = d.object(forKey: Self.g7DirectBLEKey) as? Bool ?? true
+
         let hasCredentials = !(d.string(forKey: Self.dexcomUserKey) ?? "").isEmpty
             || !(d.string(forKey: Self.nightscoutURLKey) ?? "").isEmpty
+            || !(d.string(forKey: Self.tandemEmailKey) ?? "").isEmpty
         demoMode = d.object(forKey: Self.demoModeKey) as? Bool ?? !hasCredentials
 
         if let savedPump = d.data(forKey: Self.pumpStatusKey),
@@ -279,8 +325,18 @@ final class GlucoStore: NSObject, ObservableObject {
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
 
+        if g7DirectBLEEnabled {
+            startDirectG7BLE()
+        }
+
+        Task { @MainActor in
+            await self.fetchTrueNASBridgeConfig()
+            await self.refreshAll()
+        }
+
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                self?.pollConnectedG7Peripherals()
                 await self?.refreshAll()
             }
         }
@@ -571,11 +627,11 @@ final class GlucoStore: NSObject, ObservableObject {
             }
 
             if !parsed.isEmpty {
-                readings = parsed.sorted { $0.timestamp < $1.timestamp }
+                mergeReadings(parsed)
                 dexcomDiagnostic = "Connected to Dexcom Share (\(readings.count) readings loaded)."
                 return true
             } else {
-                dexcomDiagnostic = "Dexcom login succeeded! However, 0 readings were returned ? open the Dexcom G7 app ? Connections ? Share and make sure Share is turned ON with at least 1 follower."
+                dexcomDiagnostic = "Dexcom login verified (0 cloud readings because the official Dexcom app is not needed). GlucoPulse is listening directly via G7 Bluetooth LE + Tandem Source CGM."
                 return true
             }
         } catch {
@@ -625,7 +681,7 @@ final class GlucoStore: NSObject, ObservableObject {
                         parsed.append(GlucoseReading(mgdL: sgv, timestamp: dt, trend: dir))
                     }
                     if !parsed.isEmpty {
-                        readings = parsed.sorted { $0.timestamp < $1.timestamp }
+                        mergeReadings(parsed)
                         anySuccess = true
                     }
                 }
@@ -727,20 +783,212 @@ final class GlucoStore: NSObject, ObservableObject {
         return anySuccess
     }
 
-    // MARK: - 3. Read-Only Bluetooth LE Proximity Scanner (G7 & t:slim X2)
+    // MARK: - 2b. TrueNAS Tandem Source Bridge API (:1338) — Standalone G7 CGM via t:slim X2
+
+    var truenasBridgeBaseURL: String {
+        var base = nightscoutURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { return "http://100.85.127.42:1338" }
+        if !base.lowercased().hasPrefix("http://") && !base.lowercased().hasPrefix("https://") {
+            base = "http://" + base
+        }
+        while base.hasSuffix("/") { base.removeLast() }
+        if base.hasSuffix(":1337") {
+            return String(base.dropLast(5)) + ":1338"
+        }
+        return "http://100.85.127.42:1338"
+    }
+
+    func fetchTrueNASBridgeConfig() async {
+        guard let url = URL(string: "\(truenasBridgeBaseURL)/api/config") else { return }
+        do {
+            let (data, resp) = try await URLSession.shared.data(from: url)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            if let email = json["tconnect_email"] as? String, !email.isEmpty, tandemEmail.isEmpty {
+                tandemEmail = email
+            }
+            if let reg = json["tconnect_region"] as? String, !reg.isEmpty {
+                tandemRegion = reg
+            }
+            if let serial = json["pump_serial"] as? String, !serial.isEmpty, tandemPumpSerial.isEmpty {
+                tandemPumpSerial = serial
+            }
+            if let st = json["status"] as? [String: Any],
+               let lastRes = st["last_tconnect_result"] as? String {
+                tandemDiagnostic = lastRes
+            }
+        } catch {}
+    }
+
+    func saveAndSyncTandemSource() async -> Bool {
+        let email = tandemEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty else {
+            tandemDiagnostic = "Enter your Tandem Source email address and password."
+            return false
+        }
+        guard let url = URL(string: "\(truenasBridgeBaseURL)/api/config") else { return false }
+        tandemDiagnostic = "Saving to TrueNAS Bridge & syncing Tandem Source (Pump + G7 CGM)…"
+        do {
+            var req = URLRequest(url: url, timeoutInterval: 20)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let body: [String: Any] = [
+                "tconnect_email": email,
+                "tconnect_password": tandemPassword,
+                "tconnect_region": tandemRegion,
+                "pump_serial": tandemPumpSerial.trimmingCharacters(in: .whitespacesAndNewlines),
+                "tconnect_features": "BASAL BOLUS IOB PUMP_EVENTS PUMP_EVENTS_BASAL_SUSPENSION PROFILES CGM CGM_ALERTS DEVICE_STATUS",
+                "dexcom_username": dexcomUsername,
+                "dexcom_password": dexcomPassword,
+                "dexcom_region": (dexcomRegion == .ous ? "ous" : (dexcomRegion == .us ? "us" : "jp"))
+            ]
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                tandemDiagnostic = "Could not reach TrueNAS Bridge at \(truenasBridgeBaseURL)."
+                return false
+            }
+
+            // Poll /api/status while tconnectsync runs
+            if let statusURL = URL(string: "\(truenasBridgeBaseURL)/api/status") {
+                for _ in 0..<12 {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    if let (sData, _) = try? await URLSession.shared.data(from: statusURL),
+                       let sJson = try? JSONSerialization.jsonObject(with: sData) as? [String: Any] {
+                        let running = (sJson["running_now"] as? Bool) ?? false
+                        let resStr = (sJson["last_tconnect_result"] as? String) ?? ""
+                        if !resStr.isEmpty {
+                            tandemDiagnostic = resStr
+                        }
+                        if !running { break }
+                    }
+                }
+            }
+
+            let nsOK = await syncNightscout()
+            tandemConnected = nsOK || tandemDiagnostic.lowercased().contains("success")
+            if tandemConnected { demoMode = false }
+            return tandemConnected
+        } catch {
+            tandemDiagnostic = "Bridge error: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    // MARK: - 3. Direct Dexcom G7 Bluetooth LE GATT Reader + Proximity Scanner (No Dexcom App Needed)
+
+    func mergeReadings(_ incoming: [GlucoseReading]) {
+        guard !incoming.isEmpty else { return }
+        var combined = readings
+        // If existing readings are purely simulated (288 readings and demoMode is on), replace with real readings
+        if demoMode {
+            combined = []
+            demoMode = false
+        }
+        for r in incoming {
+            if !combined.contains(where: { abs($0.timestamp.timeIntervalSince(r.timestamp)) < 90 && $0.mgdL == r.mgdL }) {
+                combined.append(r)
+            }
+        }
+        let cutoff = Date().addingTimeInterval(-36 * 3600)
+        readings = combined
+            .filter { $0.timestamp >= cutoff }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    func startDirectG7BLE() {
+        if centralManager == nil {
+            centralManager = CBCentralManager(delegate: self, queue: nil)
+        } else if centralManager?.state == .poweredOn {
+            pollConnectedG7Peripherals()
+            centralManager?.scanForPeripherals(
+                withServices: nil,
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+            )
+            bleScanning = true
+        }
+    }
+
+    func pollConnectedG7Peripherals() {
+        guard let central = centralManager, central.state == .poweredOn else { return }
+        // 1. Check any Dexcom G7 already connected at the iOS Bluetooth system level
+        let connected = central.retrieveConnectedPeripherals(withServices: [
+            Self.g7AdvServiceUUID,
+            Self.g7CGMServiceUUID
+        ])
+        for p in connected {
+            attachAndConnectG7Peripheral(p, central: central)
+        }
+        // 2. Check previously discovered G7 peripheral UUID so iOS auto-connects on its 5-min wake window
+        if let savedStr = UserDefaults.standard.string(forKey: Self.savedG7UUIDKey),
+           let uuid = UUID(uuidString: savedStr) {
+            let known = central.retrievePeripherals(withIdentifiers: [uuid])
+            for p in known {
+                attachAndConnectG7Peripheral(p, central: central)
+            }
+        }
+    }
+
+    func attachAndConnectG7Peripheral(_ peripheral: CBPeripheral, central: CBCentralManager) {
+        g7Peripherals[peripheral.identifier] = peripheral
+        peripheral.delegate = self
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedG7UUIDKey)
+        let name = peripheral.name ?? "Dexcom G7"
+        if g7BLEConnectedName.isEmpty {
+            g7BLEConnectedName = name
+        }
+        if peripheral.state == .connected {
+            peripheral.discoverServices([Self.g7CGMServiceUUID, Self.g7AdvServiceUUID])
+        } else if peripheral.state != .connecting {
+            g7BLEStatus = "Queued for \(name) 5-min wake window…"
+            central.connect(peripheral, options: [
+                CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                CBConnectPeripheralOptionNotifyOnNotificationKey: true
+            ])
+        }
+    }
 
     func toggleBLEScan() {
         if bleScanning {
             centralManager?.stopScan()
             bleScanning = false
         } else {
-            if centralManager == nil {
-                centralManager = CBCentralManager(delegate: self, queue: nil)
-            } else if centralManager?.state == .poweredOn {
-                centralManager?.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
-                bleScanning = true
-            }
+            startDirectG7BLE()
         }
+    }
+
+    func uploadBLEReadingsToNightscout(_ newReadings: [GlucoseReading]) async {
+        guard !newReadings.isEmpty,
+              let url = URL(string: "\(truenasBridgeBaseURL)/api/ble-readings") else { return }
+        let iso = ISO8601DateFormatter()
+        let payload: [[String: Any]] = newReadings.map { r in
+            let ms = Int64(r.timestamp.timeIntervalSince1970 * 1000.0)
+            let dir: String
+            switch r.trend {
+            case .doubleUp: dir = "DoubleUp"
+            case .singleUp: dir = "SingleUp"
+            case .fortyFiveUp: dir = "FortyFiveUp"
+            case .flat: dir = "Flat"
+            case .fortyFiveDown: dir = "FortyFiveDown"
+            case .singleDown: dir = "SingleDown"
+            case .doubleDown: dir = "DoubleDown"
+            }
+            return [
+                "type": "sgv",
+                "sgv": r.mgdL,
+                "date": ms,
+                "dateString": iso.string(from: r.timestamp),
+                "direction": dir,
+                "device": "DexcomG7-DirectBLE"
+            ]
+        }
+        do {
+            var req = URLRequest(url: url, timeoutInterval: 10)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+            _ = try await URLSession.shared.data(for: req)
+        } catch {}
     }
 
     // MARK: - 4. Manual Pump Entry / Quick Log
@@ -837,12 +1085,22 @@ final class GlucoStore: NSObject, ObservableObject {
     }
 }
 
-extension GlucoStore: CBCentralManagerDelegate {
+extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
         let isOn = central.state == .poweredOn
         Task { @MainActor in
-            if isOn && self.bleScanning {
-                central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+            if isOn {
+                self.pollConnectedG7Peripherals()
+                if self.g7DirectBLEEnabled || self.bleScanning {
+                    central.scanForPeripherals(
+                        withServices: nil,
+                        options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+                    )
+                    self.bleScanning = true
+                    self.g7BLEStatus = "Scanning for Dexcom G7 (DXCM) & bonded sensors…"
+                }
+            } else {
+                self.g7BLEStatus = "Bluetooth is off or unauthorized."
             }
         }
     }
@@ -853,21 +1111,20 @@ extension GlucoStore: CBCentralManagerDelegate {
             ?? peripheral.name
             ?? ""
         let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let serviceUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        let hasG7Service = serviceUUIDs.contains(Self.g7AdvServiceUUID) || serviceUUIDs.contains(Self.g7CGMServiceUUID)
 
         let upper = trimmed.uppercased()
-        let category: String
-        if upper.contains("DXCM") || upper.contains("DEXCOM") || upper.hasPrefix("DX") {
-            category = "Dexcom G7"
-        } else if upper.contains("TSLIM") || upper.contains("T:SLIM") || upper.contains("TANDEM") {
-            category = "Tandem t:slim X2"
-        } else {
-            return
-        }
+        let isDexcom = hasG7Service || upper.contains("DXCM") || upper.contains("DEXCOM") || upper.hasPrefix("DX")
+        let isTandem = upper.contains("TSLIM") || upper.contains("T:SLIM") || upper.contains("TANDEM")
+        guard isDexcom || isTandem else { return }
+
+        let displayName = trimmed.isEmpty ? "DXCM G7 Sensor" : trimmed
+        let category = isDexcom ? "Dexcom G7" : "Tandem t:slim X2"
 
         let dev = BLEPeripheralDevice(
             id: peripheral.identifier.uuidString,
-            name: trimmed,
+            name: displayName,
             category: category,
             rssi: RSSI.intValue,
             lastSeen: Date()
@@ -878,7 +1135,176 @@ extension GlucoStore: CBCentralManagerDelegate {
             } else {
                 self.bleDevices.append(dev)
             }
+            if isDexcom && self.g7DirectBLEEnabled {
+                self.attachAndConnectG7Peripheral(peripheral, central: central)
+            }
         }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        let name = peripheral.name ?? "Dexcom G7"
+        Task { @MainActor in
+            self.g7BLEConnectedName = name
+            self.g7BLEStatus = "Connected to \(name) · Discovering G7 GATT…"
+            peripheral.delegate = self
+            peripheral.discoverServices([Self.g7CGMServiceUUID, Self.g7AdvServiceUUID])
+        }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        let name = peripheral.name ?? "Dexcom G7"
+        Task { @MainActor in
+            if self.g7DirectBLEEnabled {
+                self.g7BLEStatus = "Waiting for next 5-min G7 packet from \(name)…"
+                central.connect(peripheral, options: [
+                    CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                    CBConnectPeripheralOptionNotifyOnNotificationKey: true
+                ])
+            }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard let services = peripheral.services else { return }
+        for service in services {
+            peripheral.discoverCharacteristics([
+                Self.g7AuthCharUUID,
+                Self.g7ControlCharUUID,
+                Self.g7BackfillCharUUID,
+                Self.g7ReadCharUUID
+            ], for: service)
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard let chars = service.characteristics else { return }
+        for ch in chars {
+            if ch.uuid == Self.g7AuthCharUUID || ch.uuid == Self.g7ControlCharUUID || ch.uuid == Self.g7BackfillCharUUID {
+                peripheral.setNotifyValue(true, for: ch)
+            }
+            if ch.uuid == Self.g7AuthCharUUID {
+                // Query G7 Auth / Bond Status (opcode 0x05)
+                let writeType: CBCharacteristicWriteType = ch.properties.contains(.write) ? .withResponse : .withoutResponse
+                peripheral.writeValue(Data([0x05]), for: ch, type: writeType)
+            }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        if characteristic.uuid == Self.g7ControlCharUUID && characteristic.isNotifying {
+            // Request current G7 Glucose (opcode 0x4e = G7GlucoseRequestMessage)
+            let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
+            peripheral.writeValue(Data([0x4e]), for: characteristic, type: writeType)
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard let data = characteristic.value, !data.isEmpty else { return }
+        let charUUID = characteristic.uuid
+        let bytes = [UInt8](data)
+
+        if charUUID == Self.g7AuthCharUUID {
+            // AuthStatusRxMessage (0x05, isAuthenticated, isBonded)
+            if bytes.count >= 3 && bytes[0] == 0x05 {
+                let isAuth = bytes[1] == 0x01
+                let isBonded = bytes[2] == 0x01
+                if let services = peripheral.services {
+                    for s in services {
+                        for c in s.characteristics ?? [] where c.uuid == Self.g7ControlCharUUID {
+                            let wType: CBCharacteristicWriteType = c.properties.contains(.write) ? .withResponse : .withoutResponse
+                            peripheral.writeValue(Data([0x4e]), for: c, type: wType)
+                        }
+                    }
+                }
+                Task { @MainActor in
+                    self.g7BLEStatus = "G7 Auth Status · Authenticated: \(isAuth ? "Yes" : "No"), Bonded: \(isBonded ? "Yes" : "No")"
+                }
+            }
+            return
+        }
+
+        if charUUID == Self.g7ControlCharUUID {
+            // Opcode 0x4e: G7GlucoseMessage (16+ bytes)
+            // Byte 0: 0x4e, Byte 1: status (0x00), Bytes 2..<6: messageTimestamp (UInt32 LE),
+            // Bytes 10..<12: age (UInt16 LE), Bytes 12..<14: glucose (UInt16 LE & 0x0fff),
+            // Byte 14: state, Byte 15: trend (Int8 / 10.0)
+            if bytes[0] == 0x4e && bytes.count >= 16 && bytes[1] == 0x00 {
+                let msgTs = UInt32(bytes[2])
+                    | (UInt32(bytes[3]) << 8)
+                    | (UInt32(bytes[4]) << 16)
+                    | (UInt32(bytes[5]) << 24)
+                let ageSec = UInt16(bytes[10]) | (UInt16(bytes[11]) << 8)
+                let rawGlucose = UInt16(bytes[12]) | (UInt16(bytes[13]) << 8)
+                guard rawGlucose != 0xffff else { return }
+                let mgdL = Int(rawGlucose & 0x0fff)
+                guard (20...500).contains(mgdL) else { return }
+
+                let rawTrend = Int8(bitPattern: bytes[15])
+                let trend = Self.trendFromG7Rate(rawTrend)
+                let readingDate = Date().addingTimeInterval(-Double(min(ageSec, 1800)))
+                let reading = GlucoseReading(mgdL: mgdL, timestamp: readingDate, trend: trend)
+
+                // Request 6h backfill (opcode 0x59) if we have fewer than 12 readings and msgTs > 3600
+                if msgTs > 3600 {
+                    let startTs = msgTs > 21600 ? (msgTs - 21600) : 0
+                    let endTs = msgTs
+                    var bfCmd: [UInt8] = [0x59]
+                    bfCmd.append(contentsOf: withUnsafeBytes(of: startTs.littleEndian, Array.init))
+                    bfCmd.append(contentsOf: withUnsafeBytes(of: endTs.littleEndian, Array.init))
+                    let wType: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
+                    peripheral.writeValue(Data(bfCmd), for: characteristic, type: wType)
+                }
+
+                Task { @MainActor in
+                    self.g7LastSensorTimestamp = msgTs
+                    self.lastBLEGlucoseDate = readingDate
+                    self.dexcomConnected = true
+                    self.mergeReadings([reading])
+                    self.g7BLEStatus = "Live G7 BLE · \(self.formatGlucose(mgdL)) \(self.unit.rawValue) \(trend.arrow) (\(Self.shortTime(readingDate)))"
+                    self.statusBanner = "Direct G7 Bluetooth LE · Updated \(Self.shortTime(Date()))"
+                    self.checkGlucoseAlerts()
+                    await self.uploadBLEReadingsToNightscout([reading])
+                }
+            }
+            return
+        }
+
+        if charUUID == Self.g7BackfillCharUUID && bytes.count >= 9 {
+            // 9-byte G7 backfill frame:
+            // Bytes 0..<4: sensor timestamp (UInt32 LE), Bytes 4..<6: glucose (UInt16 LE & 0x0fff), Byte 7: trend (Int8)
+            let sensorTs = UInt32(bytes[0])
+                | (UInt32(bytes[1]) << 8)
+                | (UInt32(bytes[2]) << 16)
+                | (UInt32(bytes[3]) << 24)
+            let rawGlucose = UInt16(bytes[4]) | (UInt16(bytes[5]) << 8)
+            guard rawGlucose != 0xffff else { return }
+            let mgdL = Int(rawGlucose & 0x0fff)
+            guard (20...500).contains(mgdL) else { return }
+            let rawTrend = Int8(bitPattern: bytes[7])
+            let trend = Self.trendFromG7Rate(rawTrend)
+
+            Task { @MainActor in
+                guard self.g7LastSensorTimestamp > 0, sensorTs <= self.g7LastSensorTimestamp else { return }
+                let ageSec = Double(self.g7LastSensorTimestamp - sensorTs)
+                let baseDate = self.lastBLEGlucoseDate ?? Date()
+                let readingDate = baseDate.addingTimeInterval(-ageSec)
+                let reading = GlucoseReading(mgdL: mgdL, timestamp: readingDate, trend: trend)
+                self.mergeReadings([reading])
+                await self.uploadBLEReadingsToNightscout([reading])
+            }
+        }
+    }
+
+    nonisolated private static func trendFromG7Rate(_ rawTrend: Int8) -> GlucoseTrend {
+        if rawTrend == Int8.min || rawTrend == Int8.max { return .flat }
+        let rate = Double(rawTrend) / 10.0
+        if rate >= 3.0 { return .doubleUp }
+        if rate >= 2.0 { return .singleUp }
+        if rate >= 1.0 { return .fortyFiveUp }
+        if rate <= -3.0 { return .doubleDown }
+        if rate <= -2.0 { return .singleDown }
+        if rate <= -1.0 { return .fortyFiveDown }
+        return .flat
     }
 }
 

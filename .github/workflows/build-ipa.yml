@@ -36,6 +36,8 @@ on:
       - ".github/workflows/build-deskswitch-ipa.yml"
       - "racebolt-ops/**"
       - ".github/workflows/build-racebolt-ops-ipa.yml"
+      - "t1d-monitor/**"
+      - ".github/workflows/build-glucopulse-ipa.yml"
       - ".github/workflows/build-ipa.yml"
   workflow_dispatch:
 

@@ -52,7 +52,7 @@ struct PumpHistoryView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .foregroundStyle(GlucoTheme.tandemCyan)
-                    Text("BLUETOOTH LE PROXIMITY MONITOR (READ-ONLY)")
+                    Text("DIRECT G7 BLUETOOTH LE GATT + PUMP MONITOR")
                         .font(.system(size: 11, weight: .heavy, design: .rounded))
                         .foregroundStyle(GlucoTheme.textSecondary)
                 }
@@ -69,10 +69,14 @@ struct PumpHistoryView: View {
                 }
             }
 
+            Text(store.g7BLEStatus)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(GlucoTheme.inRangeGreen)
+
             if store.bleDevices.isEmpty {
                 Text(store.bleScanning
-                     ? "Listening for nearby Dexcom G7 (DXCM) and Tandem t:slim X2 BLE advertisements…"
-                     : "Tap 'Scan BLE' to check live signal strength (RSSI) of your nearby Dexcom G7 sensor and Tandem t:slim X2 pump.")
+                     ? "Listening for nearby Dexcom G7 (DXCM / FEBC) and Tandem t:slim X2 BLE packets…"
+                     : "Tap 'Scan BLE' to attach to your Dexcom G7 sensor and Tandem t:slim X2 pump.")
                     .font(.system(size: 12))
                     .foregroundStyle(GlucoTheme.textSecondary)
             } else {
