@@ -66,6 +66,9 @@ targets:
           NSAllowsArbitraryLoads: true
         UIBackgroundModes:
           - audio
+          - bluetooth-central
           - fetch
           - processing
+        NSBluetoothAlwaysUsageDescription: "OmniContainer uses Bluetooth LE in the background 24/7 to read your Dexcom G7 CGM sensor and Tandem t:slim X2 insulin pump."
+        NSBluetoothPeripheralUsageDescription: "OmniContainer uses Bluetooth LE to read your Dexcom G7 CGM sensor and Tandem t:slim X2 insulin pump."
         NSLocalNetworkUsageDescription: "OmniContainer runs all your apps simultaneously in memory and serves Home Screen ClipApp profiles."

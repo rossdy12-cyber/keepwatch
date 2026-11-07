@@ -100,6 +100,7 @@ enum IPAArchiveExtractor {
             if searchStr.contains("youtube") || searchStr.contains("uyou") || searchStr.contains("ytlite") || searchStr.contains("cercube") {
                 return ("youtube", "https://m.youtube.com")
             }
+            if searchStr.contains("glucopulse") || searchStr.contains("gluco") || searchStr.contains("t1d") || searchStr.contains("dexcom") { return ("glucopulse", "") }
             if searchStr.contains("keepwatch") { return ("keepwatch", "") }
             if searchStr.contains("jarvis") { return ("jarvis", "") }
             if searchStr.contains("nasportal") || searchStr.contains("portal") { return ("nasportal", "") }
@@ -478,6 +479,7 @@ struct FastCachedWebView: UIViewRepresentable {
 @MainActor
 class OmniWorkspaceStore: ObservableObject {
     let builtInApps: [OmniAppDescriptor] = [
+        OmniAppDescriptor(id: "glucopulse", title: "GlucoPulse T1D", subtitle: "G7 Direct BLE + Tandem Source", icon: "waveform.path.ecg.rectangle.fill", color: .green, sym: "GP", rgb: (0.18, 0.84, 0.48)),
         OmniAppDescriptor(id: "youtube", title: "YouTube Pro", subtitle: "Ad-Free + PiP + MeTube Grab", icon: "play.rectangle.fill", color: .red, sym: "YT", rgb: (1.0, 0.15, 0.15)),
         OmniAppDescriptor(id: "keepwatch", title: "Keepwatch Hub", subtitle: "Homelab, Arr, Docker & Jarvis", icon: "shield.checkered", color: .purple, sym: "KW", rgb: (0.65, 0.35, 1.0)),
         OmniAppDescriptor(id: "jarvis", title: "J.A.R.V.I.S.", subtitle: "AI Voice, Chat & Music", icon: "waveform.circle.fill", color: .cyan, sym: "JV", rgb: (0.0, 0.85, 1.0)),
@@ -494,12 +496,12 @@ class OmniWorkspaceStore: ObservableObject {
         OmniAppDescriptor(id: "zimadeck", title: "ZimaDeck", subtitle: "Zimaboard + Komga + RustDesk", icon: "server.rack", color: .mint, sym: "ZD", rgb: (0.0, 0.9, 0.7))
     ]
 
-    @Published var runningAppIDs: [String] = []
+    @Published var runningAppIDs: [String] = ["glucopulse"]
     @Published var activeAppID: String = "home"
     @Published var splitScreenEnabled: Bool = false
     @Published var secondaryAppID: String = "sentrycam"
     @Published var installedIPAs: [InstalledIPAPackage] = []
-    @Published var statusBanner: String = "Native YouTube 21.42.4 Plus + 13 OmniContainer Apps Integrated!"
+    @Published var statusBanner: String = "24/7 In-Memory Host · GlucoPulse G7 BLE + 15 Integrated Apps!"
     @Published var truenasHost: String = "100.85.127.42"
     @Published var routeLabel: String = "Tailscale"
     @Published var floatingMiniAniimo: Bool = false {
@@ -507,7 +509,7 @@ class OmniWorkspaceStore: ObservableObject {
             OmniOverlayController.shared.syncVisibility()
         }
     }
-    @Published var isMinimizedToYouTube: Bool = true {
+    @Published var isMinimizedToYouTube: Bool = false {
         didSet {
             OmniOverlayController.shared.syncVisibility()
         }
@@ -520,10 +522,14 @@ class OmniWorkspaceStore: ObservableObject {
     private let installedKey = "omnicontainer.installed.ipas.v4"
 
     init() {
+        self.isMinimizedToYouTube = (NSClassFromString("YTSceneDelegate") != nil || Bundle.main.bundlePath.hasSuffix("YouTube.app"))
         if let data = UserDefaults.standard.data(forKey: installedKey),
            let decoded = try? JSONDecoder().decode([InstalledIPAPackage].self, from: data) {
             installedIPAs = decoded
         }
+        // Start 24/7 silent audio background keep-alive and GlucoPulse G7 CoreBluetooth singleton immediately!
+        WebViewCache.shared.setupAudioAndBackgroundHooksIfNeeded()
+        _ = GlucoStore.shared
         Task { await detectFastestRoute() }
     }
 
@@ -811,6 +817,7 @@ public func OmniPluginHandleURLString(_ cStr: UnsafePointer<CChar>) {
 
 struct OmniRootContainerView: View {
     @EnvironmentObject var workspace: OmniWorkspaceStore
+    @ObservedObject private var glucoStore = GlucoStore.shared
     @State private var showIPAFilePicker = false
 
     var body: some View {
@@ -898,6 +905,27 @@ struct OmniRootContainerView: View {
                     .padding(.vertical, 6)
                     .background(Color.red)
                     .foregroundColor(.white)
+                    .cornerRadius(8)
+                }
+
+                Button {
+                    workspace.launchOrFocus("glucopulse")
+                } label: {
+                    let latest = glucoStore.latestReading
+                    let valStr = latest.map { glucoStore.formatGlucose($0.mgdL) } ?? "--"
+                    let arrowStr = latest?.trend.arrow ?? "→"
+                    let pillColor = latest.map { glucoStore.color(for: $0.mgdL) } ?? Color.green
+                    HStack(spacing: 4) {
+                        Image(systemName: "waveform.path.ecg")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("\(valStr) \(arrowStr)")
+                            .font(.caption.bold())
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(pillColor.opacity(0.25))
+                    .foregroundColor(pillColor)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(pillColor.opacity(0.7), lineWidth: 1))
                     .cornerRadius(8)
                 }
 
@@ -1216,6 +1244,8 @@ struct EmbeddedLiveAppHost: View {
 
     var body: some View {
         switch appID {
+        case "glucopulse":
+            GlucoPulseEmbeddedHostView()
         case "youtube":
             MiniYouTubeProModule(host: workspace.truenasHost)
         case "keepwatch":

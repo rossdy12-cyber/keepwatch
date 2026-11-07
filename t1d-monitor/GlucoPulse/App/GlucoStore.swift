@@ -161,6 +161,8 @@ struct BLEPeripheralDevice: Identifiable, Equatable {
 
 @MainActor
 final class GlucoStore: NSObject, ObservableObject {
+    static let shared = GlucoStore()
+
     // Persistent UserDefaults keys
     private static let unitKey = "gluco.unit"
     private static let lowMgdLKey = "gluco.lowMgdL"
@@ -180,8 +182,10 @@ final class GlucoStore: NSObject, ObservableObject {
     private static let tandemSerialKey = "gluco.tandemSerial"
     private static let g7DirectBLEKey = "gluco.g7DirectBLE"
     private static let savedG7UUIDKey = "gluco.savedG7UUID"
+    private static let g7PairingCodeKey = "gluco.g7PairingCode"
+    private static let g7SensorNameKey = "gluco.g7SensorName"
 
-    // Dexcom G7 & Tandem GATT Service & Characteristic UUIDs (LoopKit / G7SensorKit spec)
+    // Dexcom G7 & Tandem GATT Service & Characteristic UUIDs (LoopKit / G7SensorKit / xdripswift spec)
     nonisolated static let g7AdvServiceUUID = CBUUID(string: "FEBC")
     nonisolated static let g7CGMServiceUUID = CBUUID(string: "F8083532-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let g7AltServiceUUID = CBUUID(string: "F8084532-849E-531C-C594-30F1F86A4EA5")
@@ -189,6 +193,7 @@ final class GlucoStore: NSObject, ObservableObject {
     nonisolated static let g7ControlCharUUID = CBUUID(string: "F8083534-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let g7AuthCharUUID = CBUUID(string: "F8083535-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let g7BackfillCharUUID = CBUUID(string: "F8083536-849E-531C-C594-30F1F86A4EA5")
+    nonisolated static let g7AuthStreamCharUUID = CBUUID(string: "F8083538-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let tandemServiceUUID1 = CBUUID(string: "FDFB")
     nonisolated static let tandemServiceUUID2 = CBUUID(string: "7B83FFF6-9F77-4E5C-8064-AAE2C24838B9")
     nonisolated static let deviceInfoServiceUUID = CBUUID(string: "180A")
@@ -265,6 +270,13 @@ final class GlucoStore: NSObject, ObservableObject {
             if g7DirectBLEEnabled { startDirectG7BLE() }
         }
     }
+    @Published var g7PairingCode: String {
+        didSet {
+            let trimmed = g7PairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmed, forKey: Self.g7PairingCodeKey)
+            g7Authenticator.pairingCode = trimmed
+        }
+    }
 
     @Published var isSyncing: Bool = false
     @Published var dexcomConnected: Bool = false
@@ -288,6 +300,24 @@ final class GlucoStore: NSObject, ObservableObject {
     private var allDiscoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var g7LastSensorTimestamp: UInt32 = 0
 
+    // Dexcom G7 Native Primary J-PAKE + Saved-Key + Coexistence State
+    private let g7Authenticator = DexcomG7NativeAuthenticator()
+    private var g7AuthChar: CBCharacteristic?
+    private var g7AuthStreamChar: CBCharacteristic?
+    private var g7ControlChar: CBCharacteristic?
+    private var g7BackfillChar: CBCharacteristic?
+    private var g7AuthStreamBuffer = Data()
+    private var g7PendingPakePhase: UInt8?
+    private var g7PendingCertPhase: UInt8?
+    private var g7PendingCertSize: Int?
+    private var g7ExpectedCertPhase: UInt8 = 0
+    private var g7PendingProofChallenge: Data?
+    private var g7UsingFullBootstrap: Bool = false
+    private var g7InitialPacketSent: Bool = false
+    private var g7ChallengeResponseSent: Bool = false
+    private var g7CertExchangeStarted: Bool = false
+    private var g7WriteGeneration: Int = 0
+
     override init() {
         let d = UserDefaults.standard
         unit = GlucoseUnit(rawValue: d.string(forKey: Self.unitKey) ?? "") ?? .mmolL
@@ -307,6 +337,10 @@ final class GlucoStore: NSObject, ObservableObject {
         tandemRegion = d.string(forKey: Self.tandemRegionKey) ?? "EU"
         tandemPumpSerial = d.string(forKey: Self.tandemSerialKey) ?? ""
         g7DirectBLEEnabled = d.object(forKey: Self.g7DirectBLEKey) as? Bool ?? true
+        let savedCode = d.string(forKey: Self.g7PairingCodeKey) ?? ""
+        g7PairingCode = savedCode
+        let savedSensorName = d.string(forKey: Self.g7SensorNameKey) ?? "DXCMAK"
+        g7BLEConnectedName = savedSensorName
 
         let hasCredentials = !(d.string(forKey: Self.dexcomUserKey) ?? "").isEmpty
             || !(d.string(forKey: Self.nightscoutURLKey) ?? "").isEmpty
@@ -328,6 +362,10 @@ final class GlucoStore: NSObject, ObservableObject {
         }
 
         super.init()
+
+        g7Authenticator.transmitterID = savedSensorName
+        g7Authenticator.pairingCode = savedCode
+        g7Authenticator.restorePersistedSharedKey()
 
         if readings.isEmpty {
             loadSimulatedData()
@@ -1253,20 +1291,44 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        let name = peripheral.name ?? "Dexcom G7"
+        let name = peripheral.name ?? "DXCMAK"
+        peripheral.delegate = self
+        peripheral.discoverServices([Self.g7CGMServiceUUID, Self.g7AdvServiceUUID])
         Task { @MainActor in
             self.g7BLEConnectedName = name
+            UserDefaults.standard.set(name, forKey: Self.g7SensorNameKey)
+            self.g7Authenticator.transmitterID = name
+            self.g7Authenticator.pairingCode = self.g7PairingCode
+            self.g7Authenticator.resetSession()
+            self.g7WriteGeneration &+= 1
+            self.g7AuthStreamBuffer.removeAll(keepingCapacity: true)
+            self.g7PendingPakePhase = nil
+            self.g7PendingCertPhase = nil
+            self.g7PendingCertSize = nil
+            self.g7ExpectedCertPhase = 0
+            self.g7PendingProofChallenge = nil
+            self.g7UsingFullBootstrap = false
+            self.g7InitialPacketSent = false
+            self.g7ChallengeResponseSent = false
+            self.g7CertExchangeStarted = false
             self.g7BLEStatus = "Connected to \(name) · Discovering G7 GATT…"
-            peripheral.delegate = self
-            peripheral.discoverServices([Self.g7CGMServiceUUID, Self.g7AdvServiceUUID])
         }
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        let name = peripheral.name ?? "Dexcom G7"
+        let name = peripheral.name ?? "DXCMAK"
         Task { @MainActor in
+            self.g7WriteGeneration &+= 1
             if self.g7DirectBLEEnabled {
-                self.g7BLEStatus = "Waiting for next 5-min G7 packet from \(name)…"
+                if self.g7BLEStatus.hasPrefix("Connected to ") || self.g7BLEStatus.hasPrefix("Scanning") {
+                    if self.g7Authenticator.hasConfirmedSharedKey {
+                        self.g7BLEStatus = "Paired with \(name) · Waiting for next 5-min G7 wake tick…"
+                    } else if self.g7PairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.g7BLEStatus = "Found \(name)! Enter 4-digit G7 Pairing Code in Settings (Tandem Pump: Options → My CGM) for standalone BLE!"
+                    } else {
+                        self.g7BLEStatus = "Waiting for next 5-min G7 wake from \(name) to complete pairing…"
+                    }
+                }
                 central.connect(peripheral, options: [
                     CBConnectPeripheralOptionNotifyOnConnectionKey: true,
                     CBConnectPeripheralOptionNotifyOnNotificationKey: true
@@ -1279,6 +1341,7 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
         guard let services = peripheral.services else { return }
         for service in services {
             peripheral.discoverCharacteristics([
+                Self.g7AuthStreamCharUUID,
                 Self.g7AuthCharUUID,
                 Self.g7ControlCharUUID,
                 Self.g7BackfillCharUUID,
@@ -1289,23 +1352,167 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let chars = service.characteristics else { return }
-        for ch in chars {
-            if ch.uuid == Self.g7AuthCharUUID || ch.uuid == Self.g7ControlCharUUID || ch.uuid == Self.g7BackfillCharUUID {
-                peripheral.setNotifyValue(true, for: ch)
+        Task { @MainActor in
+            for ch in chars {
+                switch ch.uuid {
+                case Self.g7AuthStreamCharUUID:
+                    self.g7AuthStreamChar = ch
+                case Self.g7AuthCharUUID:
+                    self.g7AuthChar = ch
+                case Self.g7ControlCharUUID:
+                    self.g7ControlChar = ch
+                case Self.g7BackfillCharUUID:
+                    self.g7BackfillChar = ch
+                default:
+                    break
+                }
             }
-            if ch.uuid == Self.g7AuthCharUUID {
-                // Query G7 Auth / Bond Status (opcode 0x05)
-                let writeType: CBCharacteristicWriteType = ch.properties.contains(.write) ? .withResponse : .withoutResponse
-                peripheral.writeValue(Data([0x05]), for: ch, type: writeType)
+            // Enable Auth_Stream first (if present) so J-PAKE fragments are never missed, then Receive_Authentication
+            if let streamCh = self.g7AuthStreamChar, !streamCh.isNotifying {
+                peripheral.setNotifyValue(true, for: streamCh)
+            }
+            if let authCh = self.g7AuthChar, !authCh.isNotifying {
+                peripheral.setNotifyValue(true, for: authCh)
+            }
+            // If neither needs waiting or already notifying, kick off auth
+            if (self.g7AuthStreamChar?.isNotifying ?? true) && (self.g7AuthChar?.isNotifying ?? false) {
+                self.startG7AuthHandshakeIfNeeded(peripheral: peripheral)
             }
         }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        if characteristic.uuid == Self.g7ControlCharUUID && characteristic.isNotifying {
-            // Request current G7 Glucose (opcode 0x4e = G7GlucoseRequestMessage)
-            let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
-            peripheral.writeValue(Data([0x4e]), for: characteristic, type: writeType)
+        let uuid = characteristic.uuid
+        let isNotifying = characteristic.isNotifying
+        Task { @MainActor in
+            if uuid == Self.g7AuthStreamCharUUID && isNotifying {
+                if let authCh = self.g7AuthChar, !authCh.isNotifying {
+                    peripheral.setNotifyValue(true, for: authCh)
+                } else if self.g7AuthChar?.isNotifying == true {
+                    self.startG7AuthHandshakeIfNeeded(peripheral: peripheral)
+                }
+                return
+            }
+            if uuid == Self.g7AuthCharUUID && isNotifying {
+                self.startG7AuthHandshakeIfNeeded(peripheral: peripheral)
+                return
+            }
+            if uuid == Self.g7ControlCharUUID && isNotifying {
+                // Request current G7 Glucose (0x4E) once control notifications are active after authentication
+                let wType: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
+                peripheral.writeValue(Data([0x4E]), for: characteristic, type: wType)
+            }
+        }
+    }
+
+    @MainActor
+    private func startG7AuthHandshakeIfNeeded(peripheral: CBPeripheral) {
+        guard !g7InitialPacketSent, let authCh = g7AuthChar else { return }
+        if let initial = g7Authenticator.makeInitialControlPacket() {
+            g7InitialPacketSent = true
+            g7UsingFullBootstrap = initial.isFullBootstrap
+            g7BLEStatus = initial.isFullBootstrap
+                ? "G7 J-PAKE ownership pairing started with \(g7BLEConnectedName)…"
+                : "G7 fast AES-128 auth started with \(g7BLEConnectedName)…"
+            writeG7AuthControl(initial.packet, to: authCh, on: peripheral)
+        } else {
+            // No saved key and no 4-digit pairing code entered yet:
+            // Listen passively for Coexistence mode AND send a slot-2 auth probe after 0.6s so we know sensor status
+            g7InitialPacketSent = true
+            if let ctrl = g7ControlChar, !ctrl.isNotifying {
+                peripheral.setNotifyValue(true, for: ctrl)
+            }
+            g7BLEStatus = "Connected to \(g7BLEConnectedName) · Enter 4-digit G7 Pairing Code in Settings (Tandem Pump: Options → My CGM)!"
+            let probe = g7Authenticator.makeAuthRequestPacket()
+            writeG7AuthControl(probe, to: authCh, on: peripheral)
+        }
+    }
+
+    @MainActor
+    private func writeG7AuthControl(_ data: Data, to authCh: CBCharacteristic, on peripheral: CBPeripheral) {
+        let wType: CBCharacteristicWriteType = authCh.properties.contains(.write) ? .withResponse : .withoutResponse
+        peripheral.writeValue(data, for: authCh, type: wType)
+    }
+
+    @MainActor
+    private func writeG7StreamExchange(streamPackets: [Data], controlPacket: Data, on peripheral: CBPeripheral) {
+        guard let streamCh = g7AuthStreamChar, let authCh = g7AuthChar else { return }
+        let gen = g7WriteGeneration
+        let spacing: TimeInterval = 0.04
+        for (idx, pkt) in streamPackets.enumerated() where !pkt.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + spacing * Double(idx)) { [weak self] in
+                guard let self, self.g7WriteGeneration == gen else { return }
+                peripheral.writeValue(pkt, for: streamCh, type: .withoutResponse)
+            }
+        }
+        let controlDelay = spacing * Double(streamPackets.count + 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + controlDelay) { [weak self] in
+            guard let self, self.g7WriteGeneration == gen else { return }
+            self.writeG7AuthControl(controlPacket, to: authCh, on: peripheral)
+        }
+    }
+
+    @MainActor
+    private func onG7Authenticated(peripheral: CBPeripheral) {
+        g7BLEStatus = "G7 Authenticated with \(g7BLEConnectedName) · Reading live CGM glucose…"
+        if let bfCh = g7BackfillChar, !bfCh.isNotifying {
+            peripheral.setNotifyValue(true, for: bfCh)
+        }
+        if let ctrlCh = g7ControlChar {
+            if ctrlCh.isNotifying {
+                let wType: CBCharacteristicWriteType = ctrlCh.properties.contains(.write) ? .withResponse : .withoutResponse
+                peripheral.writeValue(Data([0x4E]), for: ctrlCh, type: wType)
+            } else {
+                peripheral.setNotifyValue(true, for: ctrlCh)
+            }
+        }
+    }
+
+    @MainActor
+    private func processPendingG7AuthStreams(peripheral: CBPeripheral) {
+        // 1. J-PAKE 160-byte phase payload
+        if let phase = g7PendingPakePhase, g7AuthStreamBuffer.count >= 160 {
+            let payload = Data(g7AuthStreamBuffer.prefix(160))
+            g7AuthStreamBuffer.removeFirst(160)
+            g7PendingPakePhase = nil
+            if let res = g7Authenticator.handlePakePhase(phase, payload: payload) {
+                g7BLEStatus = "G7 J-PAKE Phase \(phase + 1)/3 verified with \(g7BLEConnectedName)…"
+                writeG7StreamExchange(streamPackets: res.streamPackets, controlPacket: res.controlPacket, on: peripheral)
+            } else {
+                g7BLEStatus = "G7 J-PAKE Phase \(phase) failed — check 4-digit G7 Pairing Code in Settings!"
+            }
+        }
+
+        // 2. Certificate exchange payload
+        if let phase = g7PendingCertPhase, let size = g7PendingCertSize, g7AuthStreamBuffer.count >= size {
+            if size > 0 {
+                g7AuthStreamBuffer.removeFirst(size)
+            }
+            g7PendingCertPhase = nil
+            g7PendingCertSize = nil
+            g7ExpectedCertPhase = phase &+ 1
+
+            let packets = g7Authenticator.certificateStreamPackets(phase: phase)
+            if phase < 2 {
+                if let nextCtrl = g7Authenticator.certificateControlPacket(phase: phase + 1) {
+                    g7BLEStatus = "G7 Certificate Phase \(phase + 1)/3 with \(g7BLEConnectedName)…"
+                    writeG7StreamExchange(streamPackets: packets, controlPacket: nextCtrl, on: peripheral)
+                }
+            } else if let authCh = g7AuthChar {
+                g7BLEStatus = "G7 Proof-of-Possession challenge with \(g7BLEConnectedName)…"
+                let popReq = g7Authenticator.makeProofOfPossessionChallengeRequest()
+                writeG7AuthControl(popReq, to: authCh, on: peripheral)
+            }
+        }
+
+        // 3. Proof-of-Possession 64-byte remote signature
+        if let challenge = g7PendingProofChallenge, g7AuthStreamBuffer.count >= 64 {
+            g7AuthStreamBuffer.removeFirst(64)
+            g7PendingProofChallenge = nil
+            if let popResp = g7Authenticator.makeProofOfPossessionResponse(challenge: challenge) {
+                g7BLEStatus = "G7 Ownership Proof signed · Confirming with \(g7BLEConnectedName)…"
+                writeG7StreamExchange(streamPackets: popResp.streamPackets, controlPacket: popResp.controlPacket, on: peripheral)
+            }
         }
     }
 
@@ -1314,48 +1521,135 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
         let charUUID = characteristic.uuid
         let bytes = [UInt8](data)
 
+        if charUUID == Self.g7AuthStreamCharUUID {
+            Task { @MainActor in
+                self.g7AuthStreamBuffer.append(data)
+                self.processPendingG7AuthStreams(peripheral: peripheral)
+            }
+            return
+        }
+
         if charUUID == Self.g7AuthCharUUID {
-            // AuthStatusRxMessage (0x05, isAuthenticated, isBonded)
-            if bytes.count >= 3 && bytes[0] == 0x05 {
-                let isAuth = bytes[1] == 0x01
-                let isBonded = bytes[2] == 0x01
-                if let services = peripheral.services {
-                    for s in services {
-                        for c in s.characteristics ?? [] where c.uuid == Self.g7ControlCharUUID {
-                            let wType: CBCharacteristicWriteType = c.properties.contains(.write) ? .withResponse : .withoutResponse
-                            peripheral.writeValue(Data([0x4e]), for: c, type: wType)
-                        }
+            Task { @MainActor in
+                guard let authCh = self.g7AuthChar else { return }
+                let op = bytes[0]
+
+                switch op {
+                case 0x03: // AuthRequestRx (17 bytes: 0x03 + 8B tokenHash + 8B challenge)
+                    guard !self.g7ChallengeResponseSent, data.count >= 17 else { return }
+                    let challenge = data.subdata(in: 9..<17)
+                    if let resp = self.g7Authenticator.makeChallengeResponse(challenge: challenge) {
+                        self.g7ChallengeResponseSent = true
+                        self.g7BLEStatus = "G7 AES-128 challenge answered for \(self.g7BLEConnectedName)…"
+                        self.writeG7AuthControl(resp, to: authCh, on: peripheral)
+                    } else {
+                        self.g7BLEStatus = "\(self.g7BLEConnectedName) requested auth — enter 4-digit G7 Pairing Code in Settings (Tandem Pump: Options → My CGM)!"
                     }
-                }
-                Task { @MainActor in
-                    self.g7BLEStatus = "G7 Auth Status · Authenticated: \(isAuth ? "Yes" : "No"), Bonded: \(isBonded ? "Yes" : "No")"
+
+                case 0x05: // AuthChallengeRx / AuthStatusRx (0x05, isAuthenticated, isPaired)
+                    guard bytes.count >= 3 else { return }
+                    let isAuth = bytes[1] == 0x01
+                    let isPaired = bytes[2] == 0x01
+                    if isAuth {
+                        if self.g7UsingFullBootstrap {
+                            if !self.g7CertExchangeStarted {
+                                self.g7CertExchangeStarted = true
+                                self.g7ExpectedCertPhase = 0
+                                self.g7AuthStreamBuffer.removeAll(keepingCapacity: true)
+                                if let cert0 = self.g7Authenticator.certificateControlPacket(phase: 0) {
+                                    self.g7BLEStatus = "G7 J-PAKE verified · Exchanging certificates with \(self.g7BLEConnectedName)…"
+                                    self.writeG7AuthControl(cert0, to: authCh, on: peripheral)
+                                }
+                            }
+                        } else if isPaired {
+                            self.onG7Authenticated(peripheral: peripheral)
+                        } else {
+                            // Authenticated but unpaired -> clear partial key so next packet runs full bootstrap
+                            self.g7Authenticator.clearSharedKey()
+                            self.g7BLEStatus = "G7 slot needs full bootstrap — reconnecting \(self.g7BLEConnectedName)…"
+                        }
+                    } else {
+                        self.g7BLEStatus = "\(self.g7BLEConnectedName) unauthenticated — enter 4-digit G7 Pairing Code in Settings (from Tandem Pump: Options → My CGM)!"
+                    }
+
+                case 0x0A: // ExchangePakePayload (0x0A, 0x00, phase)
+                    guard bytes.count >= 3, bytes[1] == 0x00 else {
+                        self.g7BLEStatus = "G7 rejected J-PAKE — check 4-digit Pairing Code in Settings!"
+                        return
+                    }
+                    self.g7PendingPakePhase = bytes[2]
+                    self.processPendingG7AuthStreams(peripheral: peripheral)
+
+                case 0x0B: // CertificateExchange (0x0B, 0x00, phase, sizeLE[4])
+                    guard bytes.count >= 7, bytes[1] == 0x00 else { return }
+                    let phase = bytes[2]
+                    let size = Int(UInt32(bytes[3]) | (UInt32(bytes[4]) << 8) | (UInt32(bytes[5]) << 16) | (UInt32(bytes[6]) << 24))
+                    guard size <= 4096 else { return }
+                    self.g7PendingCertPhase = phase
+                    self.g7PendingCertSize = size
+                    self.processPendingG7AuthStreams(peripheral: peripheral)
+
+                case 0x0C: // ProofOfPossession (0x0C, 0x00, challenge[16])
+                    guard data.count >= 18, bytes[1] == 0x00 else { return }
+                    self.g7PendingProofChallenge = data.subdata(in: 2..<18)
+                    self.processPendingG7AuthStreams(peripheral: peripheral)
+
+                case 0x0D: // AuthStatusTx ack -> send keep-alive 0x06 0x19
+                    self.writeG7AuthControl(Data([0x06, 0x19]), to: authCh, on: peripheral)
+
+                case 0x06: // KeepAlive response (0x06 0x01 = complete, 0x06 0x00 = request bond 0x07)
+                    if bytes.count >= 2 && bytes[1] == 0x01 {
+                        self.g7Authenticator.confirmAndPersistSharedKey()
+                        self.onG7Authenticated(peripheral: peripheral)
+                    } else if bytes.count >= 2 && bytes[1] == 0x00 {
+                        self.g7BLEStatus = "G7 requesting iOS Bluetooth Bond — tap 'Pair' if prompted!"
+                        self.writeG7AuthControl(Data([0x07]), to: authCh, on: peripheral)
+                    }
+
+                case 0x08: // PairRequestRx (0x08 0x01 = bonded!)
+                    if bytes.count >= 2 && bytes[1] == 0x01 {
+                        self.g7Authenticator.confirmAndPersistSharedKey()
+                        self.onG7Authenticated(peripheral: peripheral)
+                    }
+
+                default:
+                    break
                 }
             }
             return
         }
 
         if charUUID == Self.g7ControlCharUUID {
-            // Opcode 0x4e: G7GlucoseMessage (16+ bytes)
-            // Byte 0: 0x4e, Byte 1: status (0x00), Bytes 2..<6: messageTimestamp (UInt32 LE),
-            // Bytes 10..<12: age (UInt16 LE), Bytes 12..<14: glucose (UInt16 LE & 0x0fff),
-            // Byte 14: state, Byte 15: trend (Int8 / 10.0)
-            if bytes[0] == 0x4e && bytes.count >= 16 && bytes[1] == 0x00 {
-                let msgTs = UInt32(bytes[2])
-                    | (UInt32(bytes[3]) << 8)
-                    | (UInt32(bytes[4]) << 16)
-                    | (UInt32(bytes[5]) << 24)
-                let ageSec = UInt16(bytes[10]) | (UInt16(bytes[11]) << 8)
+            // Support BOTH Opcode 0x4E (Primary G7GlucoseMessage, 16+ bytes) AND Opcode 0x31 (G7CoexistenceGlucoseMessage, 14+ bytes)
+            var parsedMgdL: Int?
+            var parsedMsgTs: UInt32 = 0
+            var parsedAgeSec: UInt16 = 0
+            var parsedRawTrend: Int8 = 0
+
+            if bytes[0] == 0x4E && bytes.count >= 16 && bytes[1] == 0x00 {
                 let rawGlucose = UInt16(bytes[12]) | (UInt16(bytes[13]) << 8)
-                guard rawGlucose != 0xffff else { return }
-                let mgdL = Int(rawGlucose & 0x0fff)
-                guard (20...500).contains(mgdL) else { return }
+                if rawGlucose != 0xFFFF {
+                    parsedMgdL = Int(rawGlucose & 0x0FFF)
+                    parsedMsgTs = UInt32(bytes[2]) | (UInt32(bytes[3]) << 8) | (UInt32(bytes[4]) << 16) | (UInt32(bytes[5]) << 24)
+                    parsedAgeSec = UInt16(bytes[10]) | (UInt16(bytes[11]) << 8)
+                    parsedRawTrend = Int8(bitPattern: bytes[15])
+                }
+            } else if bytes[0] == 0x31 && bytes.count >= 14 && bytes[1] == 0x00 {
+                let rawGlucose = UInt16(bytes[10]) | (UInt16(bytes[11]) << 8)
+                if rawGlucose != 0xFFFF {
+                    parsedMgdL = Int(rawGlucose & 0x0FFF)
+                    parsedMsgTs = UInt32(bytes[6]) | (UInt32(bytes[7]) << 8) | (UInt32(bytes[8]) << 16) | (UInt32(bytes[9]) << 24)
+                    parsedAgeSec = 0
+                    parsedRawTrend = Int8(bitPattern: bytes[13])
+                }
+            }
 
-                let rawTrend = Int8(bitPattern: bytes[15])
-                let trend = Self.trendFromG7Rate(rawTrend)
-                let readingDate = Date().addingTimeInterval(-Double(min(ageSec, 1800)))
+            if let mgdL = parsedMgdL, (20...500).contains(mgdL) {
+                let trend = Self.trendFromG7Rate(parsedRawTrend)
+                let readingDate = Date().addingTimeInterval(-Double(min(parsedAgeSec, 1800)))
                 let reading = GlucoseReading(mgdL: mgdL, timestamp: readingDate, trend: trend)
+                let msgTs = parsedMsgTs
 
-                // Request 6h backfill (opcode 0x59) if we have fewer than 12 readings and msgTs > 3600
                 if msgTs > 3600 {
                     let startTs = msgTs > 21600 ? (msgTs - 21600) : 0
                     let endTs = msgTs
@@ -1370,9 +1664,10 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
                     self.g7LastSensorTimestamp = msgTs
                     self.lastBLEGlucoseDate = readingDate
                     self.dexcomConnected = true
+                    self.demoMode = false
                     self.mergeReadings([reading])
-                    self.g7BLEStatus = "Live G7 BLE · \(self.formatGlucose(mgdL)) \(self.unit.rawValue) \(trend.arrow) (\(Self.shortTime(readingDate)))"
-                    self.statusBanner = "Direct G7 Bluetooth LE · Updated \(Self.shortTime(Date()))"
+                    self.g7BLEStatus = "Live G7 BLE (\(self.g7BLEConnectedName)) · \(self.formatGlucose(mgdL)) \(self.unit.rawValue) \(trend.arrow) (\(Self.shortTime(readingDate)))"
+                    self.statusBanner = "Direct G7 Bluetooth LE · \(self.formatGlucose(mgdL)) \(self.unit.rawValue) \(trend.arrow) · \(Self.shortTime(Date()))"
                     self.checkGlucoseAlerts()
                     await self.uploadBLEReadingsToNightscout([reading])
                 }
@@ -1381,8 +1676,6 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
 
         if charUUID == Self.g7BackfillCharUUID && bytes.count >= 9 {
-            // 9-byte G7 backfill frame:
-            // Bytes 0..<4: sensor timestamp (UInt32 LE), Bytes 4..<6: glucose (UInt16 LE & 0x0fff), Byte 7: trend (Int8)
             let sensorTs = UInt32(bytes[0])
                 | (UInt32(bytes[1]) << 8)
                 | (UInt32(bytes[2]) << 16)

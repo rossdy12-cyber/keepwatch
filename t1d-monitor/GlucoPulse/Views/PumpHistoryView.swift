@@ -73,6 +73,31 @@ struct PumpHistoryView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(GlucoTheme.inRangeGreen)
 
+            HStack(spacing: 8) {
+                Image(systemName: "key.radiowaves.forward.fill")
+                    .foregroundStyle(GlucoTheme.highAmber)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("4-Digit G7 Pairing Code (Standalone BLE)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(GlucoTheme.textPrimary)
+                    Text("Tandem Pump: Options → My CGM → Pairing Code")
+                        .font(.system(size: 10))
+                        .foregroundStyle(GlucoTheme.textSecondary)
+                }
+                Spacer()
+                TextField("4-digit code", text: $store.g7PairingCode)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.center)
+                    .font(.system(size: 14, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(width: 96)
+                    .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 8))
+                    .foregroundStyle(GlucoTheme.inRangeGreen)
+            }
+            .padding(10)
+            .background(GlucoTheme.cardElevated.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
+
             HStack {
                 if store.bleScanning {
                     let mins = store.bleScanElapsedSeconds / 60

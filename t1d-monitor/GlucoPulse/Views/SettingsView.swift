@@ -39,6 +39,16 @@ struct SettingsView: View {
                 Section {
                     Toggle("Direct Dexcom G7 Bluetooth LE", isOn: $store.g7DirectBLEEnabled)
                     HStack {
+                        Text("4-Digit G7 Pairing Code")
+                        Spacer()
+                        TextField("e.g. 1234", text: $store.g7PairingCode)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .fontWeight(.bold)
+                            .foregroundStyle(GlucoTheme.inRangeGreen)
+                            .frame(width: 110)
+                    }
+                    HStack {
                         Image(systemName: "dot.radiowaves.left.and.right")
                             .foregroundStyle(GlucoTheme.inRangeGreen)
                         Text(store.g7BLEStatus)
@@ -50,13 +60,13 @@ struct SettingsView: View {
                         store.pollConnectedG7Peripherals()
                         syncFeedback = store.g7BLEStatus
                     } label: {
-                        Label("Scan & Attach Bonded Dexcom G7 Sensor", systemImage: "wave.3.right.circle.fill")
+                        Label("Pair & Connect Dexcom G7 (\(store.g7BLEConnectedName.isEmpty ? "DXCM" : store.g7BLEConnectedName))", systemImage: "wave.3.right.circle.fill")
                             .foregroundStyle(GlucoTheme.inRangeGreen)
                     }
                 } header: {
                     Text("Standalone Mode 1 · Direct Dexcom G7 Bluetooth LE")
                 } footer: {
-                    Text("Reads glucose (0x4e) & 6h backfill (0x59) directly from your nearby Dexcom G7 over iOS CoreBluetooth GATT (FEBC / F8083532) without needing the official Dexcom G7 app.")
+                    Text("To pair without the official Dexcom app installed, enter your active sensor's 4-digit Pairing Code (shown on your Tandem t:slim X2 pump under Options → My CGM → Pairing Code, or on the G7 applicator). Performs full standalone J-PAKE + AES-128 auth on Slot 2.")
                 }
 
                 Section {
