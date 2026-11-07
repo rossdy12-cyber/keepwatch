@@ -281,7 +281,7 @@ final class WebViewCache {
     })();
     """
 
-    private func setupAudioAndBackgroundHooksIfNeeded() {
+    func setupAudioAndBackgroundHooksIfNeeded() {
         guard !isConfigured else { return }
         isConfigured = true
 
