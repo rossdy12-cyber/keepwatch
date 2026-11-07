@@ -4,8 +4,8 @@ import WebKit
 @MainActor
 class SoulSeekrStore: ObservableObject {
     @Published var host: String = "100.85.127.42"
-    @Published var slskdApiKey: String = "soularr-api-key-987654321fedcba"
-    @Published var lidarrApiKey: String = "ce79b7e918044f35a522d4279e700635"
+    var slskdApiKey: String { StoredSecret.slskdApiKey.value }
+    var lidarrApiKey: String { StoredSecret.lidarrApiKey.value }
     @Published var searchQuery: String = ""
     @Published var statusBanner: String = "slskd (:5030) + Hearr (:5070) + Soularr (:8265) Ready"
     @Published var soularrLogs: String = "Tap 'Sync Wanted List' or 'View Soularr Logs' to inspect P2P grabs."
@@ -100,12 +100,10 @@ struct HearrPortalTab: View {
         VStack(spacing: 0) {
             HStack {
                 Image(systemName: "lock.open.fill").foregroundColor(.purple)
-                Text("Hearr Music Request Portal • PIN: MadRD#HE2026!!")
+                Text("Hearr Music Request Portal")
                     .font(.caption2.bold())
                 Spacer()
-                Button("Copy PIN") {
-                    UIPasteboard.general.string = "MadRD#HE2026!!"
-                }
+                SecretCopyButton(secret: .hearrPin, label: "Copy PIN")
                 .font(.caption2.bold())
                 .foregroundColor(.purple)
             }
@@ -122,12 +120,10 @@ struct SlskdWebTab: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("slskd P2P Daemon • User: slskd / Pass: MadRD#HE2026!!")
+                Text("slskd P2P Daemon • User: slskd")
                     .font(.caption2.bold())
                 Spacer()
-                Button("Copy Pass") {
-                    UIPasteboard.general.string = "MadRD#HE2026!!"
-                }
+                SecretCopyButton(secret: .slskdPassword, label: "Copy Pass")
                 .font(.caption2.bold())
                 .foregroundColor(.purple)
             }

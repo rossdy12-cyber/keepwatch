@@ -13,6 +13,32 @@ its microphone to your NAS and plays what comes back. The NAS does everything el
 Say **"Hey Jarvis"** and wait for the beep. Ask your question, and Jarvis answers through the speaker. A low double
 beep means it didn't catch anything. There's no time limit on answers, unlike Alexa.
 
+### Built-in commands (handled on the hub, so they work even if the core is offline)
+
+- **Music from Navidrome:** "play Coldplay", "play the album Rumours", "play Yellow by Coldplay", "play some jazz",
+  "play my gym playlist", "shuffle my music", "skip", "previous", "pause", "carry on", "stop", "what's playing".
+  Same library as the Jarvis iPhone app. The hub finds the track, transcodes it and streams it to the Pi's
+  speaker. Say "Hey Jarvis" over the music and it quietens while you talk, then carries on; "Hey Jarvis, skip"
+  and "Hey Jarvis, pause" work hands-free. **Set it up** by filling in `NAVIDROME_USER` and `NAVIDROME_PASS`
+  (Apps → jarvis-voice → Edit) with the same sign-in you use in the app's Settings → Music.
+- **Alarms:** "set an alarm for 6:30am", "wake me at 7 tomorrow", "alarm for half past six", "set an alarm for
+  7am every day". Stop a ringing alarm with "Hey Jarvis, stop" (or "stop the alarm" / "snooze"). Alarms survive
+  reboots and ring the Pi they were set on. The alarm chimes in bursts with gaps so "Hey Jarvis" is still heard
+  over it.
+- **Timers:** "set a timer for 5 minutes", "timer for 90 seconds", "set a timer for an hour and a half".
+- **The time / date:** "what's the time?", "what day is it?".
+- **Volume:** "volume up", "quieter", "set volume to 50 percent", "mute", "max volume" (software volume, per Pi).
+- **Cancel / list:** "cancel my alarm", "what alarms do I have?".
+
+Anything else is sent on to your Jarvis core as usual.
+
+### Faster replies
+
+Long answers now play **sentence by sentence** — the first words come out while the rest are still being
+spoken, instead of waiting for the whole reply. If replies still feel slow, the biggest levers are
+`WHISPER_MODEL` (`tiny.en` is quicker than `base.en`, at some accuracy) and the Jarvis core itself; a lower
+`ENDPOINT_SILENCE` (e.g. `0.6`) also makes it react sooner after you stop talking.
+
 Tested here end to end with recorded speech: the wake word was detected, "What time is it?" was transcribed, the
 Jarvis core answered, and the spoken reply played on a simulated Pi. Not yet tried on real hardware.
 
@@ -36,6 +62,10 @@ Jarvis core answered, and the spoken reply played on a simulated Pi. Not yet tri
 
 ## 2. Prepare the Pi
 
+> **Easier:** flash the ready-made [Jarvis Pi image](../jarvis-pi-image/README.md) and fill in `jarvis.txt` on the
+> card. No SSH or setup command needed. The steps below are the manual way.
+
+
 1. On your PC, install **Raspberry Pi Imager** (<https://www.raspberrypi.com/software/>).
    - Device: **Raspberry Pi 1**. OS: **Raspberry Pi OS (other) → Raspberry Pi OS Lite (32-bit)**.
    - When it asks about **OS customisation**, choose **Edit settings**:
@@ -58,7 +88,11 @@ The Pi starts listening by itself every time it's powered on.
 |---|---|
 | `WAKE_THRESHOLD` | Lower (e.g. `0.35`) if it doesn't hear "Hey Jarvis" from across the room; higher (`0.7`) if it wakes by itself. |
 | `FOLLOW_UP_SECONDS` | e.g. `5`: after an answer, keep listening for 5 s so you can ask a follow-up without "Hey Jarvis". |
-| `WHISPER_MODEL` | `small.en` understands more (accents, background noise) but is slower. |
+| `WHISPER_MODEL` | `small.en` understands more (accents, background noise) but is slower; `tiny.en` is fastest. |
+| `ENDPOINT_SILENCE` | Pause (seconds) that ends your question. `0.75` default; lower = snappier, higher if it cuts you off. |
+| `NAVIDROME_USER` / `NAVIDROME_PASS` | Your Navidrome sign-in, so music commands work. Same as the app's Settings → Music. |
+| `NAVIDROME_URL` | Your Navidrome address (default `https://navidrome.nas-server.co.uk`). |
+| `NAVIDROME_BITRATE` | kbps Navidrome transcodes to before the hub streams it (`320` default); `0` plays the original file. |
 | `TTS_VOICE` | Kokoro British male voice: `bm_george` (deep, butler-like), `bm_fable`, `bm_lewis` or `bm_daniel`. |
 | `TTS_SPEED` | `0.95` is slightly unhurried; `1.0` is normal. |
 | `VOICE_EFFECT` | `light` adds a subtle AI-assistant sheen; `none` for the plain voice. |

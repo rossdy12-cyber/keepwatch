@@ -1,0 +1,68 @@
+name: Build Jarvis Watch app and watchsign
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "jarvis-watch/**"
+      - "watchsign/**"
+      - "watch-devmode/**"
+      - "omnicontainer/OmniWatch/**"
+      - "omnicontainer/OmniWatchWidgets/**"
+      - ".github/workflows/build-jarvis-watch.yml"
+  workflow_dispatch:
+
+jobs:
+  watch-app:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the watch-only J.A.R.V.I.S. app (unsigned)
+        run: bash jarvis-watch/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JarvisWatch-ipa
+          path: jarvis-watch/out/JarvisWatch.ipa
+          retention-days: 30
+
+  watchsign-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build watchsign.exe
+        working-directory: watchsign
+        run: cargo build --release --locked
+      - name: Package watchsign with the Watch scripts
+        shell: bash
+        run: |
+          mkdir -p out/watch-tools
+          cp watchsign/target/release/watchsign.exe out/watch-tools/
+          cp watch-devmode/*.py watch-devmode/README.md out/watch-tools/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: watch-tools-windows
+          path: out/watch-tools
+          retention-days: 30
+
+  watchsign-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps (keyring uses libdbus)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdbus-1-dev pkg-config
+      - name: Build watchsign (Linux)
+        working-directory: watchsign
+        run: cargo build --release --locked
+      - name: Package watchsign with the Watch scripts
+        run: |
+          mkdir -p out/watch-tools-linux
+          cp watchsign/target/release/watchsign out/watch-tools-linux/
+          cp watch-devmode/*.py watch-devmode/README.md out/watch-tools-linux/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: watch-tools-linux
+          path: out/watch-tools-linux
+          retention-days: 30

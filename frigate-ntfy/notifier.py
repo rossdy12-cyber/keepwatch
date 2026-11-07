@@ -43,6 +43,8 @@ class Config:
         self.frigate_user = env("FRIGATE_USER")
         self.frigate_password = env("FRIGATE_PASSWORD")
         self.click_url = env("CLICK_URL", self.frigate_url + "/review")
+        # "true" makes tapping the notification open the clip in the SentryCam app (sentrycam://event/<id>).
+        self.sentrycam_link = env("SENTRYCAM_LINK", "false").lower() in ("1", "true", "yes")
 
         self.ntfy_server = env("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
         self.ntfy_topic = env("NTFY_TOPIC")
@@ -268,7 +270,9 @@ class Notifier:
             "Tags": tags,
             "Priority": self.config.ntfy_priority,
         }
-        if self.config.click_url:
+        if self.config.sentrycam_link and event_id:
+            headers["Click"] = "sentrycam://event/%s" % urllib.parse.quote(str(event_id))
+        elif self.config.click_url:
             headers["Click"] = self.config.click_url
         if self.config.ntfy_token:
             headers["Authorization"] = "Bearer " + self.config.ntfy_token

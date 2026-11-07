@@ -28,14 +28,29 @@ jobs:
       - name: Generate the Xcode project
         run: xcodegen generate
 
+      - name: Package the ready-to-open Xcode project (for building on a Mac)
+        run: |
+          cd "$GITHUB_WORKSPACE/omnicontainer"
+          zip -qry "$GITHUB_WORKSPACE/OmniContainer-project.zip" . \
+            -x "build/*" ".git/*" "out/*" "*.o" "*.dylib"
+          ls -lh "$GITHUB_WORKSPACE/OmniContainer-project.zip"
+
+      - name: Upload the Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniContainer-project
+          path: OmniContainer-project.zip
+
       - name: Build OmniContainer (unsigned)
         run: |
           set -o pipefail
+          # No -sdk override: each target builds with its own SDK (iOS app -> iphoneos, embedded
+          # watch app + widgets -> watchos). Forcing -sdk iphoneos miscompiled the watch widgets.
           xcodebuild \
             -project OmniContainer.xcodeproj \
             -target OmniContainer \
             -configuration Release \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             SYMROOT="$PWD/build" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -66,6 +81,7 @@ jobs:
             -module-name OmniContainerPlugin \
             -Xlinker -install_name -Xlinker @rpath/OmniContainerPlugin.dylib \
             OmniContainer/OmniContainerApp.swift \
+            OmniContainer/StoredSecrets.swift \
             $(find OmniContainer/KeepwatchCore -name '*.swift') \
             out/OmniPluginEntry.o \
             -o out/OmniContainerPlugin.dylib

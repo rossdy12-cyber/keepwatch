@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply jarvis.txt from the boot partition (Wi-Fi, NAS, login)
+DefaultDependencies=no
+RequiresMountsFor=/boot/firmware
+After=local-fs.target systemd-remount-fs.service
+Before=NetworkManager.service network-pre.target ssh.service jarvis-voice.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jarvis-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

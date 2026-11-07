@@ -1,0 +1,14 @@
+[Unit]
+Description=Join Tailscale from jarvis.txt (if an auth key is set)
+After=tailscaled.service network-online.target jarvis-setup.service
+Wants=tailscaled.service network-online.target
+Before=jarvis-voice.service
+ConditionPathExists=/boot/firmware/jarvis.txt
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jarvis-tailscale
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

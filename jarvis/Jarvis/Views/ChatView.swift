@@ -9,6 +9,7 @@ struct ChatView: View {
     @EnvironmentObject private var speaker: Speaker
     @StateObject private var listener = SpeechRecognizer()
     @ObservedObject private var music = MusicPlayer.shared
+    @ObservedObject private var actions = AppActions.shared
     @State private var musicWasPlaying = false
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
@@ -77,6 +78,22 @@ struct ChatView: View {
             .task(id: settings.config.address) {
                 await chat.checkHealth(settings: settings)
             }
+            .onAppear { consumeStartListening() }
+            .onChange(of: actions.startListening) { want in
+                if want { consumeStartListening() }
+            }
+        }
+    }
+
+    /// Picks up a "Talk to Jarvis" Action Button / Shortcut trigger and starts listening.
+    private func consumeStartListening() {
+        guard actions.startListening else { return }
+        actions.startListening = false
+        guard !listener.isRecording, !chat.isSending else { return }
+        Task { @MainActor in
+            // Give the view and audio session a moment to settle after a cold launch.
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            if !listener.isRecording && !chat.isSending { toggleListening() }
         }
     }
 
