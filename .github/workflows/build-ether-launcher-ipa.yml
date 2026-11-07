@@ -25,7 +25,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build EtherLauncher (unsigned)
+      - name: Build EtherLauncher & Embedded EtherWidgets.appex (unsigned)
         run: |
           set -o pipefail
           xcodebuild \
@@ -37,52 +37,17 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
             build
 
-      - name: Build & Bundle Interactive iOS Home Screen Widget (EtherWidgets.appex)
+      - name: Verify EtherWidgets.appex Info.plist & Ad-hoc Sign
         run: |
-          PLUGINS_DIR="build/Release-iphoneos/EtherLauncher.app/PlugIns/EtherWidgets.appex"
-          mkdir -p "$PLUGINS_DIR"
-          xcrun --sdk iphoneos swiftc \
-            -target arm64-apple-ios17.0 \
-            -O \
-            -parse-as-library \
-            -application-extension \
-            -Xlinker -e -Xlinker _NSExtensionMain \
-            EtherWidgets/EtherWidgets.swift \
-            -o "$PLUGINS_DIR/EtherWidgets"
-
-          cat > "$PLUGINS_DIR/Info.plist" << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleDisplayName</key>
-            <string>ÆTHER Widgets</string>
-            <key>CFBundleExecutable</key>
-            <string>EtherWidgets</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.ross.etherlauncher.widgets</string>
-            <key>CFBundleInfoDictionaryVersion</key>
-            <string>6.0</string>
-            <key>CFBundleName</key>
-            <string>EtherWidgets</string>
-            <key>CFBundlePackageType</key>
-            <string>XPC!</string>
-            <key>CFBundleShortVersionString</key>
-            <string>1.0.0</string>
-            <key>CFBundleVersion</key>
-            <string>1</string>
-            <key>MinimumOSVersion</key>
-            <string>17.0</string>
-            <key>NSExtension</key>
-            <dict>
-              <key>NSExtensionPointIdentifier</key>
-              <string>com.apple.widgetkit-extension</string>
-            </dict>
-          </dict>
-          </plist>
-          EOF
+          APP_DIR="build/Release-iphoneos/EtherLauncher.app"
+          EXT_DIR="$APP_DIR/PlugIns/EtherWidgets.appex"
+          ls -la "$EXT_DIR"
+          plutil -p "$EXT_DIR/Info.plist"
+          codesign -f -s - "$EXT_DIR"
+          codesign -f -s - "$APP_DIR"
 
       - name: Package Payload/EtherLauncher.app into EtherLauncher.ipa
         run: |

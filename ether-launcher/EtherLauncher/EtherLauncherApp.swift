@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UIKit
+import WidgetKit
 
 @main
 struct EtherLauncherApp: App {
@@ -11,6 +12,9 @@ struct EtherLauncherApp: App {
             ContentView()
                 .environmentObject(store)
                 .preferredColorScheme(.dark)
+                .onAppear {
+                    WidgetCenter.shared.reloadAllTimelines()
+                }
                 .onOpenURL { url in
                     store.handleIncomingURL(url)
                 }
