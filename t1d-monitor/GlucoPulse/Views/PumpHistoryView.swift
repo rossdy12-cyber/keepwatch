@@ -73,35 +73,55 @@ struct PumpHistoryView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(GlucoTheme.inRangeGreen)
 
+            HStack {
+                if store.bleScanning {
+                    let mins = store.bleScanElapsedSeconds / 60
+                    let secs = store.bleScanElapsedSeconds % 60
+                    Text(String(format: "Scan time: %02d:%02d / 05:00 (G7 wakes for 2s every 5m)", mins, secs))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(GlucoTheme.highAmber)
+                }
+                Spacer()
+                Toggle("Show All BLE", isOn: $store.showAllBLEDevices)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(GlucoTheme.textSecondary)
+                    .fixedSize()
+            }
+
             if store.bleDevices.isEmpty {
                 Text(store.bleScanning
-                     ? "Listening for nearby Dexcom G7 (DXCM / FEBC) and Tandem t:slim X2 BLE packets…"
+                     ? "Listening for Dexcom G7 (0x00D0 / FEBC / DXCM) & Tandem t:slim X2… Keep screen open for up to 5 mins to catch the G7's 2-second wake pulse, or toggle 'Show All BLE' to inspect all nearby devices."
                      : "Tap 'Scan BLE' to attach to your Dexcom G7 sensor and Tandem t:slim X2 pump.")
                     .font(.system(size: 12))
                     .foregroundStyle(GlucoTheme.textSecondary)
             } else {
                 ForEach(store.bleDevices) { dev in
-                    HStack {
-                        Image(systemName: dev.category.contains("Dexcom") ? "sensor.tag.radiowaves.forward.fill" : "drop.transmission")
-                            .foregroundStyle(dev.category.contains("Dexcom") ? GlucoTheme.inRangeGreen : GlucoTheme.tandemCyan)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("\(dev.category) · \(dev.name)")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(GlucoTheme.textPrimary)
-                            Text("Last packet: \(Self.timeString(dev.lastSeen))")
-                                .font(.system(size: 11))
-                                .foregroundStyle(GlucoTheme.textSecondary)
+                    Button {
+                        store.connectToBLEDevice(id: dev.id)
+                    } label: {
+                        HStack {
+                            Image(systemName: dev.category.contains("Dexcom") ? "sensor.tag.radiowaves.forward.fill" : "drop.transmission")
+                                .foregroundStyle(dev.category.contains("Dexcom") ? GlucoTheme.inRangeGreen : GlucoTheme.tandemCyan)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(dev.category) · \(dev.name)")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(GlucoTheme.textPrimary)
+                                Text("Last packet: \(Self.timeString(dev.lastSeen)) · Tap to lock/connect")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(GlucoTheme.textSecondary)
+                            }
+                            Spacer()
+                            Text("\(dev.rssi) dBm")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(GlucoTheme.cardElevated, in: Capsule())
+                                .foregroundStyle(GlucoTheme.inRangeGreen)
                         }
-                        Spacer()
-                        Text("\(dev.rssi) dBm")
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(GlucoTheme.cardElevated, in: Capsule())
-                            .foregroundStyle(GlucoTheme.inRangeGreen)
+                        .padding(10)
+                        .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 12))
                     }
-                    .padding(10)
-                    .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 12))
+                    .buttonStyle(.plain)
                 }
             }
         }

@@ -2,6 +2,7 @@ import Combine
 import CoreBluetooth
 import Foundation
 import SwiftUI
+import UIKit
 import UserNotifications
 
 enum GlucoseUnit: String, CaseIterable, Identifiable {
@@ -180,13 +181,18 @@ final class GlucoStore: NSObject, ObservableObject {
     private static let g7DirectBLEKey = "gluco.g7DirectBLE"
     private static let savedG7UUIDKey = "gluco.savedG7UUID"
 
-    // Dexcom G7 GATT Service & Characteristic UUIDs (LoopKit / G7SensorKit spec)
+    // Dexcom G7 & Tandem GATT Service & Characteristic UUIDs (LoopKit / G7SensorKit spec)
     nonisolated static let g7AdvServiceUUID = CBUUID(string: "FEBC")
     nonisolated static let g7CGMServiceUUID = CBUUID(string: "F8083532-849E-531C-C594-30F1F86A4EA5")
+    nonisolated static let g7AltServiceUUID = CBUUID(string: "F8084532-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let g7ReadCharUUID = CBUUID(string: "F8083533-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let g7ControlCharUUID = CBUUID(string: "F8083534-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let g7AuthCharUUID = CBUUID(string: "F8083535-849E-531C-C594-30F1F86A4EA5")
     nonisolated static let g7BackfillCharUUID = CBUUID(string: "F8083536-849E-531C-C594-30F1F86A4EA5")
+    nonisolated static let tandemServiceUUID1 = CBUUID(string: "FDFB")
+    nonisolated static let tandemServiceUUID2 = CBUUID(string: "7B83FFF6-9F77-4E5C-8064-AAE2C24838B9")
+    nonisolated static let deviceInfoServiceUUID = CBUUID(string: "180A")
+    nonisolated static let batteryServiceUUID = CBUUID(string: "180F")
 
     @Published var unit: GlucoseUnit {
         didSet { UserDefaults.standard.set(unit.rawValue, forKey: Self.unitKey) }
@@ -268,14 +274,18 @@ final class GlucoStore: NSObject, ObservableObject {
     @Published var statusBanner: String = "Standalone G7 BLE + Tandem Source · No Dexcom App Needed"
     @Published var bleDevices: [BLEPeripheralDevice] = []
     @Published var bleScanning: Bool = false
+    @Published var showAllBLEDevices: Bool = false
+    @Published var bleScanElapsedSeconds: Int = 0
     @Published var g7BLEStatus: String = "Listening for Dexcom G7 (DXCM) over Bluetooth LE…"
     @Published var g7BLEConnectedName: String = ""
     @Published var lastBLEGlucoseDate: Date?
 
     private var dexcomSessionID: String?
     private var refreshTimer: Timer?
+    private var bleFastTimer: Timer?
     private var centralManager: CBCentralManager?
     private var g7Peripherals: [UUID: CBPeripheral] = [:]
+    private var allDiscoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var g7LastSensorTimestamp: UInt32 = 0
 
     override init() {
@@ -897,6 +907,9 @@ final class GlucoStore: NSObject, ObservableObject {
     }
 
     func startDirectG7BLE() {
+        UIApplication.shared.isIdleTimerDisabled = true
+        bleScanElapsedSeconds = 0
+        startFastBLECatchTimer()
         if centralManager == nil {
             centralManager = CBCentralManager(delegate: self, queue: nil)
         } else if centralManager?.state == .poweredOn {
@@ -909,15 +922,51 @@ final class GlucoStore: NSObject, ObservableObject {
         }
     }
 
+    private func startFastBLECatchTimer() {
+        bleFastTimer?.invalidate()
+        // Dexcom G7 only wakes its BLE radio for ~2 seconds every 5 minutes (300s).
+        // Polling retrieveConnectedPeripherals every 1.5s guarantees we catch already-bonded
+        // G7 sensors and Tandem t:slim X2 pumps during that 2-second window.
+        bleFastTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                if self.bleScanning {
+                    self.bleScanElapsedSeconds += 2
+                }
+                self.pollConnectedG7Peripherals()
+            }
+        }
+    }
+
     func pollConnectedG7Peripherals() {
         guard let central = centralManager, central.state == .poweredOn else { return }
-        // 1. Check any Dexcom G7 already connected at the iOS Bluetooth system level
+        // 1. Check any Dexcom G7 or Tandem pump already connected at the iOS Bluetooth system level
         let connected = central.retrieveConnectedPeripherals(withServices: [
             Self.g7AdvServiceUUID,
-            Self.g7CGMServiceUUID
+            Self.g7CGMServiceUUID,
+            Self.g7AltServiceUUID,
+            Self.tandemServiceUUID1,
+            Self.tandemServiceUUID2,
+            Self.deviceInfoServiceUUID,
+            Self.batteryServiceUUID
         ])
         for p in connected {
-            attachAndConnectG7Peripheral(p, central: central)
+            let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let upper = pName.uppercased()
+            let isDexcom = upper.contains("DXCM") || upper.contains("DEXCOM") || upper.hasPrefix("DX")
+            let isTandem = upper.contains("TSLIM") || upper.contains("T:SLIM") || upper.contains("TANDEM")
+            if isDexcom || isTandem || showAllBLEDevices {
+                let category = isTandem ? "Tandem t:slim X2 (Bonded)" : (isDexcom ? "Dexcom G7 (Bonded)" : "Connected BLE")
+                upsertBLEDevice(
+                    id: p.identifier.uuidString,
+                    name: pName.isEmpty ? "Bonded G7 / Pump" : pName,
+                    category: category,
+                    rssi: -52
+                )
+            }
+            if isDexcom || pName.isEmpty {
+                attachAndConnectG7Peripheral(p, central: central)
+            }
         }
         // 2. Check previously discovered G7 peripheral UUID so iOS auto-connects on its 5-min wake window
         if let savedStr = UserDefaults.standard.string(forKey: Self.savedG7UUIDKey),
@@ -929,18 +978,48 @@ final class GlucoStore: NSObject, ObservableObject {
         }
     }
 
+    func upsertBLEDevice(id: String, name: String, category: String, rssi: Int) {
+        let dev = BLEPeripheralDevice(
+            id: id,
+            name: name,
+            category: category,
+            rssi: rssi,
+            lastSeen: Date()
+        )
+        if let idx = bleDevices.firstIndex(where: { $0.id == id }) {
+            bleDevices[idx] = dev
+        } else {
+            bleDevices.insert(dev, at: 0)
+        }
+    }
+
+    func connectToBLEDevice(id: String) {
+        guard let central = centralManager,
+              let uuid = UUID(uuidString: id),
+              let p = allDiscoveredPeripherals[uuid] ?? g7Peripherals[uuid] else { return }
+        attachAndConnectG7Peripheral(p, central: central)
+    }
+
     func attachAndConnectG7Peripheral(_ peripheral: CBPeripheral, central: CBCentralManager) {
         g7Peripherals[peripheral.identifier] = peripheral
+        allDiscoveredPeripherals[peripheral.identifier] = peripheral
         peripheral.delegate = self
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedG7UUIDKey)
         let name = peripheral.name ?? "Dexcom G7"
-        if g7BLEConnectedName.isEmpty {
+        if g7BLEConnectedName.isEmpty || g7BLEConnectedName == "Dexcom G7" {
             g7BLEConnectedName = name
         }
+        upsertBLEDevice(
+            id: peripheral.identifier.uuidString,
+            name: name,
+            category: "Dexcom G7 (Target)",
+            rssi: -55
+        )
         if peripheral.state == .connected {
-            peripheral.discoverServices([Self.g7CGMServiceUUID, Self.g7AdvServiceUUID])
+            g7BLEStatus = "Connected to \(name) · Reading G7 GATT…"
+            peripheral.discoverServices(nil)
         } else if peripheral.state != .connecting {
-            g7BLEStatus = "Queued for \(name) 5-min wake window…"
+            g7BLEStatus = "Locked onto \(name) · Waiting for 5-min G7 wake tick…"
             central.connect(peripheral, options: [
                 CBConnectPeripheralOptionNotifyOnConnectionKey: true,
                 CBConnectPeripheralOptionNotifyOnNotificationKey: true
@@ -952,6 +1031,7 @@ final class GlucoStore: NSObject, ObservableObject {
         if bleScanning {
             centralManager?.stopScan()
             bleScanning = false
+            UIApplication.shared.isIdleTimerDisabled = false
         } else {
             startDirectG7BLE()
         }
@@ -1111,30 +1191,61 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             ?? peripheral.name
             ?? ""
         let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let serviceUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
-        let hasG7Service = serviceUUIDs.contains(Self.g7AdvServiceUUID) || serviceUUIDs.contains(Self.g7CGMServiceUUID)
+
+        var serviceUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        if let overflow = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] {
+            serviceUUIDs.append(contentsOf: overflow)
+        }
+        if let solicited = advertisementData[CBAdvertisementDataSolicitedServiceUUIDsKey] as? [CBUUID] {
+            serviceUUIDs.append(contentsOf: solicited)
+        }
+
+        let hasG7Service = serviceUUIDs.contains(Self.g7AdvServiceUUID)
+            || serviceUUIDs.contains(Self.g7CGMServiceUUID)
+            || serviceUUIDs.contains(Self.g7AltServiceUUID)
+        let hasTandemService = serviceUUIDs.contains(Self.tandemServiceUUID1)
+            || serviceUUIDs.contains(Self.tandemServiceUUID2)
+
+        // Check Bluetooth SIG Manufacturer Company ID: 0x00D0 (208) = Dexcom, Inc.
+        var isDexcomMfg = false
+        var mfgHex = ""
+        if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data, mfgData.count >= 2 {
+            let bytes = [UInt8](mfgData)
+            let companyId = UInt16(bytes[0]) | (UInt16(bytes[1]) << 8)
+            if companyId == 0x00D0 {
+                isDexcomMfg = true
+            }
+            mfgHex = String(format: "0x%04X", companyId)
+        }
 
         let upper = trimmed.uppercased()
-        let isDexcom = hasG7Service || upper.contains("DXCM") || upper.contains("DEXCOM") || upper.hasPrefix("DX")
-        let isTandem = upper.contains("TSLIM") || upper.contains("T:SLIM") || upper.contains("TANDEM")
-        guard isDexcom || isTandem else { return }
+        let isDexcom = hasG7Service || isDexcomMfg || upper.contains("DXCM") || upper.contains("DEXCOM") || upper.hasPrefix("DX0") || upper.hasPrefix("DXC") || upper.hasPrefix("DX")
+        let isTandem = hasTandemService || upper.contains("TSLIM") || upper.contains("T:SLIM") || upper.contains("TANDEM")
 
-        let displayName = trimmed.isEmpty ? "DXCM G7 Sensor" : trimmed
-        let category = isDexcom ? "Dexcom G7" : "Tandem t:slim X2"
+        let rssiVal = RSSI.intValue
+        let uuidStr = peripheral.identifier.uuidString
+        let shortId = String(uuidStr.prefix(6))
+        let svcSummary = serviceUUIDs.map { $0.uuidString.prefix(4) }.joined(separator: ",")
 
-        let dev = BLEPeripheralDevice(
-            id: peripheral.identifier.uuidString,
-            name: displayName,
-            category: category,
-            rssi: RSSI.intValue,
-            lastSeen: Date()
-        )
         Task { @MainActor in
-            if let idx = self.bleDevices.firstIndex(where: { $0.id == dev.id }) {
-                self.bleDevices[idx] = dev
+            self.allDiscoveredPeripherals[peripheral.identifier] = peripheral
+            guard isDexcom || isTandem || self.showAllBLEDevices else { return }
+
+            let displayName: String
+            if !trimmed.isEmpty {
+                displayName = trimmed
+            } else if isDexcom {
+                displayName = "DXCM G7 (\(shortId))"
+            } else if isTandem {
+                displayName = "t:slim X2 (\(shortId))"
             } else {
-                self.bleDevices.append(dev)
+                let extra = !mfgHex.isEmpty ? mfgHex : (!svcSummary.isEmpty ? String(svcSummary) : shortId)
+                displayName = "BLE \(extra)"
             }
+
+            let category = isDexcom ? "Dexcom G7" : (isTandem ? "Tandem t:slim X2" : "Nearby BLE")
+            self.upsertBLEDevice(id: uuidStr, name: displayName, category: category, rssi: rssiVal)
+
             if isDexcom && self.g7DirectBLEEnabled {
                 self.attachAndConnectG7Peripheral(peripheral, central: central)
             }
