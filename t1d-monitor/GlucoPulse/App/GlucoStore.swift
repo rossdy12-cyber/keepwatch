@@ -968,7 +968,7 @@ final class GlucoStore: NSObject, ObservableObject {
             case .doubleUp: dir = "DoubleUp"
             case .singleUp: dir = "SingleUp"
             case .fortyFiveUp: dir = "FortyFiveUp"
-            case .flat: dir = "Flat"
+            case .flat, .unknown: dir = "Flat"
             case .fortyFiveDown: dir = "FortyFiveDown"
             case .singleDown: dir = "SingleDown"
             case .doubleDown: dir = "DoubleDown"
