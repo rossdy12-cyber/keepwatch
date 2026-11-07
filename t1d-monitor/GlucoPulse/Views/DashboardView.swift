@@ -172,6 +172,26 @@ struct DashboardView: View {
                 }
                 Spacer()
                 Button {
+                    if store.isAlertSnoozed {
+                        store.clearAlertSnooze()
+                    } else {
+                        store.snoozeAlerts(minutes: 60)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: store.isAlertSnoozed ? "bell.slash.fill" : "bell.fill")
+                            .font(.system(size: 10, weight: .bold))
+                        Text(store.isAlertSnoozed ? "Muted 1h" : "Mute 1h")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background((store.isAlertSnoozed ? GlucoTheme.highAmber : Color.white).opacity(0.16), in: Capsule())
+                    .foregroundStyle(store.isAlertSnoozed ? GlucoTheme.highAmber : GlucoTheme.textSecondary)
+                }
+                .fixedSize()
+
+                Button {
                     store.forceBLEPollNow()
                 } label: {
                     Text("Read BLE Now")
@@ -325,19 +345,35 @@ struct DashboardView: View {
         .background(GlucoTheme.cardElevated, in: RoundedRectangle(cornerRadius: 14))
     }
 
+    private static func chartTimeLabel(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: date)
+    }
+
     private var combinedChartCard: some View {
         let lowVal = store.unit == .mmolL ? Double(store.lowMgdL) / 18.0182 : Double(store.lowMgdL)
         let highVal = store.unit == .mmolL ? Double(store.highMgdL) / 18.0182 : Double(store.highMgdL)
         let yMin = store.unit == .mmolL ? 2.0 : 40.0
-        let yMax = store.unit == .mmolL ? 18.0 : 320.0
+        let yMax = store.unit == .mmolL ? 20.0 : 360.0
+        let windowEnd = Date()
+        let windowStart = windowEnd.addingTimeInterval(Double(-selectedHours * 3600))
+        let xStrideHours: Int = {
+            switch selectedHours {
+            case 3: return 1
+            case 6: return 1
+            case 12: return 2
+            default: return 4
+            }
+        }()
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("G7 Glucose & t:slim X2 Bolus Timeline")
+                    Text("G7 Glucose & t:slim X2 Timeline (\(selectedHours)h)")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(GlucoTheme.textPrimary)
-                    Text("Green = In Range · Cyan Drops = Tandem Boluses")
+                    Text("\(Self.chartTimeLabel(windowStart)) – \(Self.chartTimeLabel(windowEnd)) · \(filteredReadings.count) readings in \(selectedHours)h window")
                         .font(.system(size: 11))
                         .foregroundStyle(GlucoTheme.textSecondary)
                 }
@@ -348,11 +384,13 @@ struct DashboardView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 165)
+                .frame(width: 170)
             }
 
             Chart {
                 RectangleMark(
+                    xStart: .value("Start", windowStart),
+                    xEnd: .value("End", windowEnd),
                     yStart: .value("Low", lowVal),
                     yEnd: .value("High", highVal)
                 )
@@ -380,7 +418,7 @@ struct DashboardView: View {
                         x: .value("Time", r.timestamp),
                         y: .value("Glucose", yVal)
                     )
-                    .symbolSize(22)
+                    .symbolSize(26)
                     .foregroundStyle(store.color(for: r.mgdL))
                 }
 
@@ -401,8 +439,21 @@ struct DashboardView: View {
                     }
                 }
             }
+            .id(selectedHours)
+            .chartXScale(domain: windowStart...windowEnd)
             .chartYScale(domain: yMin...yMax)
-            .frame(height: 220)
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .hour, count: xStrideHours)) { _ in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                        .foregroundStyle(Color.white.opacity(0.12))
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute())
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(GlucoTheme.textSecondary)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: selectedHours)
+            .frame(height: 225)
         }
         .padding(16)
         .background(GlucoTheme.card, in: RoundedRectangle(cornerRadius: 20))
@@ -410,17 +461,19 @@ struct DashboardView: View {
     }
 
     private var timeInRangeCard: some View {
-        let tir = store.timeInRangePercent
-        let low = store.timeBelowRangePercent
-        let high = store.timeAboveRangePercent
+        let tir = store.timeInRangePercent(hours: selectedHours)
+        let low = store.timeBelowRangePercent(hours: selectedHours)
+        let high = store.timeAboveRangePercent(hours: selectedHours)
+        let avg = store.averageMgdL(hours: selectedHours)
+        let gmi = store.gmiPercent(hours: selectedHours)
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("24-Hour Combined Summary")
+                Text("\(selectedHours)-Hour Combined Summary")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(GlucoTheme.textPrimary)
                 Spacer()
-                Text("\(store.readings.count) G7 readings")
+                Text("\(filteredReadings.count) / \(store.readings.count) G7 readings")
                     .font(.system(size: 11))
                     .foregroundStyle(GlucoTheme.textSecondary)
             }
@@ -448,8 +501,8 @@ struct DashboardView: View {
                 summaryStat(label: "In Range", value: "\(tir)%", color: GlucoTheme.inRangeGreen)
                 summaryStat(label: "High", value: "\(high)%", color: GlucoTheme.highAmber)
                 summaryStat(label: "Low", value: "\(low)%", color: GlucoTheme.lowRed)
-                summaryStat(label: "Average", value: store.readings.isEmpty ? "--" : "\(store.formatGlucose(store.averageMgdL))", color: GlucoTheme.textPrimary)
-                summaryStat(label: "GMI (A1c)", value: store.gmiPercent, color: GlucoTheme.tandemCyan)
+                summaryStat(label: "Average", value: store.readings.isEmpty ? "--" : "\(store.formatGlucose(avg))", color: GlucoTheme.textPrimary)
+                summaryStat(label: "GMI (A1c)", value: gmi, color: GlucoTheme.tandemCyan)
             }
         }
         .padding(16)

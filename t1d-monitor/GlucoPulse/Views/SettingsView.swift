@@ -31,8 +31,34 @@ struct SettingsView: View {
                         Text("\(store.formatGlucose(store.highMgdL)) \(store.unit.rawValue)")
                             .foregroundStyle(GlucoTheme.highAmber)
                             .fontWeight(.bold)
-                        Stepper("", value: $store.highMgdL, in: 140...250, step: 5)
+                        Stepper("", value: $store.highMgdL, in: 140...270, step: 4)
                             .labelsHidden()
+                    }
+
+                    Toggle("Glucose Push Notifications", isOn: $store.alertsEnabled)
+                    Toggle("High Glucose Alerts", isOn: $store.highAlertsEnabled)
+                        .disabled(!store.alertsEnabled)
+
+                    Picker("High Alert Repeat", selection: $store.highAlertRepeatMinutes) {
+                        Text("Once per High (No Repeat)").tag(0)
+                        Text("Every 30 Minutes").tag(30)
+                        Text("Every 60 Minutes").tag(60)
+                        Text("Every 2 Hours").tag(120)
+                    }
+                    .disabled(!store.alertsEnabled || !store.highAlertsEnabled)
+
+                    Button {
+                        if store.isAlertSnoozed {
+                            store.clearAlertSnooze()
+                        } else {
+                            store.snoozeAlerts(minutes: 60)
+                        }
+                    } label: {
+                        Label(
+                            store.isAlertSnoozed ? "Alerts Muted (Tap to Resume)" : "Snooze All Glucose Alerts for 1 Hour",
+                            systemImage: store.isAlertSnoozed ? "bell.slash.fill" : "bell.badge.slash"
+                        )
+                        .foregroundStyle(store.isAlertSnoozed ? GlucoTheme.highAmber : GlucoTheme.tandemCyan)
                     }
                 }
 

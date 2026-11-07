@@ -187,6 +187,14 @@ final class GlucoStore: NSObject, ObservableObject {
     private static let g7PairingCodeKey = "gluco.g7PairingCode"
     private static let g7SensorNameKey = "gluco.g7SensorName"
     private static let tandemPairingCodeKey = "gluco.tandemPairingCode"
+    private static let alertsEnabledKey = "gluco.alertsEnabled"
+    private static let highAlertsEnabledKey = "gluco.highAlertsEnabled"
+    private static let highAlertRepeatMinutesKey = "gluco.highAlertRepeatMinutes"
+    private static let alertSnoozedUntilKey = "gluco.alertSnoozedUntil"
+    private static let lastAlertBandKey = "gluco.lastAlertBand"
+    private static let lastHighAlertAtKey = "gluco.lastHighAlertAt"
+    private static let lastLowAlertAtKey = "gluco.lastLowAlertAt"
+    private static let lastUrgentLowAlertAtKey = "gluco.lastUrgentLowAlertAt"
 
     // Dexcom G7 & Tandem GATT Service & Characteristic UUIDs (LoopKit / G7SensorKit / jwoglom pumpX2 spec)
     nonisolated static let g7AdvServiceUUID = CBUUID(string: "FEBC")
@@ -228,6 +236,29 @@ final class GlucoStore: NSObject, ObservableObject {
     }
     @Published var urgentLowMgdL: Int {
         didSet { UserDefaults.standard.set(urgentLowMgdL, forKey: Self.urgentLowMgdLKey) }
+    }
+    @Published var alertsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(alertsEnabled, forKey: Self.alertsEnabledKey)
+            if !alertsEnabled {
+                UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+                UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+            }
+        }
+    }
+    @Published var highAlertsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(highAlertsEnabled, forKey: Self.highAlertsEnabledKey)
+            if !highAlertsEnabled {
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["gluco.alert"])
+            }
+        }
+    }
+    @Published var highAlertRepeatMinutes: Int {
+        didSet { UserDefaults.standard.set(highAlertRepeatMinutes, forKey: Self.highAlertRepeatMinutesKey) }
+    }
+    @Published var alertSnoozedUntil: Date {
+        didSet { UserDefaults.standard.set(alertSnoozedUntil.timeIntervalSince1970, forKey: Self.alertSnoozedUntilKey) }
     }
 
     @Published var dexcomUsername: String {
@@ -377,6 +408,12 @@ final class GlucoStore: NSObject, ObservableObject {
     private var tandemAuthInProgress: Bool = false
     private let tandemAuthenticator = TandemPumpNativeAuthenticator()
     private var g7LastSensorTimestamp: UInt32 = 0
+    private var lastTandemCGMTimestampRaw: UInt32 = 0
+    private var lastTandemCGMMgdL: Int = 0
+    private var lastAlertBand: String = "normal"
+    private var lastHighAlertAt: Date = .distantPast
+    private var lastLowAlertAt: Date = .distantPast
+    private var lastUrgentLowAlertAt: Date = .distantPast
 
     // Dexcom G7 Native Primary J-PAKE + Saved-Key + Coexistence State
     private let g7Authenticator = DexcomG7NativeAuthenticator()
@@ -406,8 +443,20 @@ final class GlucoStore: NSObject, ObservableObject {
 
         unit = GlucoseUnit(rawValue: d.string(forKey: Self.unitKey) ?? "") ?? .mmolL
         lowMgdL = d.object(forKey: Self.lowMgdLKey) as? Int ?? 70      // 3.9 mmol/L
-        highMgdL = d.object(forKey: Self.highMgdLKey) as? Int ?? 180    // 10.0 mmol/L
+        highMgdL = d.object(forKey: Self.highMgdLKey) as? Int ?? 198    // 11.0 mmol/L default
         urgentLowMgdL = d.object(forKey: Self.urgentLowMgdLKey) as? Int ?? 54 // 3.0 mmol/L
+        alertsEnabled = d.object(forKey: Self.alertsEnabledKey) as? Bool ?? true
+        highAlertsEnabled = d.object(forKey: Self.highAlertsEnabledKey) as? Bool ?? true
+        highAlertRepeatMinutes = d.object(forKey: Self.highAlertRepeatMinutesKey) as? Int ?? 60
+        let snoozeEpoch = d.double(forKey: Self.alertSnoozedUntilKey)
+        alertSnoozedUntil = snoozeEpoch > 0 ? Date(timeIntervalSince1970: snoozeEpoch) : .distantPast
+        lastAlertBand = d.string(forKey: Self.lastAlertBandKey) ?? "normal"
+        let highEpoch = d.double(forKey: Self.lastHighAlertAtKey)
+        lastHighAlertAt = highEpoch > 0 ? Date(timeIntervalSince1970: highEpoch) : .distantPast
+        let lowEpoch = d.double(forKey: Self.lastLowAlertAtKey)
+        lastLowAlertAt = lowEpoch > 0 ? Date(timeIntervalSince1970: lowEpoch) : .distantPast
+        let urgEpoch = d.double(forKey: Self.lastUrgentLowAlertAtKey)
+        lastUrgentLowAlertAt = urgEpoch > 0 ? Date(timeIntervalSince1970: urgEpoch) : .distantPast
 
         dexcomUsername = d.string(forKey: Self.dexcomUserKey) ?? ""
         dexcomPassword = d.string(forKey: Self.dexcomPassKey) ?? ""
@@ -525,35 +574,65 @@ final class GlucoStore: NSObject, ObservableObject {
         return GlucoTheme.inRangeGreen
     }
 
-    var timeInRangePercent: Int {
-        guard !readings.isEmpty else { return 0 }
-        let inRange = readings.filter { $0.mgdL >= lowMgdL && $0.mgdL <= highMgdL }.count
-        return Int((Double(inRange) / Double(readings.count) * 100.0).rounded())
+    var isAlertSnoozed: Bool {
+        Date() < alertSnoozedUntil
     }
 
-    var timeBelowRangePercent: Int {
-        guard !readings.isEmpty else { return 0 }
-        let low = readings.filter { $0.mgdL < lowMgdL }.count
-        return Int((Double(low) / Double(readings.count) * 100.0).rounded())
+    func snoozeAlerts(minutes: Int = 60) {
+        alertSnoozedUntil = Date().addingTimeInterval(Double(minutes * 60))
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["gluco.alert"])
     }
 
-    var timeAboveRangePercent: Int {
-        guard !readings.isEmpty else { return 0 }
-        return max(0, 100 - timeInRangePercent - timeBelowRangePercent)
+    func clearAlertSnooze() {
+        alertSnoozedUntil = .distantPast
     }
 
-    var averageMgdL: Int {
-        guard !readings.isEmpty else { return 0 }
-        let sum = readings.reduce(0) { $0 + $1.mgdL }
-        return Int((Double(sum) / Double(readings.count)).rounded())
+    func readings(inLastHours hours: Int) -> [GlucoseReading] {
+        let cutoff = Date().addingTimeInterval(Double(-hours * 3600))
+        let subset = readings.filter { $0.timestamp >= cutoff }
+        return subset.isEmpty ? readings : subset
     }
 
-    /// Glucose Management Indicator (GMI %) formula: 3.31 + 0.02392 * mean_mgdL
-    var gmiPercent: String {
-        guard !readings.isEmpty else { return "--%" }
-        let gmi = 3.31 + 0.02392 * Double(averageMgdL)
+    func timeInRangePercent(hours: Int) -> Int {
+        let pool = readings(inLastHours: hours)
+        guard !pool.isEmpty else { return 0 }
+        let inRange = pool.filter { $0.mgdL >= lowMgdL && $0.mgdL <= highMgdL }.count
+        return Int((Double(inRange) / Double(pool.count) * 100.0).rounded())
+    }
+
+    func timeBelowRangePercent(hours: Int) -> Int {
+        let pool = readings(inLastHours: hours)
+        guard !pool.isEmpty else { return 0 }
+        let low = pool.filter { $0.mgdL < lowMgdL }.count
+        return Int((Double(low) / Double(pool.count) * 100.0).rounded())
+    }
+
+    func timeAboveRangePercent(hours: Int) -> Int {
+        let pool = readings(inLastHours: hours)
+        guard !pool.isEmpty else { return 0 }
+        return max(0, 100 - timeInRangePercent(hours: hours) - timeBelowRangePercent(hours: hours))
+    }
+
+    func averageMgdL(hours: Int) -> Int {
+        let pool = readings(inLastHours: hours)
+        guard !pool.isEmpty else { return 0 }
+        let sum = pool.reduce(0) { $0 + $1.mgdL }
+        return Int((Double(sum) / Double(pool.count)).rounded())
+    }
+
+    func gmiPercent(hours: Int) -> String {
+        let pool = readings(inLastHours: hours)
+        guard !pool.isEmpty else { return "--%" }
+        let gmi = 3.31 + 0.02392 * Double(averageMgdL(hours: hours))
         return String(format: "%.1f%%", gmi)
     }
+
+    var timeInRangePercent: Int { timeInRangePercent(hours: 24) }
+    var timeBelowRangePercent: Int { timeBelowRangePercent(hours: 24) }
+    var timeAboveRangePercent: Int { timeAboveRangePercent(hours: 24) }
+    var averageMgdL: Int { averageMgdL(hours: 24) }
+    var gmiPercent: String { gmiPercent(hours: 24) }
 
     var totalDailyInsulin: String {
         let cutoff = Date().addingTimeInterval(-24 * 3600)
@@ -602,7 +681,9 @@ final class GlucoStore: NSObject, ObservableObject {
             statusBanner = "Demo Telemetry Active · Turn off Demo Mode in Settings for live G7 / t:slim X2"
         } else if fetchedAnyLive || lastBLEGlucoseDate != nil || tandemConnected {
             statusBanner = "Live Telemetry · Updated \(Self.shortTime(Date()))"
-            checkGlucoseAlerts()
+            if fetchedAnyLive {
+                checkGlucoseAlerts()
+            }
         } else if !demoMode {
             statusBanner = "Live Mode · Waiting for G7 BLE / Tandem t:slim X2 data…"
         }
@@ -1049,7 +1130,11 @@ final class GlucoStore: NSObject, ObservableObject {
             if demoMode { demoMode = false }
         }
         for r in incoming {
-            if !combined.contains(where: { abs($0.timestamp.timeIntervalSince(r.timestamp)) < 90 && $0.mgdL == r.mgdL }) {
+            let isDuplicate = combined.contains { existing in
+                let dt = abs(existing.timestamp.timeIntervalSince(r.timestamp))
+                return (dt < 90) || (dt < 240 && existing.mgdL == r.mgdL)
+            }
+            if !isDuplicate {
                 combined.append(r)
             }
         }
@@ -1538,23 +1623,67 @@ final class GlucoStore: NSObject, ObservableObject {
     }
 
     private func checkGlucoseAlerts() {
-        guard let latest = latestReading else { return }
+        guard alertsEnabled, !isAlertSnoozed, let latest = latestReading else { return }
+        let now = Date()
+        // Ignore stale readings older than 20 minutes
+        guard now.timeIntervalSince(latest.timestamp) <= 1200 else { return }
+
+        let d = UserDefaults.standard
         let content = UNMutableNotificationContent()
+
         if latest.mgdL <= urgentLowMgdL {
+            let cooldown: TimeInterval = 15 * 60
+            guard now.timeIntervalSince(lastUrgentLowAlertAt) >= cooldown else { return }
+            lastAlertBand = "urgentLow"
+            lastUrgentLowAlertAt = now
+            d.set(lastAlertBand, forKey: Self.lastAlertBandKey)
+            d.set(now.timeIntervalSince1970, forKey: Self.lastUrgentLowAlertAtKey)
+
             content.title = "Urgent Low Glucose (\(formatGlucose(latest.mgdL)) \(unit.rawValue))"
             content.body = "Dexcom G7 is \(latest.trend.label.lowercased()) (\(latest.trend.arrow)). Tandem IOB: \(String(format: "%.2f U", pumpStatus.iobUnits))."
             content.sound = .defaultCritical
         } else if latest.mgdL < lowMgdL {
+            let cooldown: TimeInterval = 30 * 60
+            guard now.timeIntervalSince(lastLowAlertAt) >= cooldown else { return }
+            lastAlertBand = "low"
+            lastLowAlertAt = now
+            d.set(lastAlertBand, forKey: Self.lastAlertBandKey)
+            d.set(now.timeIntervalSince1970, forKey: Self.lastLowAlertAtKey)
+
             content.title = "Low Glucose (\(formatGlucose(latest.mgdL)) \(unit.rawValue))"
             content.body = "Dexcom G7 reading is below target (\(latest.trend.arrow)). Active IOB: \(String(format: "%.2f U", pumpStatus.iobUnits))."
             content.sound = .default
         } else if latest.mgdL > highMgdL {
+            guard highAlertsEnabled else { return }
+            let elapsed = now.timeIntervalSince(lastHighAlertAt)
+            if lastAlertBand == "high" {
+                // Already alerted for this high excursion — only repeat if repeat interval > 0 and elapsed
+                guard highAlertRepeatMinutes > 0, elapsed >= Double(highAlertRepeatMinutes * 60) else { return }
+            } else {
+                // Newly crossed into high — still enforce at least a 30-minute minimum gap to avoid boundary bounce spam
+                guard elapsed >= 30 * 60 else {
+                    lastAlertBand = "high"
+                    d.set(lastAlertBand, forKey: Self.lastAlertBandKey)
+                    return
+                }
+            }
+            lastAlertBand = "high"
+            lastHighAlertAt = now
+            d.set(lastAlertBand, forKey: Self.lastAlertBandKey)
+            d.set(now.timeIntervalSince1970, forKey: Self.lastHighAlertAtKey)
+
             content.title = "High Glucose (\(formatGlucose(latest.mgdL)) \(unit.rawValue))"
             content.body = "Dexcom G7 reading is above target (\(latest.trend.arrow)). Active IOB: \(String(format: "%.2f U", pumpStatus.iobUnits))."
             content.sound = .default
         } else {
+            if lastAlertBand != "normal" {
+                lastAlertBand = "normal"
+                d.set(lastAlertBand, forKey: Self.lastAlertBandKey)
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["gluco.alert"])
+            }
             return
         }
+
         let req = UNNotificationRequest(identifier: "gluco.alert", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req)
     }
@@ -2303,16 +2432,24 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
                 let rawTrend = Int8(bitPattern: cargo[7])
                 if (20...500).contains(cgmMgdL) {
                     let trend = Self.trendFromG7Rate(rawTrend)
-                    let pumpDate = Date(timeIntervalSince1970: Jan1_2008_Epoch + TimeInterval(tsSec))
-                    let readingDate = abs(Date().timeIntervalSince(pumpDate)) <= 3600 ? min(Date(), pumpDate) : Date()
-                    let reading = GlucoseReading(mgdL: cgmMgdL, timestamp: readingDate, trend: trend)
-                    lastBLEGlucoseDate = readingDate
+                    let isNewPumpCGMReading = (tsSec != lastTandemCGMTimestampRaw) || (cgmMgdL != lastTandemCGMMgdL) || readings.isEmpty
+                    lastTandemCGMTimestampRaw = tsSec
+                    lastTandemCGMMgdL = cgmMgdL
                     dexcomConnected = true
-                    mergeReadings([reading])
+
+                    if isNewPumpCGMReading {
+                        let pumpDate = Date(timeIntervalSince1970: Jan1_2008_Epoch + TimeInterval(tsSec))
+                        let readingDate = abs(Date().timeIntervalSince(pumpDate)) <= 1800 ? min(Date(), pumpDate) : Date()
+                        let reading = GlucoseReading(mgdL: cgmMgdL, timestamp: readingDate, trend: trend)
+                        lastBLEGlucoseDate = readingDate
+                        mergeReadings([reading])
+                        checkGlucoseAlerts()
+                        Task { await self.uploadBLEReadingsToNightscout([reading]) }
+                    } else if lastBLEGlucoseDate == nil {
+                        lastBLEGlucoseDate = readings.last?.timestamp ?? Date()
+                    }
                     updateTandemLiveSummaryBanner()
                     statusBanner = "Live t:slim X2 + G7 BLE · \(formatGlucose(cgmMgdL)) \(unit.rawValue) \(trend.arrow) · \(Self.shortTime(Date()))"
-                    checkGlucoseAlerts()
-                    Task { await self.uploadBLEReadingsToNightscout([reading]) }
                 } else {
                     updateTandemLiveSummaryBanner()
                 }
