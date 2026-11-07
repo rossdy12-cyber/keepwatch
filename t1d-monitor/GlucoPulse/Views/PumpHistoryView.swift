@@ -57,15 +57,27 @@ struct PumpHistoryView: View {
                         .foregroundStyle(GlucoTheme.textSecondary)
                 }
                 Spacer()
-                Button {
-                    store.toggleBLEScan()
-                } label: {
-                    Text(store.bleScanning ? "Stop Scan" : "Scan BLE")
-                        .font(.system(size: 12, weight: .bold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .background(store.bleScanning ? GlucoTheme.lowRed : GlucoTheme.tandemCyan, in: Capsule())
-                        .foregroundStyle(.black)
+                HStack(spacing: 6) {
+                    Button {
+                        store.forceBLEPollNow()
+                    } label: {
+                        Text("Read Now")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(GlucoTheme.inRangeGreen, in: Capsule())
+                            .foregroundStyle(.black)
+                    }
+                    Button {
+                        store.toggleBLEScan()
+                    } label: {
+                        Text(store.bleScanning ? "Stop Scan" : "Scan BLE")
+                            .font(.system(size: 12, weight: .bold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(store.bleScanning ? GlucoTheme.lowRed : GlucoTheme.tandemCyan, in: Capsule())
+                            .foregroundStyle(.black)
+                    }
                 }
             }
 
@@ -184,6 +196,16 @@ struct PumpHistoryView: View {
             Text("Tandem t:slim X2 Event History")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundStyle(GlucoTheme.textPrimary)
+
+            if store.pumpEvents.isEmpty {
+                Text("No pump events yet — waiting for live Tandem t:slim X2 BLE / Tandem Source sync or manual log.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(GlucoTheme.textSecondary)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(GlucoTheme.card, in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(GlucoTheme.border, lineWidth: 1))
+            }
 
             ForEach(store.pumpEvents) { ev in
                 HStack(alignment: .top, spacing: 12) {

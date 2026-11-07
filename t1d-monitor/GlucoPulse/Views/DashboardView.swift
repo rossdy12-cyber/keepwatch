@@ -88,65 +88,92 @@ struct DashboardView: View {
 
     private var dexcomHeroCard: some View {
         let latest = store.latestReading
-        let mg = latest?.mgdL ?? 112
-        let glucoseColor = store.color(for: mg)
+        let hasReading = (latest != nil)
+        let mg = latest?.mgdL ?? 100
+        let glucoseColor = hasReading ? store.color(for: mg) : GlucoTheme.tandemCyan
         let minsAgo = latest.map { max(0, Int(Date().timeIntervalSince($0.timestamp) / 60)) } ?? 0
 
-        return HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Image(systemName: "sensor.tag.radiowaves.forward.fill")
-                        .foregroundStyle(GlucoTheme.inRangeGreen)
-                    Text("DEXCOM G7 CGM")
-                        .font(.system(size: 11, weight: .heavy, design: .rounded))
-                        .tracking(0.8)
-                        .foregroundStyle(GlucoTheme.textSecondary)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sensor.tag.radiowaves.forward.fill")
+                            .foregroundStyle(hasReading ? GlucoTheme.inRangeGreen : GlucoTheme.tandemCyan)
+                        Text("DEXCOM G7 CGM")
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
+                            .tracking(0.8)
+                            .foregroundStyle(GlucoTheme.textSecondary)
+                    }
+
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(hasReading ? store.formatGlucose(mg) : (store.unit == .mmolL ? "--.-" : "---"))
+                            .font(.system(size: 54, weight: .black, design: .rounded))
+                            .foregroundStyle(glucoseColor)
+                        Text(latest?.trend.arrow ?? "—")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .foregroundStyle(glucoseColor)
+                    }
+
+                    HStack(spacing: 10) {
+                        Text(hasReading ? "\(store.formatDelta()) \(store.unit.rawValue)" : store.unit.rawValue)
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(glucoseColor.opacity(0.16), in: Capsule())
+                            .foregroundStyle(glucoseColor)
+
+                        Text(latest?.trend.label ?? "Waiting for live G7 / Pump BLE…")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(GlucoTheme.textPrimary)
+                            .lineLimit(1)
+                    }
                 }
 
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(store.formatGlucose(mg))
-                        .font(.system(size: 54, weight: .black, design: .rounded))
-                        .foregroundStyle(glucoseColor)
-                    Text(latest?.trend.arrow ?? "→")
-                        .font(.system(size: 36, weight: .bold, design: .rounded))
-                        .foregroundStyle(glucoseColor)
-                }
+                Spacer()
 
-                HStack(spacing: 10) {
-                    Text("\(store.formatDelta()) \(store.unit.rawValue)")
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(glucoseColor.opacity(0.16), in: Capsule())
-                        .foregroundStyle(glucoseColor)
+                VStack(alignment: .trailing, spacing: 10) {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(hasReading ? (minsAgo == 0 ? "Just now" : "\(minsAgo)m ago") : "Live BLE")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(GlucoTheme.textPrimary)
+                        Text("5m G7 interval")
+                            .font(.system(size: 11))
+                            .foregroundStyle(GlucoTheme.textSecondary)
+                    }
 
-                    Text(latest?.trend.label ?? "Steady")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(GlucoTheme.textPrimary)
+                    Divider().frame(width: 70)
+
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("Target Range")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(GlucoTheme.textSecondary)
+                        Text("\(store.formatGlucose(store.lowMgdL))–\(store.formatGlucose(store.highMgdL))")
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .foregroundStyle(GlucoTheme.inRangeGreen)
+                    }
                 }
             }
 
-            Spacer()
+            Divider().overlay(GlucoTheme.border)
 
-            VStack(alignment: .trailing, spacing: 10) {
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(minsAgo == 0 ? "Just now" : "\(minsAgo)m ago")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(GlucoTheme.textPrimary)
-                    Text("5m G7 interval")
-                        .font(.system(size: 11))
-                        .foregroundStyle(GlucoTheme.textSecondary)
-                }
-
-                Divider().frame(width: 70)
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Target Range")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(GlucoTheme.textSecondary)
-                    Text("\(store.formatGlucose(store.lowMgdL))–\(store.formatGlucose(store.highMgdL))")
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundStyle(GlucoTheme.inRangeGreen)
+            HStack(spacing: 8) {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(GlucoTheme.tandemCyan)
+                Text(store.g7BLEStatus)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(GlucoTheme.textSecondary)
+                    .lineLimit(2)
+                Spacer()
+                Button {
+                    store.forceBLEPollNow()
+                } label: {
+                    Text("Read BLE Now")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(GlucoTheme.tandemCyan.opacity(0.22), in: Capsule())
+                        .foregroundStyle(GlucoTheme.tandemCyan)
                 }
             }
         }
@@ -157,10 +184,15 @@ struct DashboardView: View {
 
     private var tandemStatusCard: some View {
         let p = store.pumpStatus
-        let bolusMinsAgo = max(1, Int(Date().timeIntervalSince(p.lastBolusDate) / 60))
-        let bolusAgoText = bolusMinsAgo >= 60
-            ? "\(bolusMinsAgo / 60)h \(bolusMinsAgo % 60)m ago"
-            : "\(bolusMinsAgo)m ago"
+        let hasBolus = p.lastBolusUnits > 0 && p.lastBolusDate != .distantPast
+        let bolusMinsAgo = hasBolus ? max(0, Int(Date().timeIntervalSince(p.lastBolusDate) / 60)) : 0
+        let bolusAgoText: String = {
+            guard hasBolus else { return "Waiting for pump BLE" }
+            if bolusMinsAgo == 0 { return "Just now" }
+            return bolusMinsAgo >= 60
+                ? "\(bolusMinsAgo / 60)h \(bolusMinsAgo % 60)m ago"
+                : "\(bolusMinsAgo)m ago"
+        }()
 
         return VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -371,7 +403,7 @@ struct DashboardView: View {
                 summaryStat(label: "In Range", value: "\(tir)%", color: GlucoTheme.inRangeGreen)
                 summaryStat(label: "High", value: "\(high)%", color: GlucoTheme.highAmber)
                 summaryStat(label: "Low", value: "\(low)%", color: GlucoTheme.lowRed)
-                summaryStat(label: "Average", value: "\(store.formatGlucose(store.averageMgdL))", color: GlucoTheme.textPrimary)
+                summaryStat(label: "Average", value: store.readings.isEmpty ? "--" : "\(store.formatGlucose(store.averageMgdL))", color: GlucoTheme.textPrimary)
                 summaryStat(label: "GMI (A1c)", value: store.gmiPercent, color: GlucoTheme.tandemCyan)
             }
         }
