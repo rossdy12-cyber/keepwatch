@@ -279,12 +279,14 @@ private struct SimpleWebView: UIViewRepresentable {
 
 struct TandemPortalSheet: View {
     @Environment(\.dismiss) private var dismiss
+    var initialURL: String = "https://source.tandemdiabetes.com"
+    var title: String = "Tandem Source Portal"
 
     var body: some View {
         NavigationStack {
-            SimpleWebView(url: URL(string: "https://source.tandemdiabetes.com")!)
+            SimpleWebView(url: URL(string: initialURL) ?? URL(string: "https://source.tandemdiabetes.com")!)
                 .ignoresSafeArea(edges: .bottom)
-                .navigationTitle("Tandem Source Portal")
+                .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {

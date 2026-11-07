@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var store: GlucoStore
     @State private var syncFeedback: String?
+    @State private var showingTrueNASPortal = false
 
     var body: some View {
         NavigationStack {
@@ -88,12 +89,12 @@ struct SettingsView: View {
                             store.tandemConnected = ok
                             if ok { store.demoMode = false }
                             syncFeedback = ok
-                                ? "Connected to Nightscout / Tandem Bridge"
+                                ? "Connected to TrueNAS Nightscout / Tandem Bridge"
                                 : "Couldn't reach Nightscout URL."
                         }
                     } label: {
                         HStack {
-                            Label("Sync Tandem / Nightscout Server", systemImage: "drop.transmission")
+                            Label("Sync TrueNAS Nightscout (:1337)", systemImage: "drop.transmission")
                             Spacer()
                             if store.tandemConnected {
                                 Image(systemName: "checkmark.circle.fill")
@@ -101,10 +102,20 @@ struct SettingsView: View {
                             }
                         }
                     }
+
+                    Button {
+                        showingTrueNASPortal = true
+                    } label: {
+                        Label("Configure TrueNAS tconnectsync (:1338)", systemImage: "server.rack")
+                            .foregroundStyle(GlucoTheme.tandemCyan)
+                    }
                 } header: {
-                    Text("Tandem t:slim X2 / Nightscout Bridge")
+                    Text("TrueNAS Tandem t:slim X2 / Nightscout Bridge")
                 } footer: {
-                    Text("Pulls Tandem t:slim X2 IOB, Control-IQ basal modulation, boluses, reservoir units, and pump battery from Nightscout / tconnectsync.")
+                    Text("Pre-configured for your TrueNAS server (http://100.85.127.42:1337). Tap 'Configure TrueNAS tconnectsync (:1338)' to enter your Tandem Source login on TrueNAS.")
+                }
+                .sheet(isPresented: $showingTrueNASPortal) {
+                    TandemPortalSheet(initialURL: "http://100.85.127.42:1338", title: "TrueNAS tconnectsync Bridge")
                 }
 
                 if let feedback = syncFeedback {

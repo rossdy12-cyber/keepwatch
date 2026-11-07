@@ -249,7 +249,7 @@ final class GlucoStore: NSObject, ObservableObject {
         dexcomPassword = d.string(forKey: Self.dexcomPassKey) ?? ""
         dexcomRegion = DexcomRegion(rawValue: d.string(forKey: Self.dexcomRegionKey) ?? "") ?? .ous
 
-        nightscoutURL = d.string(forKey: Self.nightscoutURLKey) ?? ""
+        nightscoutURL = d.string(forKey: Self.nightscoutURLKey) ?? "http://100.85.127.42:1337"
         nightscoutToken = d.string(forKey: Self.nightscoutTokenKey) ?? ""
 
         let hasCredentials = !(d.string(forKey: Self.dexcomUserKey) ?? "").isEmpty
