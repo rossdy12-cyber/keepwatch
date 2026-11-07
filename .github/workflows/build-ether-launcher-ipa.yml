@@ -1,0 +1,101 @@
+name: Build EtherLauncher IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "ether-launcher/**"
+      - ".github/workflows/build-ether-launcher-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ether-launcher
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build EtherLauncher (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project EtherLauncher.xcodeproj \
+            -target EtherLauncher \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Build & Bundle Interactive iOS Home Screen Widget (EtherWidgets.appex)
+        run: |
+          PLUGINS_DIR="build/Release-iphoneos/EtherLauncher.app/PlugIns/EtherWidgets.appex"
+          mkdir -p "$PLUGINS_DIR"
+          xcrun --sdk iphoneos swiftc \
+            -target arm64-apple-ios17.0 \
+            -O \
+            -parse-as-library \
+            -application-extension \
+            -Xlinker -e -Xlinker _NSExtensionMain \
+            EtherWidgets/EtherWidgets.swift \
+            -o "$PLUGINS_DIR/EtherWidgets"
+
+          cat > "$PLUGINS_DIR/Info.plist" << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key>
+            <string>ÆTHER Widgets</string>
+            <key>CFBundleExecutable</key>
+            <string>EtherWidgets</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.ross.etherlauncher.widgets</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>EtherWidgets</string>
+            <key>CFBundlePackageType</key>
+            <string>XPC!</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0.0</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+            <key>MinimumOSVersion</key>
+            <string>17.0</string>
+            <key>NSExtension</key>
+            <dict>
+              <key>NSExtensionPointIdentifier</key>
+              <string>com.apple.widgetkit-extension</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Package Payload/EtherLauncher.app into EtherLauncher.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/EtherLauncher.app out/Payload/
+          cd out
+          zip -qry EtherLauncher.ipa Payload
+          rm -rf Payload
+          ls -lh EtherLauncher.ipa
+
+      - name: Upload EtherLauncher.ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: EtherLauncher-ipa
+          path: ether-launcher/out/EtherLauncher.ipa
+          retention-days: 30
