@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 
 enum ExtendedBolusDistribution: String, CaseIterable, Identifiable {
+    case immediate = "Immediate (all now)"
     case even = "Evenly spread"
     case frontLoaded = "50% now + spread"
 
@@ -92,7 +93,7 @@ final class BolusRequestService: ObservableObject {
         return errors
     }
 
-    func createExtendedBolus(
+    func createBolus(
         totalUnits: Double,
         durationHours: Int,
         distribution: ExtendedBolusDistribution,
@@ -115,16 +116,26 @@ final class BolusRequestService: ObservableObject {
             return false
         }
 
-        guard durationHours >= 1 && durationHours <= 4 else {
-            log("BLOCKED", "Extended duration must be between 1 and 4 hours.")
-            return false
-        }
-
         var planned: [BolusSegment] = []
         let startDate = Date.now
 
         switch distribution {
+        case .immediate:
+            planned.append(
+                BolusSegment(
+                    id: UUID(),
+                    scheduledAt: startDate,
+                    units: totalUnits.roundedToPumpIncrement(),
+                    status: .pending
+                )
+            )
+
         case .even:
+            guard durationHours >= 1 && durationHours <= 4 else {
+                log("BLOCKED", "Extended duration must be between 1 and 4 hours.")
+                return false
+            }
+
             let increments = durationHours * 2
             let unitPerSegment = (totalUnits / Double(increments)).roundedToPumpIncrement()
 
@@ -140,6 +151,11 @@ final class BolusRequestService: ObservableObject {
             }
 
         case .frontLoaded:
+            guard durationHours >= 1 && durationHours <= 4 else {
+                log("BLOCKED", "Extended duration must be between 1 and 4 hours.")
+                return false
+            }
+
             let immediateUnits = (totalUnits * 0.5).roundedToPumpIncrement()
             let remainingUnits = max(0, totalUnits - immediateUnits)
             let laterIncrements = max(1, durationHours * 2 - 1)
@@ -164,9 +180,10 @@ final class BolusRequestService: ObservableObject {
         segments.append(contentsOf: planned)
         save()
 
+        let durationText = distribution == .immediate ? "immediate" : "\(durationHours)h"
         log(
             "REQUESTED",
-            "\(String(format: "%.2f", totalUnits)) U over \(durationHours)h (\(distribution.rawValue)); carbs: \(String(format: "%.0f", carbsGrams)) g; glucose: \(glucoseMmolL.map { String(format: "%.1f", $0) } ?? "unavailable") mmol/L. Confirm and deliver each segment on the Tandem t:slim X2."
+            "\(String(format: "%.2f", totalUnits)) U, \(durationText) (\(distribution.rawValue)); carbs: \(String(format: "%.0f", carbsGrams)) g; glucose: \(glucoseMmolL.map { String(format: "%.1f", $0) } ?? "unavailable") mmol/L. Confirm and deliver on the Tandem t:slim X2."
         )
 
         return true

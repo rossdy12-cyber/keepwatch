@@ -8,7 +8,7 @@ struct BolusRequestView: View {
     @State private var totalUnits: Double = 0
     @State private var carbsGrams: Double = 0
     @State private var durationHours: Int = 2
-    @State private var distribution: ExtendedBolusDistribution = .even
+    @State private var distribution: ExtendedBolusDistribution = .immediate
     @State private var confirmationPhrase = ""
     @State private var validationErrors: [String] = []
 
@@ -43,18 +43,20 @@ struct BolusRequestView: View {
                     }
                 }
 
-                Section("Extended Delivery") {
-                    Picker("Duration", selection: $durationHours) {
-                        ForEach([1, 2, 3, 4], id: \.self) { hours in
-                            Text("\(hours) hour\(hours == 1 ? "" : "s")")
-                                .tag(hours)
-                        }
-                    }
-
+                Section("Delivery") {
                     Picker("Delivery pattern", selection: $distribution) {
                         ForEach(ExtendedBolusDistribution.allCases) { pattern in
                             Text(pattern.rawValue)
                                 .tag(pattern)
+                        }
+                    }
+
+                    if distribution != .immediate {
+                        Picker("Duration", selection: $durationHours) {
+                            ForEach([1, 2, 3, 4], id: \.self) { hours in
+                                Text("\(hours) hour\(hours == 1 ? "" : "s")")
+                                    .tag(hours)
+                            }
                         }
                     }
 
@@ -107,11 +109,11 @@ struct BolusRequestView: View {
                     }
                     .disabled(bolusService.activeSegments.isEmpty)
                 } footer: {
-                    Text("This creates a local extended-bolus plan and safety record. It does not remotely command the Tandem t:slim X2. Confirm and deliver each segment on the pump itself.")
+                    Text("This creates a local bolus plan and safety record. It does not remotely command the Tandem t:slim X2. Confirm and deliver the bolus on the pump itself.")
                 }
 
                 if !bolusService.activeSegments.isEmpty {
-                    Section("Active Extended Plan") {
+                    Section("Active Bolus Plan") {
                         ForEach(bolusService.activeSegments) { segment in
                             HStack {
                                 VStack(alignment: .leading) {
@@ -160,6 +162,16 @@ struct BolusRequestView: View {
         let start = Date.now
 
         switch distribution {
+        case .immediate:
+            planned.append(
+                BolusSegment(
+                    id: UUID(),
+                    scheduledAt: start,
+                    units: totalUnits.roundedToPumpIncrement(),
+                    status: .pending
+                )
+            )
+
         case .even:
             let increments = durationHours * 2
             let units = (totalUnits / Double(increments)).roundedToPumpIncrement()
@@ -201,7 +213,7 @@ struct BolusRequestView: View {
     }
 
     private func createRequest() {
-        let created = bolusService.createExtendedBolus(
+        let created = bolusService.createBolus(
             totalUnits: totalUnits,
             durationHours: durationHours,
             distribution: distribution,
