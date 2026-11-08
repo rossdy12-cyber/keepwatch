@@ -65,7 +65,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Bolus Safety Limits") {
+                Section {
                     HStack {
                         Text("Maximum Single Bolus")
                         Spacer()
@@ -92,6 +92,8 @@ struct SettingsView: View {
                         Stepper("", value: $bolusMinimumGlucose, in: 3...8, step: 0.1)
                             .labelsHidden()
                     }
+                } header: {
+                    Text("Bolus Safety Limits")
                 } footer: {
                     Text("These limits apply to bolus plans created in GlucoPulse. They do not override the safety checks or confirmation requirements on your Tandem t:slim X2.")
                 }
