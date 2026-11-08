@@ -2,6 +2,9 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var store: GlucoStore
+    @AppStorage("glucopulse.bolus.maxSingleUnits") private var bolusMaxSingleUnits = 10.0
+    @AppStorage("glucopulse.bolus.maxIOBUnits") private var bolusMaxIOBUnits = 15.0
+    @AppStorage("glucopulse.bolus.minimumGlucoseMmolL") private var bolusMinimumGlucose = 4.0
     @State private var syncFeedback: String?
     @State private var showingTrueNASPortal = false
 
@@ -60,6 +63,37 @@ struct SettingsView: View {
                         )
                         .foregroundStyle(store.isAlertSnoozed ? GlucoTheme.highAmber : GlucoTheme.tandemCyan)
                     }
+                }
+
+                Section("Bolus Safety Limits") {
+                    HStack {
+                        Text("Maximum Single Bolus")
+                        Spacer()
+                        Text(String(format: "%.1f U", bolusMaxSingleUnits))
+                            .fontWeight(.bold)
+                        Stepper("", value: $bolusMaxSingleUnits, in: 1...30, step: 0.5)
+                            .labelsHidden()
+                    }
+
+                    HStack {
+                        Text("Maximum Dose + IOB")
+                        Spacer()
+                        Text(String(format: "%.1f U", bolusMaxIOBUnits))
+                            .fontWeight(.bold)
+                        Stepper("", value: $bolusMaxIOBUnits, in: 1...40, step: 0.5)
+                            .labelsHidden()
+                    }
+
+                    HStack {
+                        Text("Minimum Glucose")
+                        Spacer()
+                        Text(String(format: "%.1f mmol/L", bolusMinimumGlucose))
+                            .fontWeight(.bold)
+                        Stepper("", value: $bolusMinimumGlucose, in: 3...8, step: 0.1)
+                            .labelsHidden()
+                    }
+                } footer: {
+                    Text("These limits apply to bolus plans created in GlucoPulse. They do not override the safety checks or confirmation requirements on your Tandem t:slim X2.")
                 }
 
                 Section {
@@ -152,14 +186,8 @@ struct SettingsView: View {
                                 : "Connected to Nightscout (0 entries yet — enter Tandem Source login above or wait for G7 BLE)."
                         }
                     } label: {
-                        HStack {
-                            Label("Refresh TrueNAS Nightscout (:1337)", systemImage: "drop.transmission")
-                            Spacer()
-                            if store.tandemConnected {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(GlucoTheme.tandemCyan)
-                            }
-                        }
+                        Label("Refresh TrueNAS Nightscout (:1337)", systemImage: "drop.transmission")
+                            .foregroundStyle(GlucoTheme.tandemCyan)
                     }
 
                     Button {
@@ -196,14 +224,8 @@ struct SettingsView: View {
                             syncFeedback = store.dexcomDiagnostic
                         }
                     } label: {
-                        HStack {
-                            Label("Verify Dexcom Share Account (Optional)", systemImage: "sensor.tag.radiowaves.forward.fill")
-                            Spacer()
-                            if store.dexcomConnected {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(GlucoTheme.inRangeGreen)
-                            }
-                        }
+                        Label("Verify Dexcom Share Account (Optional)", systemImage: "sensor.tag.radiowaves.forward.fill")
+                            .foregroundStyle(GlucoTheme.inRangeGreen)
                     }
                 } header: {
                     Text("Optional · Dexcom Share Cloud")

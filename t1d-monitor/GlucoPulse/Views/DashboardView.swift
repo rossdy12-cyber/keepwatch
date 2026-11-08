@@ -3,7 +3,9 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject private var store: GlucoStore
+    @StateObject private var bolusService = BolusRequestService()
     @State private var selectedHours: Int = 6
+    @State private var showingBolusRequest = false
     private let hourChoices = [3, 6, 12, 24]
 
     private var filteredReadings: [GlucoseReading] {
@@ -35,6 +37,11 @@ struct DashboardView: View {
             .refreshable {
                 await store.refreshAll()
             }
+            .sheet(isPresented: $showingBolusRequest) {
+                BolusRequestView()
+                    .environmentObject(store)
+                    .environmentObject(bolusService)
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
@@ -48,6 +55,18 @@ struct DashboardView: View {
                             .foregroundStyle(GlucoTheme.tandemCyan)
                     }
                 }
+
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showingBolusRequest = true
+                    } label: {
+                        Image(systemName: "drop.fill")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(GlucoTheme.tandemCyan)
+                    }
+                    .accessibilityLabel("Bolus request")
+                }
+
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         Task { await store.refreshAll() }
@@ -110,7 +129,7 @@ struct DashboardView: View {
                             .font(.system(size: 54, weight: .black, design: .rounded))
                             .foregroundStyle(glucoseColor)
                         Text(latest?.trend.arrow ?? "—")
-                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .font(.system(size: 36, weight: .bold))
                             .foregroundStyle(glucoseColor)
                     }
 
