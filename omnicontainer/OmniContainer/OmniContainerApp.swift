@@ -2799,7 +2799,7 @@ struct OmniSoulSeekrRootView: View {
     @State private var soularrLogs = "Tap 'Sync Lidarr -> Soulseek Now' or 'Refresh Logs' to inspect live P2P grabs."
     @State private var isBusy = false
 
-    private let slskdApiKey = "soularr-api-key-987654321fedcba"
+    private var slskdApiKey: String { StoredSecret.slskdApiKey.value }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2816,13 +2816,11 @@ struct OmniSoulSeekrRootView: View {
                 VStack(spacing: 0) {
                     HStack {
                         Image(systemName: "lock.open.fill").foregroundColor(.purple)
-                        Text("Hearr Music Request Portal • PIN: MadRD#HE2026!!")
+                        Text("Hearr Music Request Portal")
                             .font(.caption2.bold())
                             .foregroundColor(.white)
                         Spacer()
-                        Button("Copy PIN") {
-                            UIPasteboard.general.string = "MadRD#HE2026!!"
-                        }
+                        SecretCopyButton(secret: .hearrPin, label: "Copy PIN")
                         .font(.caption2.bold())
                         .foregroundColor(.purple)
                     }
@@ -2834,13 +2832,11 @@ struct OmniSoulSeekrRootView: View {
             } else if tab == 1 {
                 VStack(spacing: 0) {
                     HStack {
-                        Text("slskd P2P Daemon • User: slskd / Pass: MadRD#HE2026!!")
+                        Text("slskd P2P Daemon • User: slskd")
                             .font(.caption2.bold())
                             .foregroundColor(.white)
                         Spacer()
-                        Button("Copy Pass") {
-                            UIPasteboard.general.string = "MadRD#HE2026!!"
-                        }
+                        SecretCopyButton(secret: .slskdPassword, label: "Copy Pass")
                         .font(.caption2.bold())
                         .foregroundColor(.purple)
                     }

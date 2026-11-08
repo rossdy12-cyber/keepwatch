@@ -1,0 +1,60 @@
+name: Build Lumen IPA
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "lumen/**"
+      - ".github/workflows/build-lumen-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: lumen
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (no code signing)
+        run: |
+          set -o pipefail
+          # Build for a generic iOS destination (no -sdk override needed).
+          xcodebuild \
+            -project Lumen.xcodeproj \
+            -target Lumen \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet \
+            build
+
+      - name: Package Payload/Lumen.app into Lumen.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Lumen.app out/Payload/
+          cd out
+          zip -qry Lumen.ipa Payload
+          ls -lh Lumen.ipa
+
+      - name: Upload the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lumen-ipa
+          path: lumen/out/Lumen.ipa
+          retention-days: 30

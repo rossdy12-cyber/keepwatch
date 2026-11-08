@@ -1,0 +1,38 @@
+name: Build Jarvis Pi image
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "jarvis-pi-image/**"
+      - "jarvis-voice/hub.py"
+      - ".github/workflows/build-jarvis-pi-image.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install image tools and ARM emulation
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static binfmt-support parted xz-utils e2fsprogs
+          ls /proc/sys/fs/binfmt_misc/ | grep -i arm
+
+      - name: Build the image
+        run: sudo WORK="$RUNNER_TEMP/jarvis" bash jarvis-pi-image/build.sh
+
+      - name: Upload jarvis-pi.img.xz
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-pi-image
+          path: |
+            ${{ runner.temp }}/jarvis/jarvis-pi.img.xz
+            ${{ runner.temp }}/jarvis/jarvis-pi.img.xz.sha256
+            ${{ runner.temp }}/jarvis/base-image.txt
+          compression-level: 0
+          retention-days: 30

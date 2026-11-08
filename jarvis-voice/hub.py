@@ -17,9 +17,12 @@ It also serves the Pi's setup script: on the Pi run the command printed in this 
 
 import io
 import json
+from datetime import datetime, timedelta
+import hashlib
 import math
 import os
 import queue
+import random
 import re
 import secrets
 import socket
@@ -52,6 +55,15 @@ VOICE_EFFECT = os.environ.get("VOICE_EFFECT", "light").lower()  # "light" adds a
 USE_CORE_VOICE = os.environ.get("USE_CORE_VOICE", "true").lower() in ("1", "true", "yes")
 FOLLOW_UP_SECONDS = float(os.environ.get("FOLLOW_UP_SECONDS", "0"))
 GREETING = os.environ.get("GREETING", "Jarvis is listening.")
+# How long a pause (in seconds) ends your question. Lower = snappier replies, but it may cut you off mid-sentence.
+ENDPOINT_SILENCE = float(os.environ.get("ENDPOINT_SILENCE", "0.75"))
+
+# Music from your Navidrome (Subsonic) server, played straight on the Pi. Same library as the Jarvis iPhone app.
+NAVIDROME_URL = os.environ.get("NAVIDROME_URL", "https://navidrome.nas-server.co.uk").rstrip("/")
+NAVIDROME_USER = os.environ.get("NAVIDROME_USER", "")
+NAVIDROME_PASS = os.environ.get("NAVIDROME_PASS", "")
+NAVIDROME_BITRATE = os.environ.get("NAVIDROME_BITRATE", "320").strip()  # mp3 kbps Navidrome transcodes to; "0" = original
+MUSIC_RATE = 24000  # sample rate (mono 16-bit) the hub streams music to the Pi at
 
 # Cloudflare blocks Python's default user agent.
 USER_AGENT = "Mozilla/5.0 (compatible; JarvisVoiceHub/1.0)"
@@ -231,6 +243,288 @@ def speak_piper(clean):
             pass
 
 
+# ---------------------------------------------------------------------------------------------- local skills
+# Alarms, timers, the time, and volume are handled right here on the hub, so they're instant and work
+# even if the Jarvis core is busy or offline. Anything not recognised falls through to the core.
+
+ALARM_CHIME = tone_wav([1047, 1319, 1047, 1319], length=0.18, volume=0.6)
+TIMER_CHIME = tone_wav([880, 1175, 880, 1175, 880], length=0.14, volume=0.55)
+ALARM_MAX_SECONDS = int(os.environ.get("ALARM_MAX_SECONDS", "600"))   # ring at most this long
+SNOOZE_MINUTES = int(os.environ.get("SNOOZE_MINUTES", "9"))
+
+ALARMS_FILE = os.path.join(DATA, "alarms.json")
+alarms_lock = threading.Lock()
+
+def load_alarms():
+    try:
+        with open(ALARMS_FILE) as handle:
+            data = json.load(handle)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+ALARMS = load_alarms()
+
+def save_alarms():
+    try:
+        with open(ALARMS_FILE, "w") as handle:
+            json.dump(ALARMS, handle)
+    except Exception as error:
+        log("Couldn't save alarms: %s" % error)
+
+# Connected Pis, by name, so the scheduler can ring the right one.
+SATELLITES = {}
+satellites_lock = threading.Lock()
+
+WORD_NUMBERS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+                "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+                "thirty": 30, "forty": 40, "fifty": 50, "quarter": 15, "half": 30, "an": 1, "a": 1, "one": 1}
+
+def _num(word):
+    word = word.strip().lower()
+    if word.isdigit():
+        return int(word)
+    return WORD_NUMBERS.get(word)
+
+def parse_alarm_time(text):
+    """Finds a clock time in the text and returns the next datetime it falls on (or None)."""
+    t = text.lower()
+    tomorrow = "tomorrow" in t or "next day" in t
+    pm_hint = any(w in t for w in ["afternoon", "evening", "tonight", "night", "p.m", "pm"])
+    am_hint = any(w in t for w in ["morning", "a.m", "am"])
+    hour = minute = None
+
+    m = re.search(r"\b(\d{1,2})[:.\s](\d{2})\s*(a\.?m\.?|p\.?m\.?)?", t)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        mer = (m.group(3) or "").replace(".", "")
+    else:
+        m = re.search(r"\b(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)", t)
+        if m:
+            hour, minute, mer = int(m.group(1)), 0, m.group(2).replace(".", "")
+        else:
+            oclock = re.search(r"\b(\w+)\s*o'?clock", t)
+            pastto = re.search(r"\b(quarter|half|\w+)\s+(past|to)\s+(\w+)", t)
+            lone = re.search(r"\b(?:at|for)\s+(\w+)", t)
+            if oclock and _num(oclock.group(1)) is not None:
+                hour, minute, mer = _num(oclock.group(1)), 0, ""
+            elif pastto and _num(pastto.group(1)) is not None and _num(pastto.group(3)) is not None:
+                mins, hr = _num(pastto.group(1)), _num(pastto.group(3))
+                if pastto.group(2) == "to":
+                    minute, hour = (60 - mins) % 60, (hr - 1) if mins else hr
+                else:
+                    minute, hour = mins, hr
+                mer = ""
+            elif lone and _num(lone.group(1)) is not None and 0 <= _num(lone.group(1)) <= 23:
+                hour, minute, mer = _num(lone.group(1)), 0, ""
+            else:
+                    return None
+    if hour is None:
+        return None
+    # Apply am/pm.
+    if mer.startswith("p") or (not mer and pm_hint and hour < 12):
+        if hour < 12:
+            hour += 12
+    elif mer.startswith("a") or (not mer and am_hint):
+        if hour == 12:
+            hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if tomorrow:
+        target += timedelta(days=1)
+    elif target <= now + timedelta(seconds=1):
+        target += timedelta(days=1)
+    return target
+
+def parse_duration(text):
+    """Total seconds from phrases like '5 minutes', '1 hour 30 minutes', 'half an hour', '90 seconds'."""
+    t = text.lower()
+    total = 0
+    if "half an hour" in t or "half hour" in t:
+        total += 1800
+    if re.search(r"\b(an|one)\s+hour\b", t) and "half an hour" not in t:
+        total += 3600
+    for value, unit in re.findall(r"(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)", t):
+        value = int(value)
+        if unit.startswith(("hour", "hr")):
+            total += value * 3600
+        elif unit.startswith(("min",)):
+            total += value * 60
+        else:
+            total += value
+    return total if total > 0 else None
+
+def format_when(when):
+    now = datetime.now()
+    clock = when.strftime("%I:%M %p").lstrip("0")
+    if when.date() == now.date():
+        day = "today"
+    elif when.date() == (now + timedelta(days=1)).date():
+        day = "tomorrow"
+    else:
+        day = when.strftime("%A")
+    return "%s %s" % (clock, day)
+
+def add_alarm(name, when, label, kind, repeat="once"):
+    entry = {"id": secrets.token_hex(4), "name": name, "at": when.timestamp(),
+             "label": label, "kind": kind, "repeat": repeat, "enabled": True}
+    with alarms_lock:
+        ALARMS.append(entry)
+        save_alarms()
+    return entry
+
+def scheduler():
+    while True:
+        time.sleep(2)
+        now = time.time()
+        changed = False
+        with alarms_lock:
+            due = [a for a in ALARMS if a.get("enabled") and now >= a["at"]]
+        for alarm in due:
+            with satellites_lock:
+                sat = SATELLITES.get(alarm["name"])
+            fired = False
+            if sat:
+                sat.start_ring(alarm)
+                fired = True
+            if fired or now > alarm["at"] + 600:   # ring it, or give up after 10 min with nobody listening
+                with alarms_lock:
+                    if alarm.get("repeat") == "daily":
+                        alarm["at"] += 86400
+                    else:
+                        alarm["enabled"] = False
+                    changed = True
+        if changed:
+            with alarms_lock:
+                save_alarms()
+
+threading.Thread(target=scheduler, daemon=True).start()
+
+def apply_gain(wav, gain):
+    """Scales a 16-bit PCM WAV's volume (software volume for the Pi)."""
+    if gain >= 0.999:
+        return wav
+    try:
+        with wave.open(io.BytesIO(wav)) as w:
+            channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            frames = w.readframes(w.getnframes())
+        if width != 2:
+            return wav
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) * gain
+        pcm = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w2:
+            w2.setnchannels(channels); w2.setsampwidth(2); w2.setframerate(rate); w2.writeframes(pcm)
+        return out.getvalue()
+    except Exception:
+        return wav
+
+def handle_command(text, sat):
+    """Handles alarms, timers, the time and volume on the hub. Returns True if it dealt with the request."""
+    t = " " + text.lower().strip() + " "
+    say = lambda words: sat.send_audio(speak(words) or BEEP_NOTHING)
+
+    stop_words = re.search(r"\b(stop|cancel|dismiss|snooze|turn (it|that|the alarm|the timer) off|be quiet|silence|enough|shut up)\b", t)
+
+    # Stop or snooze a ringing alarm/timer.
+    if sat.ringing and stop_words:
+        ringing = sat.ringing
+        sat.stop_ring()
+        if "snooze" in t:
+            when = datetime.now() + timedelta(minutes=SNOOZE_MINUTES)
+            add_alarm(sat.name, when, ringing.get("label") or "", ringing.get("kind", "alarm"))
+            say("Snoozing for %d minutes." % SNOOZE_MINUTES)
+        else:
+            say("Alarm off." if ringing.get("kind") != "timer" else "Timer stopped.")
+        return True
+
+    # Cancel scheduled (not currently ringing) alarms/timers.
+    if stop_words and ("alarm" in t or "timer" in t) and "set" not in t and "for" not in t:
+        kind = "timer" if "timer" in t else "alarm"
+        with alarms_lock:
+            mine = [a for a in ALARMS if a["name"] == sat.name and a.get("enabled") and a.get("kind") == kind]
+            for a in mine:
+                a["enabled"] = False
+            save_alarms()
+        say("Cancelled your %s." % kind if len(mine) == 1 else ("Cancelled your %ss." % kind if mine else "You have no %s set." % kind))
+        return True
+
+    # Set a timer.
+    if "timer" in t or (re.search(r"\b(set|start)\b", t) and re.search(r"\bfor\b.*\b(minute|second|hour|min|sec|hr)", t) and "alarm" not in t):
+        seconds = parse_duration(t)
+        if not seconds:
+            say("How long would you like the timer for?")
+            return True
+        when = datetime.now() + timedelta(seconds=seconds)
+        add_alarm(sat.name, when, "", "timer")
+        mins, secs = divmod(seconds, 60)
+        hrs, mins = divmod(mins, 60)
+        parts = [("%d hour%s" % (hrs, "" if hrs == 1 else "s")) if hrs else "",
+                 ("%d minute%s" % (mins, "" if mins == 1 else "s")) if mins else "",
+                 ("%d second%s" % (secs, "" if secs == 1 else "s")) if secs and not hrs else ""]
+        say("Timer set for %s." % " ".join(p for p in parts if p).strip())
+        return True
+
+    # Set an alarm.
+    if "alarm" in t or re.search(r"\b(wake me|set .* for)\b", t):
+        when = parse_alarm_time(t)
+        if not when:
+            say("What time would you like the alarm for?")
+            return True
+        repeat = "daily" if ("every day" in t or "daily" in t or "every morning" in t) else "once"
+        add_alarm(sat.name, when, "", "alarm", repeat)
+        say("Alarm set for %s%s." % (format_when(when), ", every day" if repeat == "daily" else ""))
+        return True
+
+    # List alarms.
+    if re.search(r"\b(what|any|list|my).{0,20}(alarm|timer)", t) or re.search(r"\balarms?\b.{0,10}\?", t):
+        with alarms_lock:
+            mine = sorted([a for a in ALARMS if a["name"] == sat.name and a.get("enabled")], key=lambda a: a["at"])
+        if not mine:
+            say("You have no alarms set.")
+        else:
+            items = ", ".join("%s%s" % (format_when(datetime.fromtimestamp(a["at"])),
+                                        " (timer)" if a.get("kind") == "timer" else "") for a in mine[:5])
+            say("You have %d set: %s." % (len(mine), items))
+        return True
+
+    # The time / date.
+    if re.search(r"\b(what('s| is)? the )?(time|date)\b", t) or "what day" in t or "time is it" in t:
+        now = datetime.now()
+        if "date" in t or "day" in t:
+            say("It's %s." % now.strftime("%A the %d of %B").replace(" 0", " "))
+        else:
+            say("It's %s." % now.strftime("%I:%M %p").lstrip("0"))
+        return True
+
+    # Volume.
+    if re.search(r"\b(volume|louder|quieter|turn (it|the volume) (up|down)|mute|unmute|too (loud|quiet))\b", t):
+        m = re.search(r"(\d{1,3})\s*(percent|%)", t)
+        if "mute" in t and "unmute" not in t:
+            sat.gain = 0.0
+            return True
+        if "unmute" in t or "max" in t:
+            sat.gain = 1.0
+        elif m:
+            sat.gain = max(0.0, min(1.5, int(m.group(1)) / 100.0))
+        elif re.search(r"\b(up|louder|too quiet)\b", t):
+            sat.gain = min(1.5, sat.gain + 0.25)
+        elif re.search(r"\b(down|quieter|too loud)\b", t):
+            sat.gain = max(0.1, sat.gain - 0.25)
+        say("Volume %d percent." % round(sat.gain * 100))
+        return True
+
+    # Music ("play Coldplay", "shuffle", "skip", "pause", "what's playing"). Handled last so alarms, timers,
+    # the time and volume win any overlap; anything that isn't a music request falls through to the core.
+    if handle_music(text, sat):
+        return True
+
+    return False
+
+
 def fetch_as_wav(url):
     """The core's own voice recording (usually MP3), converted to WAV for the Pi."""
     if not url.lower().startswith("http"):
@@ -270,6 +564,576 @@ def ask_jarvis(text):
     return str(reply), None
 
 
+def speak_reply(text, sat):
+    """Speaks a reply sentence by sentence, sending each clip as it's ready so the first words play while the
+    rest are still being synthesised. Much less waiting on long answers. Returns True if anything was spoken."""
+    clean = re.sub(r"[*_`#>]", "", text)
+    clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean).strip()
+    if not clean:
+        return False
+    # Break on sentence ends, then regroup so each piece is a sensible length (short first piece = fast start).
+    pieces, chunk = [], ""
+    for part in re.split(r"(?<=[.!?])\s+", clean):
+        if not part:
+            continue
+        if chunk and len(chunk) + len(part) > 160:
+            pieces.append(chunk); chunk = part
+        else:
+            chunk = (chunk + " " + part).strip() if chunk else part
+        if len(chunk) >= 60:  # send this one now; keep latency low
+            pieces.append(chunk); chunk = ""
+    if chunk:
+        pieces.append(chunk)
+    spoke = False
+    for piece in pieces:
+        wav = speak(piece)
+        if wav:
+            sat.send_audio(wav)
+            spoke = True
+    return spoke
+
+
+# ---------------------------------------------------------------------------------------------- music (Navidrome)
+# The Subsonic API, the same one the Jarvis iPhone app uses: token + salt auth (md5(password + salt), never the
+# password itself). The hub finds the music, transcodes each track to PCM with ffmpeg, and streams it to the Pi.
+
+def navidrome_ready():
+    return bool(NAVIDROME_URL and NAVIDROME_USER and NAVIDROME_PASS)
+
+
+def _nav_url(endpoint, params=None):
+    salt = secrets.token_hex(6)
+    token = hashlib.md5((NAVIDROME_PASS + salt).encode()).hexdigest()
+    query = [("u", NAVIDROME_USER), ("t", token), ("s", salt), ("v", "1.16.1"), ("c", "JarvisVoice"), ("f", "json")]
+    return NAVIDROME_URL + "/rest/" + endpoint + "?" + urllib.parse.urlencode(query + list(params or []))
+
+
+def _nav_call(endpoint, params=None):
+    request = urllib.request.Request(_nav_url(endpoint, params), headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.loads(response.read() or b"{}").get("subsonic-response", {})
+    if payload.get("status") != "ok":
+        raise RuntimeError((payload.get("error") or {}).get("message", "Navidrome error"))
+    return payload
+
+
+def nav_search(query):
+    return _nav_call("search3", [("query", query), ("artistCount", "10"), ("albumCount", "20"),
+                                 ("songCount", "40")]).get("searchResult3", {})
+
+def nav_random(size=100, genre=None):
+    params = [("size", str(size))] + ([("genre", genre)] if genre else [])
+    return _nav_call("getRandomSongs", params).get("randomSongs", {}).get("song", [])
+
+def nav_playlists():
+    return _nav_call("getPlaylists").get("playlists", {}).get("playlist", [])
+
+def nav_playlist(playlist_id):
+    return _nav_call("getPlaylist", [("id", playlist_id)]).get("playlist", {}).get("entry", [])
+
+def nav_album(album_id):
+    return _nav_call("getAlbum", [("id", album_id)]).get("album", {})
+
+def nav_artist(artist_id):
+    return _nav_call("getArtist", [("id", artist_id)]).get("artist", {})
+
+def nav_top_songs(artist, count=40):
+    return _nav_call("getTopSongs", [("artist", artist), ("count", str(count))]).get("topSongs", {}).get("song", [])
+
+def nav_genres():
+    return _nav_call("getGenres").get("genres", {}).get("genre", [])
+
+def nav_stream_url(song_id):
+    params = [("id", song_id)]
+    if NAVIDROME_BITRATE and NAVIDROME_BITRATE != "0":
+        params += [("format", "mp3"), ("maxBitRate", NAVIDROME_BITRATE)]
+    return _nav_url("stream", params)
+
+
+def _norm(text):
+    text = (text or "").lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"\(.*?\)|\[.*?\]", " ", text)
+    text = re.sub(r"[^\w ]", "", text)
+    text = re.sub(r"^the ", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def music_score(name, query):
+    """How well a library name matches what was asked for, 0-100 (mirrors the iPhone app's scoring)."""
+    a, b = _norm(name), _norm(query)
+    if not a or not b:
+        return 0
+    if a == b:
+        return 100
+    if a.startswith(b) or b.startswith(a):
+        return 75
+    if a in b or b in a:
+        return 60
+    words_a, words_b = set(a.split()), set(b.split())
+    shared = len(words_a & words_b)
+    return shared * 45 // max(1, max(len(words_a), len(words_b)))
+
+
+MUSIC_LEADING = ["hey jarvis ", "ok jarvis ", "okay jarvis ", "jarvis ", "please ", "can you ", "could you ",
+                 "would you ", "will you ", "can i have ", "i want to hear ", "i'd like to hear ", "let's hear ",
+                 "let's listen to ", "i want to listen to "]
+MUSIC_TRAILING = [" please", " for me", " jarvis", " on navidrome", " from navidrome", " from my library",
+                  " in my library", " now", " thanks"]
+MUSIC_STARTS = [("me some ", "any"), ("me ", "any"), ("some more ", "any"), ("some ", "any"), ("a bit of ", "any"),
+                ("a little ", "any"), ("the song ", "song"), ("the track ", "song"), ("song ", "song"),
+                ("track ", "song"), ("the album ", "album"), ("album ", "album"), ("my playlist ", "playlist"),
+                ("the playlist ", "playlist"), ("playlist ", "playlist"), ("songs by ", "artist"),
+                ("music by ", "artist"), ("something by ", "artist"), ("anything by ", "artist"),
+                ("stuff by ", "artist"), ("the artist ", "artist"), ("artist ", "artist")]
+
+
+def parse_music(raw):
+    """Recognises a music request. Returns (action, query, kind, artist) or None if it isn't one."""
+    text = raw.lower().replace("’", "'")
+    text = re.sub(r"[^\w'& ]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in MUSIC_LEADING:
+            if text.startswith(prefix):
+                text = text[len(prefix):]; changed = True
+        for suffix in MUSIC_TRAILING:
+            if text.endswith(suffix):
+                text = text[:-len(suffix)]; changed = True
+    if re.search(r"(want to hear|like to hear|let's hear|listen to)", raw.lower()) and not text.startswith("play "):
+        text = "play " + text
+
+    def one_of(options):
+        return text in options
+
+    if one_of(["pause", "pause music", "pause the music", "pause it", "pause this", "pause the song", "hold on"]):
+        return ("pause", "", "", None)
+    if one_of(["stop", "stop music", "stop the music", "stop playing", "stop it", "stop the song",
+               "turn the music off", "music off"]):
+        return ("stop", "", "", None)
+    if one_of(["resume", "resume music", "resume the music", "continue", "continue playing", "carry on", "unpause",
+               "keep playing", "play music again", "start the music again"]):
+        return ("resume", "", "", None)
+    if one_of(["next", "skip", "next song", "next track", "skip song", "skip this", "skip this song", "skip track",
+               "skip it", "play the next song", "next one"]):
+        return ("next", "", "", None)
+    if one_of(["previous", "previous song", "previous track", "go back", "last song", "play the last song",
+               "play that again", "play the previous song"]):
+        return ("previous", "", "", None)
+    if re.match(r"^(what's|what is|what song is|who's|who is|whats) (playing|this|this song|singing|on)$", text) \
+            or one_of(["what am i listening to", "what song is this", "what's this song", "name this song"]):
+        return ("now_playing", "", "", None)
+    if re.match(r"^(shuffle|play)( (some|my|all|all my|all of my|any|me some|me))?"
+                r"( (music|songs|tunes|something|anything|everything|my music|my library|my songs|random music|random songs|some music))?$",
+                text) and text != "play":
+        return ("shuffle", "", "", None)
+
+    prefix = next((p for p in ["play ", "put on ", "shuffle ", "queue up ", "queue "] if text.startswith(p)), None)
+    if not prefix:
+        return None
+    rest = text[len(prefix):]
+    kind = "any"
+    stripped = True
+    while stripped:
+        stripped = False
+        for start, start_kind in MUSIC_STARTS:
+            if rest.startswith(start):
+                rest = rest[len(start):]
+                if start_kind != "any":
+                    kind = start_kind
+                stripped = True
+    if kind == "any":
+        if rest.endswith(" playlist"):
+            rest, kind = rest[:-9], "playlist"
+        elif rest.endswith(" album"):
+            rest, kind = rest[:-6], "album"
+        elif rest.endswith(" songs"):
+            rest = rest[:-6]
+        elif rest.endswith(" music"):
+            rest = rest[:-6]
+    if rest.startswith("my ") and kind == "playlist":
+        rest = rest[3:]
+    artist = None
+    if kind not in ("artist", "playlist") and " by " in rest:
+        before, _, after = rest.rpartition(" by ")
+        if before.strip() and after.strip():
+            artist, rest = after.strip(), before.strip()
+    rest = rest.strip()
+    if not rest:
+        return ("shuffle", "", "", None)
+    return ("play", rest, kind, artist)
+
+
+def song_label(song):
+    if not song:
+        return "your music"
+    title = song.get("title") or "Unknown track"
+    artist = song.get("artist")
+    return "%s by %s" % (title, artist) if artist else title
+
+
+class MusicController:
+    """Plays music from Navidrome on one Pi: finds the tracks, streams them, and handles skip/pause/stop.
+    The hub paces the audio to real time and remembers how far into a track it got, so pause/resume is seamless."""
+
+    def __init__(self, sat):
+        self.sat = sat
+        self.lock = threading.Lock()
+        self.songs = []
+        self.index = 0
+        self.playing = False
+        self.paused = False        # True while paused or ducked (quietened so you can talk)
+        self.user_paused = False   # True only when you asked to pause (so it isn't auto-resumed)
+        self.elapsed = 0.0         # seconds into the current track, for resume
+        self.generation = 0        # bumping this stops the current streaming thread
+
+    def has_queue(self):
+        with self.lock:
+            return bool(self.songs) and 0 <= self.index < len(self.songs)
+
+    @property
+    def current(self):
+        with self.lock:
+            return self.songs[self.index] if 0 <= self.index < len(self.songs) else None
+
+    def play(self, songs, start=0):
+        with self.lock:
+            self.songs, self.index = list(songs), start
+            self.playing, self.paused, self.user_paused, self.elapsed = True, False, False, 0.0
+            self.generation += 1
+            generation = self.generation
+        self.sat.send_music_flush()
+        threading.Thread(target=self._run, args=(generation, 0.0), daemon=True).start()
+
+    def _start_thread_locked(self, seek):
+        self.generation += 1
+        threading.Thread(target=self._run, args=(self.generation, seek), daemon=True).start()
+
+    def stop(self):
+        with self.lock:
+            was = self.playing or bool(self.songs)
+            self.songs, self.index = [], 0
+            self.playing, self.paused, self.user_paused, self.elapsed = False, False, False, 0.0
+            self.generation += 1
+        self.sat.send_music_flush()
+        return was
+
+    def pause(self, by_user=True):
+        with self.lock:
+            if not self.songs or self.index >= len(self.songs):
+                return False
+            already_paused = self.paused   # e.g. already ducked by the wake word
+            self.paused, self.playing = True, False
+            if by_user:
+                self.user_paused = True
+            if not already_paused:
+                self.generation += 1       # the streaming thread saves self.elapsed as it stops
+        if not already_paused:
+            self.sat.send_music_flush()
+        return True
+
+    def duck(self):
+        """Quieten for a question (pause without marking it a user pause, so it comes back afterwards)."""
+        return self.pause(by_user=False)
+
+    def resume(self):
+        with self.lock:
+            if not self.songs:
+                return False
+            if self.index >= len(self.songs):
+                return False
+            self.playing, self.paused, self.user_paused = True, False, False
+            seek = self.elapsed
+            self._start_thread_locked(seek)
+        self.sat.send_music_flush()
+        return True
+
+    def next(self):
+        with self.lock:
+            if not self.songs:
+                return False
+            self.index += 1
+            self.elapsed = 0.0
+            if self.index >= len(self.songs):
+                self.playing, self.paused, self.user_paused = False, False, False
+                self.generation += 1
+                self.sat.send_music_flush()
+                return "end"
+            self.playing, self.paused, self.user_paused = True, False, False
+            self._start_thread_locked(0.0)
+        self.sat.send_music_flush()
+        return True
+
+    def previous(self):
+        with self.lock:
+            if not self.songs:
+                return False
+            self.index = max(0, self.index - 1)
+            self.elapsed = 0.0
+            self.playing, self.paused, self.user_paused = True, False, False
+            self._start_thread_locked(0.0)
+        self.sat.send_music_flush()
+        return True
+
+    def _run(self, generation, seek):
+        while True:
+            with self.lock:
+                if generation != self.generation or not self.playing:
+                    return
+                if self.index >= len(self.songs):
+                    self.playing = False
+                    return
+                song = self.songs[self.index]
+            finished = self._stream_track(song, generation, seek)
+            seek = 0.0
+            if not finished:   # interrupted (stop/pause/skip)
+                return
+            with self.lock:
+                if generation != self.generation:
+                    return
+                self.index += 1
+                self.elapsed = 0.0
+
+    def _stream_track(self, song, generation, seek):
+        """Streams one track to the Pi, paced to real time. Returns True if it played to the end, False if stopped."""
+        command = ["ffmpeg", "-v", "error"]
+        if seek > 0.5:
+            command += ["-ss", str(seek)]
+        command += ["-i", nav_stream_url(song.get("id", "")), "-ac", "1", "-ar", str(MUSIC_RATE), "-f", "s16le", "pipe:1"]
+        try:
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE)
+        except Exception as error:
+            log("[%s] Couldn't start music: %s" % (self.sat.name, error))
+            return True
+        bytes_per_sec = MUSIC_RATE * 2
+        chunk = bytes_per_sec // 5   # 0.2 s
+        sent = 0
+        start = time.time()
+        try:
+            while True:
+                with self.lock:
+                    if generation != self.generation or self.paused or not self.playing:
+                        self.elapsed = seek + sent / bytes_per_sec
+                        return False
+                data = proc.stdout.read(chunk)
+                if not data:
+                    return True
+                try:
+                    self.sat.send_music(data)
+                except OSError:
+                    return False
+                sent += len(data)
+                with self.lock:
+                    self.elapsed = seek + sent / bytes_per_sec
+                # Pace to about real time, keeping roughly a second of audio buffered ahead on the Pi.
+                ahead = start + (sent / bytes_per_sec) - 1.0 - time.time()
+                if ahead > 0:
+                    time.sleep(min(ahead, 0.5))
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def play_artist(sat, name, artist_id):
+    songs = []
+    try:
+        songs = nav_top_songs(name)
+    except Exception:
+        songs = []
+    if len(songs) < 10 and artist_id:
+        albums = (nav_artist(artist_id) or {}).get("album", []) or []
+        gathered = []
+        for album in albums[:15]:
+            try:
+                gathered += nav_album(album.get("id", "")).get("song", []) or []
+            except Exception:
+                pass
+        random.shuffle(gathered)
+        songs = gathered or songs
+    if not songs:
+        return "I found %s, but there are no songs to play." % name
+    sat.music.play(songs)
+    return None
+
+def play_album(sat, album_id):
+    album = nav_album(album_id)
+    songs = sorted(album.get("song", []) or [],
+                   key=lambda s: ((s.get("discNumber") or 1), (s.get("track") or 0)))
+    if not songs:
+        return "That album has no songs."
+    sat.music.play(songs)
+    return None
+
+def play_song(sat, song):
+    queue_songs = [song]
+    album_id = song.get("albumId")
+    if album_id:
+        try:
+            ordered = sorted(nav_album(album_id).get("song", []) or [],
+                             key=lambda s: ((s.get("discNumber") or 1), (s.get("track") or 0)))
+            ids = [s.get("id") for s in ordered]
+            if song.get("id") in ids:
+                queue_songs = ordered[ids.index(song.get("id")):]
+        except Exception:
+            pass
+    sat.music.play(queue_songs)
+    return None
+
+def matching_genre(query):
+    genres = nav_genres()
+    best = max(genres, key=lambda g: music_score(g.get("value", ""), query), default=None)
+    if best and music_score(best.get("value", ""), query) >= 70:
+        return best.get("value")
+    return None
+
+def play_genre(sat, genre):
+    songs = nav_random(size=80, genre=genre)
+    if not songs:
+        return "There's no %s in your library." % genre
+    sat.music.play(songs)
+    return None
+
+
+def handle_music(raw, sat):
+    """Handles music requests on the hub. Returns True if it dealt with one (so it isn't sent to the core)."""
+    command = parse_music(raw)
+    if command is None:
+        return False
+    action, query, kind, artist = command
+    music = sat.music
+    say = lambda words: sat.send_audio(speak(words) or BEEP_NOTHING)
+
+    # Transport controls first — these never need Navidrome.
+    if action == "pause":
+        say("Paused." if music.pause() else "Nothing's playing.")
+        return True
+    if action == "stop":
+        music.stop()
+        return True
+    if action == "next":
+        if not music.has_queue():
+            say("Nothing's playing.")
+        elif music.next() == "end":
+            say("That was the last song.")
+        return True
+    if action == "previous":
+        if music.has_queue():
+            music.previous()
+        else:
+            say("Nothing's playing.")
+        return True
+    if action == "resume":
+        if music.has_queue():
+            music.resume()
+            return True
+        # "play" / "carry on" with nothing queued falls through to shuffle.
+        action = "shuffle"
+    if action == "now_playing":
+        song = music.current
+        if not song:
+            say("Nothing's playing at the moment.")
+        else:
+            line = "This is %s" % song_label(song)
+            if song.get("album"):
+                line += ", from %s" % song["album"]
+            say(line + ".")
+        return True
+
+    # Anything that needs the library.
+    if not navidrome_ready():
+        say("Music isn't set up yet. Add your Navidrome details to the jarvis-voice app.")
+        return True
+    try:
+        if action == "shuffle":
+            songs = nav_random(size=100)
+            if not songs:
+                say("Your Navidrome library looks empty.")
+            else:
+                music.play(songs)
+            return True
+        # action == "play"
+        problem = _play_query(sat, query, kind, artist)
+        if problem is None:            # couldn't tell it was music: let the core answer instead
+            return False
+        if problem:                    # a message to speak (not found, etc.)
+            say(problem)
+        return True
+    except Exception as error:
+        log("[%s] Music error: %s" % (sat.name, error))
+        say("I couldn't reach your music library.")
+        return True
+
+
+def _play_query(sat, query, kind, artist):
+    """Finds and plays a 'play X' request. Returns None to defer to the core, '' on success, or a message to speak."""
+    if kind == "playlist":
+        lists = nav_playlists()
+        best = max(lists, key=lambda p: music_score(p.get("name", ""), query), default=None)
+        if not best or music_score(best.get("name", ""), query) < 50:
+            return "I couldn't find a playlist called %s." % query
+        songs = nav_playlist(best.get("id", ""))
+        if not songs:
+            return "The %s playlist is empty." % best.get("name", "")
+        sat.music.play(songs)
+        return ""
+
+    result = nav_search((query + " " + artist) if artist else query)
+    if artist and not (result.get("song") or result.get("album") or result.get("artist")):
+        result = nav_search(query)
+
+    def artist_bonus(name):
+        if not artist or not name:
+            return 0
+        return 30 if music_score(name, artist) >= 50 else -20
+
+    artists = [(a, music_score(a.get("name", ""), query)) for a in result.get("artist", []) or []]
+    albums = [(a, music_score(a.get("name", ""), query) + artist_bonus(a.get("artist"))) for a in result.get("album", []) or []]
+    songs = [(s, music_score(s.get("title", ""), query) + artist_bonus(s.get("artist"))) for s in result.get("song", []) or []]
+    best_artist = max(artists, key=lambda x: x[1], default=None)
+    best_album = max(albums, key=lambda x: x[1], default=None)
+    best_song = max(songs, key=lambda x: x[1], default=None)
+
+    choice = kind
+    if choice == "any":
+        candidates = [
+            ("artist", (best_artist[1] if best_artist else -1) if not artist else -1),
+            ("album", (best_album[1] if best_album else -1) - 1),
+            ("song", (best_song[1] if best_song else -1) - 2),
+        ]
+        top = max(candidates, key=lambda x: x[1])
+        if top[1] >= 48:
+            choice = top[0]
+        else:
+            genre = matching_genre(query)
+            if genre:
+                return play_genre(sat, genre)
+            if result.get("song"):
+                return play_song(sat, result["song"][0])
+            if result.get("album"):
+                return play_album(sat, result["album"][0].get("id", ""))
+            return None   # not music after all
+
+    if choice == "artist":
+        found = (best_artist[0] if best_artist else None) or (result.get("artist") or [{}])[0]
+        if not found:
+            return "I couldn't find an artist called %s." % query
+        return play_artist(sat, found.get("name", query), found.get("id", ""))
+    if choice == "album":
+        found = (best_album[0] if best_album else None) or (result.get("album") or [{}])[0]
+        if not found:
+            return "I couldn't find an album called %s." % query
+        return play_album(sat, found.get("id", ""))
+    if choice == "song":
+        found = (best_song[0] if best_song else None) or (result.get("song") or [{}])[0]
+        if not found:
+            return "I couldn't find a song called %s." % query
+        return play_song(sat, found)
+    return None
+
+
 # ---------------------------------------------------------------------------------------------- one Pi
 
 class Satellite:
@@ -289,15 +1153,61 @@ class Satellite:
         self.recorded = 0.0
         self.wait_limit = 5.0
         self.pending = b""
+        self.gain = 1.0
+        self.ringing = None
+        self.music = MusicController(self)
+        self._duck_resume = False
 
-    def send_audio(self, wav, tail=0.6):
+    def send_audio(self, wav, tail=0.6, mute=True):
         if not wav:
             return
+        wav = apply_gain(wav, self.gain)
         frame = b"A" + struct.pack(">I", len(wav)) + wav
         with self.send_lock:
             self.sock.sendall(frame)
-        # Ignore what the microphone hears while (and just after) the Pi is playing.
-        self.muted_until = max(self.muted_until, time.time()) + wav_seconds(wav) + tail
+        # Ignore what the microphone hears while (and just after) the Pi is playing — but not while an
+        # alarm is ringing, so "Hey Jarvis, stop" can still be heard over it.
+        if mute:
+            self.muted_until = max(self.muted_until, time.time()) + wav_seconds(wav) + tail
+
+    def send_music(self, pcm):
+        """A chunk of music (raw 16-bit mono PCM) for the Pi. Doesn't mute the mic, so "Hey Jarvis" still works."""
+        frame = b"M" + struct.pack(">I", len(pcm)) + pcm
+        with self.send_lock:
+            self.sock.sendall(frame)
+
+    def send_music_flush(self):
+        """Tells the Pi to stop music playback at once (for pause/stop/skip)."""
+        frame = b"F" + struct.pack(">I", 0)
+        with self.send_lock:
+            self.sock.sendall(frame)
+
+    def start_ring(self, alarm):
+        if self.ringing:
+            return
+        try:
+            self.music.stop()   # an alarm takes over the speaker
+        except OSError:
+            pass
+        self.ringing = alarm
+        threading.Thread(target=self._ring_loop, args=(alarm,), daemon=True).start()
+        log("[%s] %s ringing" % (self.name, alarm.get("kind", "alarm")))
+
+    def stop_ring(self):
+        self.ringing = None
+
+    def _ring_loop(self, alarm):
+        chime = TIMER_CHIME if alarm.get("kind") == "timer" else ALARM_CHIME
+        started = time.time()
+        while self.ringing is alarm and time.time() - started < ALARM_MAX_SECONDS:
+            # Pause the chiming while the person is talking to Jarvis, so their command is heard clearly.
+            if self.state == "wake" and time.time() >= self.muted_until:
+                self.send_audio(chime, tail=0.0, mute=False)
+                time.sleep(1.5)
+            else:
+                time.sleep(0.3)
+        if self.ringing is alarm:
+            self.ringing = None
 
     def feed(self, data):
         self.pending += data
@@ -320,6 +1230,10 @@ class Satellite:
             if max(scores.values()) >= WAKE_THRESHOLD:
                 log("[%s] Wake word heard (%.2f)" % (self.name, max(scores.values())))
                 self.wake.reset()
+                # Quieten any music so the question is heard clearly; it comes back after the reply.
+                if self.music.playing and not self.music.paused:
+                    self.music.duck()
+                    self._duck_resume = True
                 self.start_recording(wait_limit=5.0)
                 self.send_audio(BEEP_LISTEN, tail=0.05)
             return
@@ -337,7 +1251,7 @@ class Satellite:
             self.back_to_wake()
             if self.wait_limit > 3:  # after the wake word, not after a follow-up window
                 self.send_audio(BEEP_NOTHING)
-        elif (self.speech_started and self.silence > 0.9) or self.recorded > 15:
+        elif (self.speech_started and self.silence > ENDPOINT_SILENCE) or self.recorded > 15:
             audio = np.concatenate(self.recording)
             self.state = "busy"
             threading.Thread(target=self.answer, args=(audio,), daemon=True).start()
@@ -353,6 +1267,8 @@ class Satellite:
         self.wake.reset()
 
     def answer(self, audio):
+        resume_music = self._duck_resume
+        self._duck_resume = False
         try:
             text = transcribe(audio)
             if not text:
@@ -360,18 +1276,30 @@ class Satellite:
                 self.send_audio(BEEP_NOTHING)
                 return
             log("[%s] Heard: %s" % (self.name, text))
+            # Alarms, timers, the time, volume and music are handled on the hub; everything else goes to the core.
+            try:
+                if handle_command(text, self):
+                    return
+            except Exception as error:
+                log("[%s] Local command error: %s" % (self.name, error))
             try:
                 reply, audio_url = ask_jarvis(text)
             except Exception as error:
                 log("[%s] Jarvis core error: %s" % (self.name, error))
                 reply, audio_url = "Sorry, I can't reach the Jarvis core at the moment.", None
             log("[%s] Jarvis: %s" % (self.name, reply))
-            wav = fetch_as_wav(audio_url) if (USE_CORE_VOICE and audio_url) else None
-            self.send_audio(wav or speak(reply) or BEEP_NOTHING)
+            if USE_CORE_VOICE and audio_url:
+                self.send_audio(fetch_as_wav(audio_url) or BEEP_NOTHING)
+            elif not speak_reply(reply, self):   # spoken sentence by sentence, so the first words come quickly
+                self.send_audio(BEEP_NOTHING)
         except Exception as error:
             log("[%s] Error: %s" % (self.name, error))
             self.send_audio(BEEP_NOTHING)
         finally:
+            # If we quietened music for this question (and it wasn't a music command or a deliberate pause), bring it back.
+            if resume_music and self.music.paused and not self.music.user_paused and self.music.has_queue():
+                time.sleep(max(0.0, self.muted_until - time.time()))
+                self.music.resume()
             if FOLLOW_UP_SECONDS > 0 and self.state == "busy":
                 # Carry on the conversation without the wake word, once the reply has finished.
                 self.start_recording(wait_limit=FOLLOW_UP_SECONDS)
@@ -383,6 +1311,7 @@ class AudioHandler(socketserver.BaseRequestHandler):
     def handle(self):
         sock = self.request
         sock.settimeout(30)
+        name, satellite = None, None
         try:
             hello = b""
             while not hello.endswith(b"\n") and len(hello) < 512:
@@ -397,6 +1326,8 @@ class AudioHandler(socketserver.BaseRequestHandler):
             name = parts[2] if len(parts) > 2 else self.client_address[0]
             log("[%s] Connected from %s" % (name, self.client_address[0]))
             satellite = Satellite(sock, name)
+            with satellites_lock:
+                SATELLITES[name] = satellite
             if GREETING:
                 threading.Thread(target=lambda: satellite.send_audio(speak(GREETING)), daemon=True).start()
             while True:
@@ -407,6 +1338,10 @@ class AudioHandler(socketserver.BaseRequestHandler):
         except (OSError, socket.timeout) as error:
             log("Connection ended: %s" % error)
         finally:
+            if name is not None:
+                with satellites_lock:
+                    if SATELLITES.get(name) is satellite:
+                        SATELLITES.pop(name, None)
             log("Disconnected: %s" % self.client_address[0])
 
 
@@ -429,11 +1364,40 @@ NAME = os.environ.get("SATELLITE_NAME", socket.gethostname())
 MIC = os.environ.get("MIC_DEVICE", "default")
 SPEAKER = os.environ.get("SPEAKER_DEVICE", "default")
 
+MUSIC_RATE = 24000   # must match the hub
 playback = queue.Queue()
+music_proc = None
+music_lock = threading.Lock()
+
+def music_stop():
+    global music_proc
+    with music_lock:
+        if music_proc is not None:
+            try: music_proc.stdin.close()
+            except Exception: pass
+            try: music_proc.terminate()
+            except Exception: pass
+            music_proc = None
+
+def music_write(chunk):
+    # Streams music to a long-running aplay. The speaker can only play one thing at a time, so speech stops music.
+    global music_proc
+    with music_lock:
+        if music_proc is None or music_proc.poll() is not None:
+            music_proc = subprocess.Popen(
+                ["aplay", "-q", "-D", SPEAKER, "-f", "S16_LE", "-r", str(MUSIC_RATE), "-c", "1", "-t", "raw"],
+                stdin=subprocess.PIPE)
+        try:
+            music_proc.stdin.write(chunk)
+        except (BrokenPipeError, OSError):
+            try: music_proc.kill()
+            except Exception: pass
+            music_proc = None
 
 def player():
     while True:
         wav = playback.get()
+        music_stop()   # a spoken reply or beep takes over the speaker from any music
         try:
             subprocess.run(["aplay", "-q", "-D", SPEAKER, "-"], input=wav, timeout=300)
         except Exception as error:
@@ -484,8 +1448,13 @@ def run_once():
             payload = recv_exact(sock, length)
             if kind == b"A":
                 playback.put(payload)
+            elif kind == b"M":
+                music_write(payload)
+            elif kind == b"F":
+                music_stop()
     finally:
         stop.set()
+        music_stop()
         mic.kill()
         sock.close()
 

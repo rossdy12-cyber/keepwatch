@@ -35,6 +35,8 @@ services:
       FRIGATE_URL: https://100.85.127.42:8971
       FRIGATE_USER: ""
       FRIGATE_PASSWORD: ""
+      # "true" makes tapping a notification open that clip in the SentryCam app instead of Frigate's web UI.
+      SENTRYCAM_LINK: "false"
       # Which cameras / objects notify you. Empty = all. Use Frigate's camera names, comma-separated,
       # e.g. CAMERAS: tapo_c200,ezviz  LABELS: person,car
       CAMERAS: ""

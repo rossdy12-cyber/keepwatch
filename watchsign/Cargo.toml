@@ -1,0 +1,21 @@
+[package]
+name = "watchsign"
+version = "0.1.0"
+edition = "2024"
+description = "Signs an Apple Watch app with a free Apple ID (via isideload), for installing through the iPhone's companion relay"
+license = "MIT"
+publish = false
+
+[dependencies]
+isideload = { version = "=0.5.2", default-features = false, features = ["install", "keyring-storage", "tokio-mt"] }
+apple-codesign-quick = "=0.1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rpassword = "7"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rootcause = "*"
+plist = "1.8"
+
+[profile.release]
+strip = true

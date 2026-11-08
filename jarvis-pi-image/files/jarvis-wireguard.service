@@ -1,0 +1,13 @@
+[Unit]
+Description=Bring up the WireGuard tunnel from wireguard.conf (if present)
+After=network-online.target jarvis-setup.service
+Wants=network-online.target
+Before=jarvis-voice.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jarvis-wireguard
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
