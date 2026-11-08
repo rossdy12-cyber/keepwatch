@@ -167,6 +167,22 @@ struct SettingsView: View {
                         }
                     }
 
+                    Button(role: .destructive) {
+                        UserDefaults.standard.removeObject(forKey: "gluco.savedTandemUUID.v5")
+                        UserDefaults.standard.removeObject(forKey: "gluco.tandemPairingCode")
+
+                        store.tandemPairingCode = ""
+                        store.tandemConnected = false
+                        store.tandemNeedsPairingCode = true
+                        store.tandemDiagnostic = "Old Tandem pump profile forgotten. Force-close and reopen GlucoPulse, then pair again with a new pump pairing code."
+                        store.tandemBLEStatus = "Saved Tandem pump profile cleared. Restart GlucoPulse, then pair again."
+
+                        syncFeedback = store.tandemDiagnostic
+                    } label: {
+                        Label("Forget Tandem Pump Profile", systemImage: "trash")
+                            .foregroundStyle(.red)
+                    }
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Connection status")
                             .font(.caption.weight(.semibold))
