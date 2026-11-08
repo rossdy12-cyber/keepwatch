@@ -122,7 +122,7 @@ struct SettingsView: View {
                         store.pollConnectedG7Peripherals()
                         syncFeedback = store.g7BLEStatus
                     } label: {
-                        Label("Pair & Connect Dexcom G7 (\(store.g7BLEConnectedName.isEmpty ? "DXCM" : store.g7BLEConnectedName))", systemImage: "wave.3.right.circle.fill")
+                        Label("Pair & Connect Dexcom G7 (\(store.g7BLEConnectedName.isEmpty ? "DXCMAK" : store.g7BLEConnectedName))", systemImage: "wave.3.right.circle.fill")
                             .foregroundStyle(GlucoTheme.inRangeGreen)
                     }
                 } header: {
@@ -147,26 +147,41 @@ struct SettingsView: View {
                         .keyboardType(.numberPad)
 
                     Button {
+                        syncFeedback = "Searching for Tandem t:slim X2…"
+                        store.submitTandemPairingCode()
+
                         Task {
-                            let ok = await store.saveAndSyncTandemSource()
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
                             syncFeedback = store.tandemDiagnostic.isEmpty
-                                ? (ok ? "Synced Tandem Source (G7 CGM + Pump)!" : "Tandem Source sync failed.")
+                                ? store.tandemBLEStatus
                                 : store.tandemDiagnostic
                         }
                     } label: {
                         HStack {
-                            Label("Save & Sync Tandem Source (G7 CGM + Pump)", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                            Label("Pair Tandem t:slim X2", systemImage: "dot.radiowaves.left.and.right")
                             Spacer()
                             if store.tandemConnected {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(GlucoTheme.tandemCyan)
+                                    .foregroundStyle(GlucoTheme.inRangeGreen)
                             }
                         }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Connection status")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(GlucoTheme.textSecondary)
+                        Text(store.tandemBLEStatus)
+                            .font(.caption)
+                            .foregroundStyle(GlucoTheme.tandemCyan)
+                        Text(store.tandemDiagnostic.isEmpty ? "No diagnostic message yet." : store.tandemDiagnostic)
+                            .font(.caption)
+                            .foregroundStyle(store.tandemDiagnostic.isEmpty ? GlucoTheme.textSecondary : GlucoTheme.highAmber)
                     }
                 } header: {
                     Text("Standalone Mode 2 · Tandem Source (G7 CGM + t:slim X2)")
                 } footer: {
-                    Text("Your Tandem t:slim X2 pump uploads every 5-minute Dexcom G7 reading plus IOB, basal & boluses to Tandem Source. Saving here configures TrueNAS tconnectsync (:1338) with CGM enabled — no Dexcom app needed.")
+                    Text("For direct Bluetooth pairing, enable Mobile Connection on the pump under Options → Device Settings → Bluetooth Settings, keep the pump on its pairing screen, and ensure GlucoPulse has Bluetooth permission. Tandem Source sync is separate and supplies historical pump/CGM data through TrueNAS.")
                 }
 
                 Section {
