@@ -284,6 +284,10 @@ final class WebViewCache {
     func setupAudioAndBackgroundHooksIfNeeded() {
         guard !isConfigured else { return }
         isConfigured = true
+        let isInsideNativeYouTube = (NSClassFromString("YTSceneDelegate") != nil || Bundle.main.bundlePath.hasSuffix("YouTube.app"))
+        if isInsideNativeYouTube {
+            return
+        }
 
         do {
             let session = AVAudioSession.sharedInstance()
@@ -680,13 +684,17 @@ final class OmniOverlayController: NSObject {
     private var hostingController: UIHostingController<AnyView>?
     private var pillButton: UIButton?
     private var pollTimer: Timer?
+    private var lastSyncedMinimized: Bool?
+    private var lastSyncedPiP: Bool?
 
     func start() {
         guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+        attachIfNeeded()
+        syncVisibility(force: true)
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.attachIfNeeded()
-                self?.syncVisibility()
+                self?.syncVisibility(force: false)
             }
         }
     }
@@ -764,10 +772,15 @@ final class OmniOverlayController: NSObject {
         gr.setTranslation(.zero, in: win)
     }
 
-    func syncVisibility() {
+    func syncVisibility(force: Bool = true) {
         guard let win = overlayWindow, let host = hostingController, let btn = pillButton else { return }
         let minimized = workspace.isMinimizedToYouTube
         let pip = workspace.floatingMiniAniimo
+        if !force && lastSyncedMinimized == minimized && lastSyncedPiP == pip {
+            return
+        }
+        lastSyncedMinimized = minimized
+        lastSyncedPiP = pip
         win.passthroughMode = minimized
         win.miniPiPActive = minimized && pip
         win.miniPiPRect = CGRect(x: 12, y: 104, width: 228, height: 168)
@@ -815,9 +828,36 @@ public func OmniPluginHandleURLString(_ cStr: UnsafePointer<CChar>) {
     }
 }
 
-struct OmniRootContainerView: View {
+struct OmniGlucosePillButton: View {
     @EnvironmentObject var workspace: OmniWorkspaceStore
     @ObservedObject private var glucoStore = GlucoStore.shared
+
+    var body: some View {
+        Button {
+            workspace.launchOrFocus("glucopulse")
+        } label: {
+            let latest = glucoStore.latestReading
+            let valStr = latest.map { glucoStore.formatGlucose($0.mgdL) } ?? "--"
+            let arrowStr = latest?.trend.arrow ?? "→"
+            let pillColor = latest.map { glucoStore.color(for: $0.mgdL) } ?? Color.green
+            HStack(spacing: 4) {
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 10, weight: .bold))
+                Text("\(valStr) \(arrowStr)")
+                    .font(.caption.bold())
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(pillColor.opacity(0.25))
+            .foregroundColor(pillColor)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(pillColor.opacity(0.7), lineWidth: 1))
+            .cornerRadius(8)
+        }
+    }
+}
+
+struct OmniRootContainerView: View {
+    @EnvironmentObject var workspace: OmniWorkspaceStore
     @State private var showIPAFilePicker = false
 
     var body: some View {
@@ -895,6 +935,7 @@ struct OmniRootContainerView: View {
                 Button {
                     if workspace.isRunningInsideNativeYouTube {
                         workspace.isMinimizedToYouTube = true
+                        OmniOverlayController.shared.syncVisibility(force: true)
                     } else {
                         workspace.launchOrFocus("youtube")
                     }
@@ -911,26 +952,7 @@ struct OmniRootContainerView: View {
                     .cornerRadius(8)
                 }
 
-                Button {
-                    workspace.launchOrFocus("glucopulse")
-                } label: {
-                    let latest = glucoStore.latestReading
-                    let valStr = latest.map { glucoStore.formatGlucose($0.mgdL) } ?? "--"
-                    let arrowStr = latest?.trend.arrow ?? "→"
-                    let pillColor = latest.map { glucoStore.color(for: $0.mgdL) } ?? Color.green
-                    HStack(spacing: 4) {
-                        Image(systemName: "waveform.path.ecg")
-                            .font(.system(size: 10, weight: .bold))
-                        Text("\(valStr) \(arrowStr)")
-                            .font(.caption.bold())
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(pillColor.opacity(0.25))
-                    .foregroundColor(pillColor)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(pillColor.opacity(0.7), lineWidth: 1))
-                    .cornerRadius(8)
-                }
+                OmniGlucosePillButton()
 
                 Button {
                     showIPAFilePicker = true

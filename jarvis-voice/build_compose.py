@@ -3,7 +3,7 @@ Run: python3 build_compose.py"""
 from pathlib import Path
 
 here = Path(__file__).parent
-script = (here / "hub.py").read_text()
+script = (here / "hub.py").read_text(encoding="utf-8")
 # Docker Compose treats "$" as the start of a variable; "$$" is a literal "$".
 escaped = script.replace("$", "$$")
 embedded = "".join("      " + line if line.strip() else "\n" for line in escaped.splitlines(keepends=True))
@@ -49,12 +49,11 @@ services:
       - sh
       - -c
       - >-
-        (command -v ffmpeg >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null))
-        && ([ -f /data/venv/.ready-2 ] || (python -m venv /data/venv
-        && /data/venv/bin/pip install -q --no-cache-dir "openwakeword==0.6.0" "faster-whisper==1.1.1" "piper-tts==1.2.0" "onnxruntime>=1.17,<2" "kokoro-onnx==0.4.9" numpy
-        && touch /data/venv/.ready-2))
+        ([ -f /data/venv/.ready-3 ] || (python -m venv /data/venv
+        && /data/venv/bin/pip install -q --no-cache-dir "openwakeword==0.6.0" "faster-whisper==1.1.1" "piper-tts==1.2.0" "onnxruntime>=1.17,<2" "kokoro-onnx==0.4.9" "imageio-ffmpeg" numpy
+        && touch /data/venv/.ready-3))
+        && /data/venv/bin/python -c "import imageio_ffmpeg, os; p='/usr/local/bin/ffmpeg'; os.path.exists(p) or os.symlink(imageio_ffmpeg.get_ffmpeg_exe(), p)"
         && exec /data/venv/bin/python -u /app/hub.py
-    environment_file_note: ""
 
 volumes:
   jarvis-voice-data:
@@ -63,6 +62,5 @@ configs:
   hub:
     content: |
 """ + embedded
-compose = compose.replace('    environment_file_note: ""\n', "")
-(here / "compose.yaml").write_text(compose)
+(here / "compose.yaml").write_text(compose, encoding="utf-8")
 print("wrote compose.yaml")

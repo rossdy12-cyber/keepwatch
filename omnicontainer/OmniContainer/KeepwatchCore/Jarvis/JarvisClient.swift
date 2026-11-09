@@ -190,7 +190,20 @@ struct JarvisClient {
             if Self.isHTML(response, data) { throw JarvisError.webPage }
             if let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
                 if let text = Self.extractText(json), !text.isEmpty { gotText = true; emit(.text(text)) }
-                if let audio = audioURL(in: json) { emit(.audio(audio)) }
+                if let dict = json as? [String: Any],
+                   let tracksObj = dict["tracks"] as? [[String: Any]], !tracksObj.isEmpty,
+                   let tracksData = try? JSONSerialization.data(withJSONObject: tracksObj),
+                   let songs = try? JSONDecoder().decode([SubsonicSong].self, from: tracksData), !songs.isEmpty {
+                    Task { @MainActor in
+                        let player = MusicPlayer.shared
+                        if player.client == nil {
+                            player.client = NavidromeClient(account: JarvisSettings.shared.navidrome)
+                        }
+                        player.play(songs)
+                    }
+                } else if let audio = audioURL(in: json) {
+                    emit(.audio(audio))
+                }
             } else {
                 let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { gotText = true; emit(.text(text)) }

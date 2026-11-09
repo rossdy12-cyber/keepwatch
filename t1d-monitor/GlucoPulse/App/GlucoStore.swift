@@ -371,8 +371,12 @@ final class GlucoStore: NSObject, ObservableObject {
     @Published var statusBanner: String = "Standalone G7 BLE + Tandem t:slim X2 · No Dexcom App Needed"
     @Published var bleDevices: [BLEPeripheralDevice] = []
     @Published var bleScanning: Bool = false
-    @Published var showAllBLEDevices: Bool = false
+    @Published var showAllBLEDevices: Bool = false {
+        didSet { Self.showAllBLENonisolated = showAllBLEDevices }
+    }
     @Published var bleScanElapsedSeconds: Int = 0
+    private static let bleQueue = DispatchQueue(label: "com.ross.glucopulse.ble", qos: .utility)
+    nonisolated(unsafe) private static var showAllBLENonisolated: Bool = false
     @Published var g7BLEStatus: String = "Listening for Dexcom G7 (DXCMAK · Code 8222) 5-min wake pulse…"
     @Published var tandemBLEStatus: String = "Connecting to Tandem t:slim X2 over Bluetooth LE…"
     @Published var g7BLEConnectedName: String = "DXCMAK"
@@ -1149,14 +1153,14 @@ final class GlucoStore: NSObject, ObservableObject {
         bleScanElapsedSeconds = 0
         startFastBLECatchTimer()
         if centralManager == nil {
-            centralManager = CBCentralManager(delegate: self, queue: nil)
+            centralManager = CBCentralManager(delegate: self, queue: Self.bleQueue)
         } else if centralManager?.state == .poweredOn {
             pollConnectedG7Peripherals()
             centralManager?.scanForPeripherals(
                 withServices: nil,
-                options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
             )
-            bleScanning = true
+            if !bleScanning { bleScanning = true }
         }
     }
 
@@ -1224,11 +1228,11 @@ final class GlucoStore: NSObject, ObservableObject {
 
     private func startFastBLECatchTimer() {
         bleFastTimer?.invalidate()
-        bleFastTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        bleFastTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self else { return }
-                if self.bleScanning {
-                    self.bleScanElapsedSeconds += 2
+                if self.bleScanning && self.showAllBLEDevices {
+                    self.bleScanElapsedSeconds += 10
                 }
                 self.pollConnectedG7Peripherals()
             }
@@ -1343,12 +1347,16 @@ final class GlucoStore: NSObject, ObservableObject {
     func upsertBLEDevice(id: String, name: String, category: String, rssi: Int, updateTimestamp: Bool = true) {
         if let idx = bleDevices.firstIndex(where: { $0.id == id }) {
             let prev = bleDevices[idx]
+            let now = Date()
+            if prev.name == name && prev.category == category && abs(prev.rssi - rssi) <= 4 && (!updateTimestamp || now.timeIntervalSince(prev.lastSeen) < 12.0) {
+                return
+            }
             bleDevices[idx] = BLEPeripheralDevice(
                 id: id,
                 name: name,
                 category: category,
                 rssi: rssi,
-                lastSeen: updateTimestamp ? Date() : prev.lastSeen
+                lastSeen: updateTimestamp ? now : prev.lastSeen
             )
         } else {
             bleDevices.insert(
@@ -1386,8 +1394,11 @@ final class GlucoStore: NSObject, ObservableObject {
         g7Peripherals[peripheral.identifier] = peripheral
         let name = rawName.isEmpty ? (g7BLEConnectedName.isEmpty ? "DXCMAK" : g7BLEConnectedName) : rawName
         if Self.isDexcomName(name) {
-            g7BLEConnectedName = name
-            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedG7UUIDKey)
+            if g7BLEConnectedName != name { g7BLEConnectedName = name }
+            let idStr = peripheral.identifier.uuidString
+            if UserDefaults.standard.string(forKey: Self.savedG7UUIDKey) != idStr {
+                UserDefaults.standard.set(idStr, forKey: Self.savedG7UUIDKey)
+            }
         }
 
         let stateLabel = peripheral.state == .connected ? "Dexcom G7 (Connected)" : "Dexcom G7 (Waiting 5m Wake)"
@@ -1423,14 +1434,19 @@ final class GlucoStore: NSObject, ObservableObject {
         tandemPeripherals[peripheral.identifier] = peripheral
         // Ensure Tandem UUID is never in g7Peripherals
         g7Peripherals.removeValue(forKey: peripheral.identifier)
-        if UserDefaults.standard.string(forKey: Self.savedG7UUIDKey) == peripheral.identifier.uuidString {
+        let idStr = peripheral.identifier.uuidString
+        if UserDefaults.standard.string(forKey: Self.savedG7UUIDKey) == idStr {
             UserDefaults.standard.removeObject(forKey: Self.savedG7UUIDKey)
         }
-        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedTandemUUIDKey)
+        if UserDefaults.standard.string(forKey: Self.savedTandemUUIDKey) != idStr {
+            UserDefaults.standard.set(idStr, forKey: Self.savedTandemUUIDKey)
+        }
 
         let rawName = (peripheral.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let name = rawName.isEmpty ? "t:slim X2 Pump" : rawName
-        pumpStatus.pumpSerialNumber = name
+        if pumpStatus.pumpSerialNumber != name {
+            pumpStatus.pumpSerialNumber = name
+        }
         upsertBLEDevice(
             id: peripheral.identifier.uuidString,
             name: name,
@@ -1704,9 +1720,9 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
                 if self.g7DirectBLEEnabled || self.bleScanning {
                     central.scanForPeripherals(
                         withServices: nil,
-                        options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+                        options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
                     )
-                    self.bleScanning = true
+                    if !self.bleScanning { self.bleScanning = true }
                     if self.lastBLEGlucoseDate == nil {
                         self.g7BLEStatus = "Scanning for Dexcom G7 (\(self.g7BLEConnectedName) · Code \(self.g7PairingCode)) 5-min wake…"
                     }
@@ -1756,14 +1772,15 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
         let isTandem = hasTandemService || Self.isTandemName(trimmed)
         let isDexcom = !isTandem && (hasG7Service || isDexcomMfg || Self.isDexcomName(trimmed))
 
+        guard isDexcom || isTandem || Self.showAllBLENonisolated else { return }
         let rssiVal = RSSI.intValue
         let uuidStr = peripheral.identifier.uuidString
         let shortId = String(uuidStr.prefix(6))
         let svcSummary = serviceUUIDs.map { $0.uuidString.prefix(4) }.joined(separator: ",")
 
         Task { @MainActor in
-            let p = self.canonicalPeripheral(peripheral)
             guard isDexcom || isTandem || self.showAllBLEDevices else { return }
+            let p = self.canonicalPeripheral(peripheral)
 
             let displayName: String
             if !trimmed.isEmpty {
@@ -1800,7 +1817,9 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             self.discoveredServicePeripherals.insert(p.identifier)
             if isTandem || self.tandemPeripherals[p.identifier] != nil {
                 let pumpName = rawName.isEmpty ? "t:slim X2 Pump" : rawName
-                self.pumpStatus.pumpSerialNumber = pumpName
+                if self.pumpStatus.pumpSerialNumber != pumpName {
+                    self.pumpStatus.pumpSerialNumber = pumpName
+                }
                 self.tandemGattReady = false
                 self.tandemRequestInFlight = false
                 self.tandemRequestGeneration &+= 1

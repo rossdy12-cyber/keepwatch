@@ -24,11 +24,11 @@ enum MusicCommand: Equatable {
             .replacingOccurrences(of: "[^\\p{L}\\p{N}'& ]", with: " ", options: .regularExpression)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
-        let leading = ["hey jarvis ", "ok jarvis ", "okay jarvis ", "jarvis ", "please ", "can you ", "could you ",
+        let leading = ["hey jarvis ", "ok jarvis ", "okay jarvis ", "jarvis ", "i said ", "please ", "can you ", "could you ",
                        "would you ", "will you ", "can i have ", "i want to hear ", "i'd like to hear ", "let's hear ",
                        "let's listen to ", "i want to listen to "]
-        let trailing = [" please", " for me", " jarvis", " on navidrome", " from navidrome", " from my library",
-                        " in my library", " now", " thanks"]
+        let trailing = [" please", " for me", " jarvis", " on my navidrome", " on navidrome", " from my navidrome", " from navidrome",
+                        " on my navajome", " on navajome", " on natural", " from my library", " in my library", " now", " thanks"]
         var changed = true
         while changed {
             changed = false
@@ -223,6 +223,8 @@ enum MusicDJ {
                 choice = top.0
             } else if let genre = try await matchingGenre(query, client: client) {
                 return try await playGenre(genre, client: client)
+            } else if let firstArtist = result.artist?.first {
+                return try await playArtist(firstArtist, client: client)
             } else if let first = result.song?.first {
                 // Navidrome found something, just not by name: go with its best guess.
                 return try await playSong(first, client: client)

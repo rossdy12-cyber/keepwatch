@@ -2,15 +2,24 @@ import CryptoKit
 import Foundation
 
 /// Your Navidrome sign-in, kept in the Keychain.
+/// Defaults to the local Jarvis Core Subsonic bridge on TrueNAS so music works with zero login required.
 struct NavidromeAccount: Codable, Equatable {
-    var address = "https://navidrome.nas-server.co.uk"
-    var username = ""
+    var address = "https://jarvis.nas-server.co.uk"
+    var username = "ross"
     var password = ""
     /// nil = original files (lossless stays lossless); otherwise MP3 at this many kbps.
     var maxBitRate: Int? = 320
 
+    var effectiveAddress: String {
+        let norm = ServerAddress.normalize(address, defaultScheme: "https")
+        if norm.isEmpty || (password.isEmpty && norm.contains("navidrome.nas-server.co.uk")) {
+            return "https://jarvis.nas-server.co.uk"
+        }
+        return norm
+    }
+
     var isConfigured: Bool {
-        !ServerAddress.normalize(address, defaultScheme: "https").isEmpty && !username.isEmpty && !password.isEmpty
+        !effectiveAddress.isEmpty
     }
 }
 
@@ -24,7 +33,7 @@ struct NavidromeClient {
 
     init(account: NavidromeAccount) {
         self.account = account
-        base = ServerAddress.normalize(account.address, defaultScheme: "https")
+        base = account.effectiveAddress
         let salt = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)).lowercased()
         self.salt = salt
         token = Insecure.MD5.hash(data: Data((account.password + salt).utf8)).map { String(format: "%02x", $0) }.joined()
