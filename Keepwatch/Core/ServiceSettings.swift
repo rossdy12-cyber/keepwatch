@@ -93,15 +93,15 @@ final class ServiceSettings: ObservableObject {
                     config.acceptSelfSigned = true
                 case .sonarr:
                     config.address = "https://sonarr.nas-server.co.uk"
-                    config.apiKey = "24725e980d0b4f83a1722effc8ac4177"
+                    config.apiKey = ""
                     config.acceptSelfSigned = true
                 case .radarr:
                     config.address = "https://radarr.nas-server.co.uk"
-                    config.apiKey = "9b1f1e98c3a54dd492e88a9914b1d07a"
+                    config.apiKey = ""
                     config.acceptSelfSigned = true
                 case .lidarr:
                     config.address = "https://lidarr.nas-server.co.uk"
-                    config.apiKey = "ce79b7e918044f35a522d4279e700635"
+                    config.apiKey = ""
                     config.acceptSelfSigned = true
                 case .nzbget:
                     config.address = "https://nzbget.nas-server.co.uk"

@@ -607,12 +607,12 @@ class OmniWorkspaceStore: ObservableObject {
     }
 
     func detectFastestRoute() async {
-        if let u = URL(string: "http://38.9.96.58:5000/api/version") {
+        if let u = URL(string: "http://100.85.127.42:5000/api/version") {
             var req = URLRequest(url: u)
             req.timeoutInterval = 0.6
             if let (_, resp) = try? await URLSession.shared.data(for: req),
                let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                truenasHost = "38.9.96.58"
+                truenasHost = "100.85.127.42"
                 routeLabel = "Direct LAN (Fast)"
                 return
             }
@@ -623,7 +623,7 @@ class OmniWorkspaceStore: ObservableObject {
 
     func toggleRoute() {
         if truenasHost == "100.85.127.42" {
-            truenasHost = "38.9.96.58"
+            truenasHost = "100.85.127.42"
             routeLabel = "Direct LAN"
         } else {
             truenasHost = "100.85.127.42"
@@ -2957,7 +2957,7 @@ struct OmniSoulSeekrRootView: View {
     @State private var soularrLogs = "Tap 'Sync Lidarr -> Soulseek Now' or 'Refresh Logs' to inspect live P2P grabs."
     @State private var isBusy = false
 
-    private let slskdApiKey = "soularr-api-key-987654321fedcba"
+    private let slskdApiKey = ""
 
     var body: some View {
         VStack(spacing: 0) {

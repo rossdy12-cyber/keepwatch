@@ -4,8 +4,8 @@ import WebKit
 @MainActor
 class SoulSeekrStore: ObservableObject {
     @Published var host: String = "100.85.127.42"
-    @Published var slskdApiKey: String = "soularr-api-key-987654321fedcba"
-    @Published var lidarrApiKey: String = "ce79b7e918044f35a522d4279e700635"
+    @Published var slskdApiKey: String = ""
+    @Published var lidarrApiKey: String = ""
     @Published var searchQuery: String = ""
     @Published var statusBanner: String = "slskd (:5030) + Hearr (:5070) + Soularr (:8265) Ready"
     @Published var soularrLogs: String = "Tap 'Sync Wanted List' or 'View Soularr Logs' to inspect P2P grabs."

@@ -15,7 +15,7 @@ struct ZimaWebView: UIViewRepresentable {
 class ZimaDeckStore: ObservableObject {
     @Published var zimaIP: String = "100.82.255.29"
     @Published var truenasIP: String = "100.85.127.42"
-    @Published var rustdeskPublicKey: String = "obdDqkfFFVv2xnIAxmeSa6H1o2JTgEAMlliSFJGTEYY="
+    @Published var rustdeskPublicKey: String = ""
     @Published var statusBanner: String = "Zimaboard (100.82.255.29) + RustDesk + Komga Ready"
     @Published var rustdeskLogs: String = "Tap Refresh to check hbbs/hbbr relay status."
 
@@ -128,9 +128,9 @@ struct RustDeskHubTab: View {
                             Text("ID / Relay Server (LAN):")
                                 .font(.caption).foregroundColor(.gray)
                             Spacer()
-                            Text("38.9.96.58")
+                            Text("100.85.127.42")
                                 .font(.caption.bold().monospaced())
-                            Button("Copy") { UIPasteboard.general.string = "38.9.96.58" }
+                            Button("Copy") { UIPasteboard.general.string = "100.85.127.42" }
                                 .font(.caption2.bold()).foregroundColor(.mint)
                         }
                         Divider()

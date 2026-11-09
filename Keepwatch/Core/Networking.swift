@@ -104,7 +104,7 @@ final class TrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate 
 
     private func isTrusted(_ host: String) -> Bool {
         let lower = host.lowercased()
-        if lower == "nas-server.co.uk" || lower.hasSuffix(".nas-server.co.uk") || lower == "100.85.127.42" || lower == "38.9.96.58" {
+        if lower == "nas-server.co.uk" || lower.hasSuffix(".nas-server.co.uk") || lower == "100.85.127.42" {
             return true
         }
         lock.lock()

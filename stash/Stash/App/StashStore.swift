@@ -85,7 +85,7 @@ final class StashStore: ObservableObject {
 
     static let presets: [(name: String, url: String, subtitle: String)] = [
         ("TrueNAS Tailscale", "http://100.85.127.42:9999", "Recommended over Tailscale VPN"),
-        ("TrueNAS Direct", "http://38.9.96.58:9999", "Direct TrueNAS IP on port 9999")
+        ("TrueNAS Direct", "http://100.85.127.42:9999", "Direct TrueNAS IP on port 9999")
     ]
 
     @Published var serverAddress: String {

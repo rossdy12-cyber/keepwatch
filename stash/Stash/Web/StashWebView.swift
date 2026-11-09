@@ -223,7 +223,7 @@ struct StashWebScreen: View {
                             }
                             Button {
                                 if store.serverAddress.contains("100.85.127.42") {
-                                    store.serverAddress = "http://38.9.96.58:9999"
+                                    store.serverAddress = "http://100.85.127.42:9999"
                                 } else {
                                     store.serverAddress = "http://100.85.127.42:9999"
                                 }
