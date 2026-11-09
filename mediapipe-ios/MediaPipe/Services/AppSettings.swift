@@ -73,13 +73,15 @@ final class AppSettings: ObservableObject {
     }
 
     init() {
-        serverBaseURL = UserDefaults.standard.string(forKey: StoredKey.serverBaseURL) ?? ""
-        apiToken = KeychainStore.load(account: StoredKey.apiToken) ?? ""
+        let initialBaseURL = UserDefaults.standard.string(forKey: StoredKey.serverBaseURL) ?? ""
+        let initialToken = KeychainStore.load(account: StoredKey.apiToken) ?? ""
+        serverBaseURL = initialBaseURL
+        apiToken = initialToken
         defaultFolder = UserDefaults.standard.string(forKey: StoredKey.defaultFolder) ?? "Media/YouTube"
 
-        let shared = sharedDefaults
-        sharedBaseURL = shared?.string(forKey: SharedKey.serverBaseURL) ?? serverBaseURL
-        sharedToken = shared?.string(forKey: SharedKey.apiToken) ?? apiToken
+        let shared = UserDefaults(suiteName: Self.appGroupID)
+        sharedBaseURL = shared?.string(forKey: SharedKey.serverBaseURL) ?? initialBaseURL
+        sharedToken = shared?.string(forKey: SharedKey.apiToken) ?? initialToken
         sharedOutputType = OutputType(rawValue: shared?.string(forKey: SharedKey.outputType) ?? "") ?? .video
         sharedQuality = shared?.string(forKey: SharedKey.quality) ?? "best"
 
