@@ -56,7 +56,12 @@ final class VSAppSettings: ObservableObject {
         let savedURL = UserDefaults.standard.string(forKey: StoredKey.serverBaseURL) ?? ""
         let savedUser = UserDefaults.standard.string(forKey: StoredKey.username) ?? ""
         let savedPass = VSKeychainStore.load(account: StoredKey.password) ?? ""
-        serverBaseURL = savedURL.isEmpty ? "https://vault.nas-server.co.uk/private-files" : savedURL
+        if savedURL.isEmpty || savedURL.contains("vault.nas-server.co.uk") {
+            serverBaseURL = "https://files.nas-server.co.uk"
+            UserDefaults.standard.set("https://files.nas-server.co.uk", forKey: StoredKey.serverBaseURL)
+        } else {
+            serverBaseURL = savedURL
+        }
         username = savedUser.isEmpty ? "NISES" : savedUser
         password = savedPass.isEmpty ? "92YYgGXfmDLh4x" : savedPass
         remoteFolder = UserDefaults.standard.string(forKey: StoredKey.remoteFolder) ?? "Documents"
