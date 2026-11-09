@@ -114,6 +114,11 @@ enum IPAArchiveExtractor {
             if searchStr.contains("netradar") { return ("netradar", "") }
             if searchStr.contains("soulseek") { return ("soulseekr", "") }
             if searchStr.contains("zima") { return ("zimadeck", "") }
+            if searchStr.contains("linkvault") { return ("linkvault", "") }
+            if searchStr.contains("nasfiles") || searchStr.contains("nas-files") || searchStr.contains("nas files") { return ("nasfiles", "") }
+            if searchStr.contains("vaultscan") { return ("vaultscan", "") }
+            if searchStr.contains("mediapipe") { return ("mediapipe", "") }
+            if searchStr.contains("photovault") || searchStr.contains("photoprism") { return ("photovault", "") }
             if searchStr.contains("twitch") { return ("ipa-\(extractedBundleID)", "https://m.twitch.tv") }
             if searchStr.contains("spotify") { return ("ipa-\(extractedBundleID)", "https://open.spotify.com") }
             if searchStr.contains("discord") { return ("ipa-\(extractedBundleID)", "https://discord.com/app") }
@@ -497,7 +502,12 @@ class OmniWorkspaceStore: ObservableObject {
         OmniAppDescriptor(id: "photopulse", title: "PhotoPulse", subtitle: "iCloudPD 2FA & Immich Frames", icon: "photo.artframe", color: .pink, sym: "PP", rgb: (1.0, 0.25, 0.5)),
         OmniAppDescriptor(id: "netradar", title: "NetRadar", subtitle: "SpeedTest + Mesh & SSL Audit", icon: "network", color: .teal, sym: "NR", rgb: (0.0, 0.85, 0.95)),
         OmniAppDescriptor(id: "soulseekr", title: "SoulSeekr", subtitle: "slskd + Hearr + Soularr P2P", icon: "waveform.badge.magnifyingglass", color: .purple, sym: "SS", rgb: (0.73, 0.41, 0.78)),
-        OmniAppDescriptor(id: "zimadeck", title: "ZimaDeck", subtitle: "Zimaboard + Komga + RustDesk", icon: "server.rack", color: .mint, sym: "ZD", rgb: (0.0, 0.9, 0.7))
+        OmniAppDescriptor(id: "zimadeck", title: "ZimaDeck", subtitle: "Zimaboard + Komga + RustDesk", icon: "server.rack", color: .mint, sym: "ZD", rgb: (0.0, 0.9, 0.7)),
+        OmniAppDescriptor(id: "linkvault", title: "LinkVault", subtitle: "Read-It-Later & Reader View", icon: "bookmark.fill", color: .indigo, sym: "LV", rgb: (0.35, 0.34, 0.84)),
+        OmniAppDescriptor(id: "nasfiles", title: "NAS Files", subtitle: "WebDAV Browser & Offline Cache", icon: "externaldrive.fill.badge.icloud", color: .blue, sym: "NF", rgb: (0.0, 0.48, 1.0)),
+        OmniAppDescriptor(id: "vaultscan", title: "VaultScan", subtitle: "Document Scanner, OCR & PDF", icon: "doc.text.viewfinder", color: .teal, sym: "VS", rgb: (0.19, 0.69, 0.78)),
+        OmniAppDescriptor(id: "mediapipe", title: "MediaPipe", subtitle: "MeTube Queue & Socket Live", icon: "arrow.down.circle.fill", color: .red, sym: "MP", rgb: (1.0, 0.23, 0.19)),
+        OmniAppDescriptor(id: "photovault", title: "PhotoVault", subtitle: "PhotoPrism FaceID Vault", icon: "lock.rectangle.on.rectangle.fill", color: .pink, sym: "PV", rgb: (1.0, 0.18, 0.33))
     ]
 
     @Published var runningAppIDs: [String] = ["glucopulse"]
@@ -505,7 +515,7 @@ class OmniWorkspaceStore: ObservableObject {
     @Published var splitScreenEnabled: Bool = false
     @Published var secondaryAppID: String = "sentrycam"
     @Published var installedIPAs: [InstalledIPAPackage] = []
-    @Published var statusBanner: String = "24/7 In-Memory Host · GlucoPulse G7 BLE + 15 Integrated Apps!"
+    @Published var statusBanner: String = "24/7 In-Memory Host · GlucoPulse G7 BLE + 20 Integrated Apps!"
     @Published var truenasHost: String = "100.85.127.42"
     @Published var routeLabel: String = "Tailscale"
     @Published var floatingMiniAniimo: Bool = false {
@@ -1177,7 +1187,7 @@ struct OmniSpringBoardView: View {
                 }
 
                 HStack {
-                    Text("All 14 Integrated Apps (Zero-Close Multitasking)")
+                    Text("All 20 Integrated Apps (Zero-Close Multitasking)")
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                     Spacer()
@@ -1301,6 +1311,16 @@ struct EmbeddedLiveAppHost: View {
             OmniSoulSeekrRootView(host: workspace.truenasHost)
         case "zimadeck":
             MiniZimaDeckModule(host: workspace.truenasHost)
+        case "linkvault":
+            LinkVaultEmbeddedHostView()
+        case "nasfiles":
+            NASFilesEmbeddedHostView()
+        case "vaultscan":
+            VaultScanEmbeddedHostView()
+        case "mediapipe":
+            MediaPipeEmbeddedHostView()
+        case "photovault":
+            PhotoVaultEmbeddedHostView()
         default:
             if let pkg = workspace.installedIPAs.first(where: { $0.mappedModuleID == appID }), !pkg.runtimeURL.isEmpty {
                 FastCachedWebView(cacheKey: appID, urlString: pkg.runtimeURL, enableYouTubePro: true)
