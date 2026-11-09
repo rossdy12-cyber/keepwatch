@@ -5,8 +5,3 @@ struct LVRootView: View {
         LVLinkListView()
     }
 }
-
-#Preview {
-    LVRootView()
-        .environmentObject(LVLinkStore())
-}

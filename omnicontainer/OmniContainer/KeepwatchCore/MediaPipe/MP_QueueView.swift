@@ -168,8 +168,3 @@ private struct MPConnectionBadge: View {
         .foregroundStyle(isConnected ? .green : .secondary)
     }
 }
-
-#Preview {
-    MPQueueView()
-        .environmentObject(MPAppSettings())
-}

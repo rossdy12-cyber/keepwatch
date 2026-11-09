@@ -83,9 +83,3 @@ struct NFDownloadsView: View {
         }
     }
 }
-
-#Preview {
-    NFDownloadsView()
-        .environmentObject(NFOfflineStore())
-        .environmentObject(NFDownloadQueueService(settings: NFAppSettings(), offlineStore: NFOfflineStore()))
-}

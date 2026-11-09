@@ -395,10 +395,3 @@ private struct NFFileCell: View {
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
     }
 }
-
-#Preview {
-    NFBrowserView()
-        .environmentObject(NFAppSettings())
-        .environmentObject(NFOfflineStore())
-        .environmentObject(NFDownloadQueueService(settings: NFAppSettings(), offlineStore: NFOfflineStore()))
-}

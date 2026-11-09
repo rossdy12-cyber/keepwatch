@@ -22,10 +22,3 @@ struct NFRootView: View {
         }
     }
 }
-
-#Preview {
-    NFRootView()
-        .environmentObject(NFAppSettings())
-        .environmentObject(NFOfflineStore())
-        .environmentObject(NFDownloadQueueService(settings: NFAppSettings(), offlineStore: NFOfflineStore()))
-}

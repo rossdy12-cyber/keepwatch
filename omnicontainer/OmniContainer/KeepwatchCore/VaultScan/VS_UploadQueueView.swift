@@ -94,10 +94,3 @@ struct VSUploadQueueView: View {
         }
     }
 }
-
-#Preview {
-    VSUploadQueueView()
-        .environmentObject(VSAppSettings())
-        .environmentObject(VSDocumentStore())
-        .environmentObject(VSUploadQueueService(settings: VSAppSettings(), documentStore: VSDocumentStore()))
-}

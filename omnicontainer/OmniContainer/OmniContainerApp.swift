@@ -538,7 +538,8 @@ class OmniWorkspaceStore: ObservableObject {
     private let installedKey = "omnicontainer.installed.ipas.v4"
 
     init() {
-        self.isMinimizedToYouTube = (NSClassFromString("YTSceneDelegate") != nil || Bundle.main.bundlePath.hasSuffix("YouTube.app"))
+        let insideYT = (NSClassFromString("YTSceneDelegate") != nil || Bundle.main.bundlePath.hasSuffix("YouTube.app"))
+        self._isMinimizedToYouTube = Published(initialValue: insideYT)
         if let data = UserDefaults.standard.data(forKey: installedKey),
            let decoded = try? JSONDecoder().decode([InstalledIPAPackage].self, from: data) {
             installedIPAs = decoded
@@ -718,18 +719,19 @@ final class OmniOverlayController: NSObject {
     private var pollTimer: Timer?
     private var lastSyncedMinimized: Bool?
     private var lastSyncedPiP: Bool?
+    private var isSyncingVisibility: Bool = false
 
     func start() {
+        guard pollTimer == nil else { return }
         attachIfNeeded()
         syncVisibility(force: true)
-        if overlayWindow == nil && pollTimer == nil {
-            pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    self?.attachIfNeeded()
-                    if self?.overlayWindow != nil {
-                        self?.pollTimer?.invalidate()
-                        self?.pollTimer = nil
-                    }
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.attachIfNeeded()
+                self?.syncVisibility(force: false)
+                if self?.overlayWindow != nil {
+                    self?.pollTimer?.invalidate()
+                    self?.pollTimer = nil
                 }
             }
         }
@@ -739,26 +741,7 @@ final class OmniOverlayController: NSObject {
         guard let u = URL(string: str) else { return }
         attachIfNeeded()
         workspace.handleIncomingURL(u)
-        syncVisibility()
-    }
-
-    private func ensureHostingController() -> UIHostingController<AnyView> {
-        if let existing = hostingController {
-            return existing
-        }
-        let rootView = AnyView(
-            OmniRootContainerView()
-                .environmentObject(workspace)
-                .preferredColorScheme(.dark)
-        )
-        let host = UIHostingController(rootView: rootView)
-        host.view.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
-        if let win = overlayWindow {
-            host.view.frame = win.bounds
-        }
-        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        hostingController = host
-        return host
+        syncVisibility(force: true)
     }
 
     func attachIfNeeded() {
@@ -768,10 +751,24 @@ final class OmniOverlayController: NSObject {
             return
         }
 
+        // Initialize workspace BEFORE assigning overlayWindow so didSet never re-enters lazy var workspace
+        let ws = self.workspace
+
         let win = OmniOverlayWindow(windowScene: scene)
         win.frame = scene.coordinateSpace.bounds
         win.windowLevel = UIWindow.Level.statusBar + 50
         win.backgroundColor = .clear
+
+        let rootView = AnyView(
+            OmniRootContainerView()
+                .environmentObject(ws)
+                .preferredColorScheme(.dark)
+        )
+        let host = UIHostingController(rootView: rootView)
+        host.view.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
+        host.view.frame = win.bounds
+        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        win.rootViewController = host
 
         let btn = UIButton(type: .system)
         btn.frame = CGRect(x: max(16, win.bounds.width - 96), y: 58, width: 84, height: 34)
@@ -797,9 +794,8 @@ final class OmniOverlayController: NSObject {
         win.isHidden = false
 
         self.overlayWindow = win
+        self.hostingController = host
         self.pillButton = btn
-        pollTimer?.invalidate()
-        pollTimer = nil
         syncVisibility(force: true)
     }
 
@@ -819,7 +815,11 @@ final class OmniOverlayController: NSObject {
     }
 
     func syncVisibility(force: Bool = true) {
-        guard let win = overlayWindow, let btn = pillButton else { return }
+        guard !isSyncingVisibility else { return }
+        guard let win = overlayWindow, let host = hostingController, let btn = pillButton else { return }
+        isSyncingVisibility = true
+        defer { isSyncingVisibility = false }
+
         let minimized = workspace.isMinimizedToYouTube
         let pip = workspace.floatingMiniAniimo
         if !force && lastSyncedMinimized == minimized && lastSyncedPiP == pip {
@@ -830,41 +830,18 @@ final class OmniOverlayController: NSObject {
         win.passthroughMode = minimized
         win.miniPiPActive = minimized && pip
         win.miniPiPRect = CGRect(x: 12, y: 104, width: 228, height: 168)
+        host.view.isHidden = minimized && !pip
+        host.view.isUserInteractionEnabled = !(minimized && !pip)
+        host.view.backgroundColor = minimized ? .clear : UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
         btn.isHidden = !minimized
-
-        if minimized && !pip {
-            // Completely detach UIHostingController when minimized to YouTube so zero SwiftUI gesture recognizers intercept Shorts swipes
-            if let host = hostingController {
-                host.view.isHidden = true
-                host.view.isUserInteractionEnabled = false
-                if win.rootViewController != nil {
-                    win.rootViewController = nil
-                }
-                host.view.removeFromSuperview()
-            }
+        if !minimized {
+            win.bringSubviewToFront(host.view)
+        } else {
             if win.isKeyWindow {
                 win.resignKey()
             }
-            if let ytWin = win.windowScene?.windows.first(where: { $0 !== win && !$0.isHidden && $0.windowLevel == .normal }) {
-                ytWin.makeKey()
-            }
+            win.bringSubviewToFront(host.view)
             win.bringSubviewToFront(btn)
-        } else {
-            let host = ensureHostingController()
-            if win.rootViewController !== host {
-                win.rootViewController = host
-            }
-            host.view.frame = win.bounds
-            host.view.isHidden = false
-            host.view.isUserInteractionEnabled = true
-            host.view.backgroundColor = minimized ? .clear : UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
-            if !minimized {
-                win.makeKey()
-                win.bringSubviewToFront(host.view)
-            } else {
-                win.bringSubviewToFront(host.view)
-                win.bringSubviewToFront(btn)
-            }
         }
     }
 }

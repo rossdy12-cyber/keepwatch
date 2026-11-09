@@ -99,6 +99,11 @@ jobs:
             -D OMNI_DYLIB_PLUGIN \
             -module-name OmniContainerPlugin \
             -Xlinker -install_name -Xlinker @rpath/OmniContainerPlugin.dylib \
+            -Xlinker -weak_framework -Xlinker VisionKit \
+            -Xlinker -weak_framework -Xlinker Vision \
+            -Xlinker -weak_framework -Xlinker PDFKit \
+            -Xlinker -weak_framework -Xlinker QuickLook \
+            -Xlinker -weak_framework -Xlinker LocalAuthentication \
             OmniContainer/OmniContainerApp.swift \
             $(find OmniContainer/KeepwatchCore -name '*.swift') \
             out/OmniPluginEntry.o \

@@ -74,8 +74,3 @@ struct VSSettingsView: View {
         }
     }
 }
-
-#Preview {
-    VSSettingsView()
-        .environmentObject(VSAppSettings())
-}

@@ -145,10 +145,3 @@ private struct VSDocumentRow: View {
         }
     }
 }
-
-#Preview {
-    VSDocumentListView()
-        .environmentObject(VSAppSettings())
-        .environmentObject(VSDocumentStore())
-        .environmentObject(VSUploadQueueService(settings: VSAppSettings(), documentStore: VSDocumentStore()))
-}

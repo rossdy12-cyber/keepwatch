@@ -44,7 +44,3 @@ struct MPDiagnosticsView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 }
-
-#Preview {
-    MPDiagnosticsView()
-}

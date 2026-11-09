@@ -26,9 +26,3 @@ struct MPRootView: View {
         }
     }
 }
-
-#Preview {
-    MPRootView()
-        .environmentObject(MPAppSettings())
-        .environmentObject(MPAppRouter())
-}

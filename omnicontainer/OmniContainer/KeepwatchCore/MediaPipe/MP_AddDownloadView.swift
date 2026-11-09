@@ -142,9 +142,3 @@ struct MPAddDownloadView: View {
         isSubmitting = false
     }
 }
-
-#Preview {
-    MPAddDownloadView()
-        .environmentObject(MPAppSettings())
-        .environmentObject(MPAppRouter())
-}

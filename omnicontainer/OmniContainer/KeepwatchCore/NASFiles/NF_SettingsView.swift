@@ -62,9 +62,3 @@ struct NFSettingsView: View {
         }
     }
 }
-
-#Preview {
-    NFSettingsView()
-        .environmentObject(NFAppSettings())
-        .environmentObject(NFOfflineStore())
-}

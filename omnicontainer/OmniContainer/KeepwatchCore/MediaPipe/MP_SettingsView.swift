@@ -74,8 +74,3 @@ struct MPSettingsView: View {
         isTestingConnection = false
     }
 }
-
-#Preview {
-    MPSettingsView()
-        .environmentObject(MPAppSettings())
-}

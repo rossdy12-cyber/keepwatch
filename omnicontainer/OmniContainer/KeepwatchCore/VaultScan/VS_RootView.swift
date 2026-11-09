@@ -17,10 +17,3 @@ struct VSRootView: View {
         }
     }
 }
-
-#Preview {
-    VSRootView()
-        .environmentObject(VSAppSettings())
-        .environmentObject(VSDocumentStore())
-        .environmentObject(VSUploadQueueService(settings: VSAppSettings(), documentStore: VSDocumentStore()))
-}
