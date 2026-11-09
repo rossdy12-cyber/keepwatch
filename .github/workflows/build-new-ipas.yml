@@ -14,27 +14,9 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}.ipa
+    name: Build New iOS IPAs
     runs-on: macos-15
     timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - dir: linkvault-ios
-            target: LinkVault
-          - dir: nas-files-ios
-            target: NASFiles
-          - dir: vaultscan-ios
-            target: VaultScan
-          - dir: mediapipe-ios
-            target: MediaPipe
-          - dir: photoprism-vault
-            target: PhotoVault
-
-    defaults:
-      run:
-        working-directory: ${{ matrix.dir }}
 
     steps:
       - name: Checkout
@@ -43,15 +25,14 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate Xcode project
-        run: xcodegen generate
-
-      - name: Build ${{ matrix.target }} (unsigned)
+      - name: Build and package MediaPipe.ipa
+        working-directory: mediapipe-ios
         run: |
           set -o pipefail
+          xcodegen generate
           xcodebuild \
-            -project ${{ matrix.target }}.xcodeproj \
-            -scheme ${{ matrix.target }} \
+            -project MediaPipe.xcodeproj \
+            -scheme MediaPipe \
             -configuration Release \
             -sdk iphoneos \
             SYMROOT="$PWD/build" \
@@ -59,22 +40,19 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
-
-      - name: Package ${{ matrix.target }}.ipa
-        run: |
           mkdir -p out/Payload
-          cp -R "build/Release-iphoneos/${{ matrix.target }}.app" out/Payload/
-          rm -rf "out/Payload/${{ matrix.target }}.app/PlugIns"
-          rm -f "out/Payload/${{ matrix.target }}.app/embedded.mobileprovision"
+          cp -R "build/Release-iphoneos/MediaPipe.app" out/Payload/
+          rm -rf "out/Payload/MediaPipe.app/PlugIns"
+          rm -f "out/Payload/MediaPipe.app/embedded.mobileprovision"
           cd out
-          zip -qry ${{ matrix.target }}.ipa Payload
+          zip -qry MediaPipe.ipa Payload
           rm -rf Payload
-          ls -lh ${{ matrix.target }}.ipa
+          ls -lh MediaPipe.ipa
 
-      - name: Upload ${{ matrix.target }}-ipa
+      - name: Upload MediaPipe-ipa
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}-ipa
-          path: ${{ matrix.dir }}/out/${{ matrix.target }}.ipa
+          name: MediaPipe-ipa
+          path: mediapipe-ios/out/MediaPipe.ipa
           if-no-files-found: error
           retention-days: 30

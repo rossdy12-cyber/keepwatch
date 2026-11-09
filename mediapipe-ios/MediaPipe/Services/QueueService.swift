@@ -50,13 +50,13 @@ final class QueueService: ObservableObject {
             return
         }
 
-        var config: [SocketIOClientOption] = [
+        var config: SocketIOClientConfiguration = [
             .log(false),
             .compress
         ]
 
         if settings.serverProfile.usesToken, !settings.apiToken.isEmpty {
-            config.append(.extraHeaders(["Authorization": "Bearer \(settings.apiToken)"]))
+            config.insert(.extraHeaders(["Authorization": "Bearer \(settings.apiToken)"]))
         }
 
         let socketManager = SocketManager(socketURL: baseURL, config: config)
