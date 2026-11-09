@@ -669,6 +669,26 @@ final class OmniOverlayWindow: UIWindow {
     var miniPiPRect: CGRect = .zero
     var miniPiPActive: Bool = false
 
+    override var canBecomeKey: Bool {
+        return !passthroughMode
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if passthroughMode {
+            if let btn = pillButton, !btn.isHidden {
+                let ptInBtn = convert(point, to: btn)
+                if btn.bounds.insetBy(dx: -10, dy: -10).contains(ptInBtn) {
+                    return true
+                }
+            }
+            if miniPiPActive && miniPiPRect.insetBy(dx: -8, dy: -8).contains(point) {
+                return true
+            }
+            return false
+        }
+        return super.point(inside: point, with: event)
+    }
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if passthroughMode {
             if let btn = pillButton, !btn.isHidden {
@@ -698,13 +718,17 @@ final class OmniOverlayController: NSObject {
     private var lastSyncedPiP: Bool?
 
     func start() {
-        guard pollTimer == nil else { return }
         attachIfNeeded()
         syncVisibility(force: true)
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.attachIfNeeded()
-                self?.syncVisibility(force: false)
+        if overlayWindow == nil && pollTimer == nil {
+            pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.attachIfNeeded()
+                    if self?.overlayWindow != nil {
+                        self?.pollTimer?.invalidate()
+                        self?.pollTimer = nil
+                    }
+                }
             }
         }
     }
@@ -714,6 +738,25 @@ final class OmniOverlayController: NSObject {
         attachIfNeeded()
         workspace.handleIncomingURL(u)
         syncVisibility()
+    }
+
+    private func ensureHostingController() -> UIHostingController<AnyView> {
+        if let existing = hostingController {
+            return existing
+        }
+        let rootView = AnyView(
+            OmniRootContainerView()
+                .environmentObject(workspace)
+                .preferredColorScheme(.dark)
+        )
+        let host = UIHostingController(rootView: rootView)
+        host.view.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
+        if let win = overlayWindow {
+            host.view.frame = win.bounds
+        }
+        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        hostingController = host
+        return host
     }
 
     func attachIfNeeded() {
@@ -727,17 +770,6 @@ final class OmniOverlayController: NSObject {
         win.frame = scene.coordinateSpace.bounds
         win.windowLevel = UIWindow.Level.statusBar + 50
         win.backgroundColor = .clear
-
-        let rootView = AnyView(
-            OmniRootContainerView()
-                .environmentObject(workspace)
-                .preferredColorScheme(.dark)
-        )
-        let host = UIHostingController(rootView: rootView)
-        host.view.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
-        host.view.frame = win.bounds
-        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        win.rootViewController = host
 
         let btn = UIButton(type: .system)
         btn.frame = CGRect(x: max(16, win.bounds.width - 96), y: 58, width: 84, height: 34)
@@ -755,6 +787,7 @@ final class OmniOverlayController: NSObject {
         btn.addTarget(self, action: #selector(didTapPill), for: .touchUpInside)
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(didPanPill(_:)))
+        pan.cancelsTouchesInView = true
         btn.addGestureRecognizer(pan)
 
         win.addSubview(btn)
@@ -762,14 +795,15 @@ final class OmniOverlayController: NSObject {
         win.isHidden = false
 
         self.overlayWindow = win
-        self.hostingController = host
         self.pillButton = btn
-        syncVisibility()
+        pollTimer?.invalidate()
+        pollTimer = nil
+        syncVisibility(force: true)
     }
 
     @objc private func didTapPill() {
         workspace.isMinimizedToYouTube = false
-        syncVisibility()
+        syncVisibility(force: true)
     }
 
     @objc private func didPanPill(_ gr: UIPanGestureRecognizer) {
@@ -783,7 +817,7 @@ final class OmniOverlayController: NSObject {
     }
 
     func syncVisibility(force: Bool = true) {
-        guard let win = overlayWindow, let host = hostingController, let btn = pillButton else { return }
+        guard let win = overlayWindow, let btn = pillButton else { return }
         let minimized = workspace.isMinimizedToYouTube
         let pip = workspace.floatingMiniAniimo
         if !force && lastSyncedMinimized == minimized && lastSyncedPiP == pip {
@@ -794,14 +828,41 @@ final class OmniOverlayController: NSObject {
         win.passthroughMode = minimized
         win.miniPiPActive = minimized && pip
         win.miniPiPRect = CGRect(x: 12, y: 104, width: 228, height: 168)
-        host.view.isHidden = minimized && !pip
-        host.view.backgroundColor = minimized ? .clear : UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
         btn.isHidden = !minimized
-        if !minimized {
-            win.bringSubviewToFront(host.view)
-        } else {
-            win.bringSubviewToFront(host.view)
+
+        if minimized && !pip {
+            // Completely detach UIHostingController when minimized to YouTube so zero SwiftUI gesture recognizers intercept Shorts swipes
+            if let host = hostingController {
+                host.view.isHidden = true
+                host.view.isUserInteractionEnabled = false
+                if win.rootViewController != nil {
+                    win.rootViewController = nil
+                }
+                host.view.removeFromSuperview()
+            }
+            if win.isKeyWindow {
+                win.resignKey()
+            }
+            if let ytWin = win.windowScene?.windows.first(where: { $0 !== win && !$0.isHidden && $0.windowLevel == .normal }) {
+                ytWin.makeKey()
+            }
             win.bringSubviewToFront(btn)
+        } else {
+            let host = ensureHostingController()
+            if win.rootViewController !== host {
+                win.rootViewController = host
+            }
+            host.view.frame = win.bounds
+            host.view.isHidden = false
+            host.view.isUserInteractionEnabled = true
+            host.view.backgroundColor = minimized ? .clear : UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
+            if !minimized {
+                win.makeKey()
+                win.bringSubviewToFront(host.view)
+            } else {
+                win.bringSubviewToFront(host.view)
+                win.bringSubviewToFront(btn)
+            }
         }
     }
 }

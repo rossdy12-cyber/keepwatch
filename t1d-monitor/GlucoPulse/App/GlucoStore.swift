@@ -1228,11 +1228,11 @@ final class GlucoStore: NSObject, ObservableObject {
 
     private func startFastBLECatchTimer() {
         bleFastTimer?.invalidate()
-        bleFastTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        bleFastTimer = Timer.scheduledTimer(withTimeInterval: 25.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self else { return }
                 if self.bleScanning && self.showAllBLEDevices {
-                    self.bleScanElapsedSeconds += 10
+                    self.bleScanElapsedSeconds += 25
                 }
                 self.pollConnectedG7Peripherals()
             }
@@ -1263,82 +1263,92 @@ final class GlucoStore: NSObject, ObservableObject {
     }
 
     func pollConnectedG7Peripherals() {
-        guard let central = centralManager, central.state == .poweredOn else { return }
-
-        // 1a. Peripherals exposing Dexcom G7 GATT Services at the iOS Bluetooth system level
-        let connectedG7 = central.retrieveConnectedPeripherals(withServices: [
-            Self.g7AdvServiceUUID,
-            Self.g7CGMServiceUUID,
-            Self.g7AltServiceUUID
-        ])
-        for rawP in connectedG7 {
-            let p = canonicalPeripheral(rawP)
-            let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !Self.isTandemName(pName) else { continue }
-            let displayName = pName.isEmpty ? "DXCMAK" : pName
-            upsertBLEDevice(id: p.identifier.uuidString, name: displayName, category: "Dexcom G7 (Bonded)", rssi: -50, updateTimestamp: p.state == .connected)
-            attachAndConnectG7Peripheral(p, central: central)
-        }
-
-        // 1b. Peripherals exposing Tandem t:slim X2 / Mobi GATT Services at the iOS Bluetooth system level
-        let connectedTandem = central.retrieveConnectedPeripherals(withServices: [
-            Self.tandemServiceUUID1,
-            Self.tandemFullServiceUUID,
-            Self.tandemTDUServiceUUID,
-            Self.tandemServiceUUID2
-        ])
-        for rawP in connectedTandem {
-            let p = canonicalPeripheral(rawP)
-            let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let displayName = pName.isEmpty ? "t:slim X2 Pump" : pName
-            upsertBLEDevice(id: p.identifier.uuidString, name: displayName, category: "Tandem t:slim X2 (Bonded)", rssi: -48, updateTimestamp: p.state == .connected)
-            attachAndConnectTandemPeripheral(p, central: central)
-        }
-
-        // 1c. Check generic DeviceInfo/Battery services ONLY when the peripheral's name explicitly matches Dexcom or Tandem
-        let connectedGeneric = central.retrieveConnectedPeripherals(withServices: [
-            Self.deviceInfoServiceUUID,
-            Self.batteryServiceUUID
-        ])
-        for rawP in connectedGeneric {
-            let p = canonicalPeripheral(rawP)
-            let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if Self.isDexcomName(pName) {
-                upsertBLEDevice(id: p.identifier.uuidString, name: pName, category: "Dexcom G7 (Bonded)", rssi: -52, updateTimestamp: p.state == .connected)
-                attachAndConnectG7Peripheral(p, central: central)
-            } else if Self.isTandemName(pName) {
-                upsertBLEDevice(id: p.identifier.uuidString, name: pName, category: "Tandem t:slim X2 (Bonded)", rssi: -48, updateTimestamp: p.state == .connected)
-                attachAndConnectTandemPeripheral(p, central: central)
-            } else if showAllBLEDevices && !pName.isEmpty {
-                upsertBLEDevice(id: p.identifier.uuidString, name: pName, category: "Connected BLE", rssi: -60, updateTimestamp: false)
-            }
-        }
-
-        // 2. Check previously verified G7 & Tandem peripheral UUIDs (without overwriting active peripheral instances)
+        guard let central = centralManager else { return }
         let savedTandemStr = UserDefaults.standard.string(forKey: Self.savedTandemUUIDKey)
-        if let savedG7Str = UserDefaults.standard.string(forKey: Self.savedG7UUIDKey),
-           savedG7Str != savedTandemStr,
-           let uuid = UUID(uuidString: savedG7Str) {
-            if let existing = g7Peripherals[uuid] {
-                attachAndConnectG7Peripheral(existing, central: central)
-            } else {
-                for rawP in central.retrievePeripherals(withIdentifiers: [uuid]) {
-                    let p = canonicalPeripheral(rawP)
+        let savedG7Str = UserDefaults.standard.string(forKey: Self.savedG7UUIDKey)
+
+        // Query bluetoothd XPC on the background BLE queue so @MainActor (UI/scroll thread) never stalls
+        Self.bleQueue.async { [weak self] in
+            guard central.state == .poweredOn else { return }
+            let connectedG7 = central.retrieveConnectedPeripherals(withServices: [
+                Self.g7AdvServiceUUID,
+                Self.g7CGMServiceUUID,
+                Self.g7AltServiceUUID
+            ])
+            let connectedTandem = central.retrieveConnectedPeripherals(withServices: [
+                Self.tandemServiceUUID1,
+                Self.tandemFullServiceUUID,
+                Self.tandemTDUServiceUUID,
+                Self.tandemServiceUUID2
+            ])
+            let connectedGeneric = central.retrieveConnectedPeripherals(withServices: [
+                Self.deviceInfoServiceUUID,
+                Self.batteryServiceUUID
+            ])
+            var retrievedG7ById: [CBPeripheral] = []
+            if let savedG7Str, savedG7Str != savedTandemStr, let uuid = UUID(uuidString: savedG7Str) {
+                retrievedG7ById = central.retrievePeripherals(withIdentifiers: [uuid])
+            }
+            var retrievedTandemById: [CBPeripheral] = []
+            if let savedTandemStr, let uuid = UUID(uuidString: savedTandemStr) {
+                retrievedTandemById = central.retrievePeripherals(withIdentifiers: [uuid])
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                for rawP in connectedG7 {
+                    let p = self.canonicalPeripheral(rawP)
                     let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !Self.isTandemName(pName) && (pName.isEmpty || Self.isDexcomName(pName)) {
-                        attachAndConnectG7Peripheral(p, central: central)
+                    guard !Self.isTandemName(pName) else { continue }
+                    let displayName = pName.isEmpty ? "DXCMAK" : pName
+                    self.upsertBLEDevice(id: p.identifier.uuidString, name: displayName, category: "Dexcom G7 (Bonded)", rssi: -50, updateTimestamp: p.state == .connected)
+                    self.attachAndConnectG7Peripheral(p, central: central)
+                }
+
+                for rawP in connectedTandem {
+                    let p = self.canonicalPeripheral(rawP)
+                    let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let displayName = pName.isEmpty ? "t:slim X2 Pump" : pName
+                    self.upsertBLEDevice(id: p.identifier.uuidString, name: displayName, category: "Tandem t:slim X2 (Bonded)", rssi: -48, updateTimestamp: p.state == .connected)
+                    self.attachAndConnectTandemPeripheral(p, central: central)
+                }
+
+                for rawP in connectedGeneric {
+                    let p = self.canonicalPeripheral(rawP)
+                    let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if Self.isDexcomName(pName) {
+                        self.upsertBLEDevice(id: p.identifier.uuidString, name: pName, category: "Dexcom G7 (Bonded)", rssi: -52, updateTimestamp: p.state == .connected)
+                        self.attachAndConnectG7Peripheral(p, central: central)
+                    } else if Self.isTandemName(pName) {
+                        self.upsertBLEDevice(id: p.identifier.uuidString, name: pName, category: "Tandem t:slim X2 (Bonded)", rssi: -48, updateTimestamp: p.state == .connected)
+                        self.attachAndConnectTandemPeripheral(p, central: central)
+                    } else if self.showAllBLEDevices && !pName.isEmpty {
+                        self.upsertBLEDevice(id: p.identifier.uuidString, name: pName, category: "Connected BLE", rssi: -60, updateTimestamp: false)
                     }
                 }
-            }
-        }
-        if let savedTandemStr,
-           let uuid = UUID(uuidString: savedTandemStr) {
-            if let existing = tandemPeripherals[uuid] {
-                attachAndConnectTandemPeripheral(existing, central: central)
-            } else {
-                for rawP in central.retrievePeripherals(withIdentifiers: [uuid]) {
-                    let p = canonicalPeripheral(rawP)
-                    attachAndConnectTandemPeripheral(p, central: central)
+
+                if let savedG7Str, savedG7Str != savedTandemStr, let uuid = UUID(uuidString: savedG7Str) {
+                    if let existing = self.g7Peripherals[uuid] {
+                        self.attachAndConnectG7Peripheral(existing, central: central)
+                    } else {
+                        for rawP in retrievedG7ById {
+                            let p = self.canonicalPeripheral(rawP)
+                            let pName = (p.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !Self.isTandemName(pName) && (pName.isEmpty || Self.isDexcomName(pName)) {
+                                self.attachAndConnectG7Peripheral(p, central: central)
+                            }
+                        }
+                    }
+                }
+                if let savedTandemStr, let uuid = UUID(uuidString: savedTandemStr) {
+                    if let existing = self.tandemPeripherals[uuid] {
+                        self.attachAndConnectTandemPeripheral(existing, central: central)
+                    } else {
+                        for rawP in retrievedTandemById {
+                            let p = self.canonicalPeripheral(rawP)
+                            self.attachAndConnectTandemPeripheral(p, central: central)
+                        }
+                    }
                 }
             }
         }
