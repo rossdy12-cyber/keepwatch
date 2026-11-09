@@ -1,0 +1,80 @@
+name: Build New iOS IPAs (LinkVault, NASFiles, VaultScan, MediaPipe, PhotoVault)
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "linkvault-ios/**"
+      - "nas-files-ios/**"
+      - "vaultscan-ios/**"
+      - "mediapipe-ios/**"
+      - "photoprism-vault/**"
+      - ".github/workflows/build-new-ipas.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}.ipa
+    runs-on: macos-15
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: linkvault-ios
+            target: LinkVault
+          - dir: nas-files-ios
+            target: NASFiles
+          - dir: vaultscan-ios
+            target: VaultScan
+          - dir: mediapipe-ios
+            target: MediaPipe
+          - dir: photoprism-vault
+            target: PhotoVault
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build ${{ matrix.target }} (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ${{ matrix.target }}.xcodeproj \
+            -scheme ${{ matrix.target }} \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package ${{ matrix.target }}.ipa
+        run: |
+          mkdir -p out/Payload
+          cp -R "build/Release-iphoneos/${{ matrix.target }}.app" out/Payload/
+          rm -rf "out/Payload/${{ matrix.target }}.app/PlugIns"
+          rm -f "out/Payload/${{ matrix.target }}.app/embedded.mobileprovision"
+          cd out
+          zip -qry ${{ matrix.target }}.ipa Payload
+          rm -rf Payload
+          ls -lh ${{ matrix.target }}.ipa
+
+      - name: Upload ${{ matrix.target }}-ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-ipa
+          path: ${{ matrix.dir }}/out/${{ matrix.target }}.ipa
+          if-no-files-found: error
+          retention-days: 30

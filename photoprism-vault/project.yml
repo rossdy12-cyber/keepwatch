@@ -1,0 +1,37 @@
+name: PhotoVault
+options:
+  bundleIdPrefix: uk.co.rossdy
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+targets:
+  PhotoVault:
+    type: application
+    platform: iOS
+    sources:
+      - PhotoVault
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: uk.co.rossdy.photovault
+        PRODUCT_NAME: PhotoVault
+        MARKETING_VERSION: 1.0.0
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: 5.9
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+    info:
+      path: PhotoVault/Info.plist
+      properties:
+        CFBundleDisplayName: PhotoVault
+        CFBundleShortVersionString: 1.0.0
+        CFBundleVersion: 1
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSFaceIDUsageDescription: PhotoVault uses Face ID to protect access to your private PhotoPrism library.
+        NSPhotoLibraryUsageDescription: PhotoVault needs access to select photos and videos to upload to your PhotoPrism server.
+        NSPhotoLibraryAddUsageDescription: PhotoVault may save downloaded photos to your photo library if you choose to do so.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true

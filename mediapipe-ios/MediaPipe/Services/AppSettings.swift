@@ -1,0 +1,96 @@
+import Foundation
+import SwiftUI
+
+@MainActor
+final class AppSettings: ObservableObject {
+    private enum StoredKey {
+        static let serverBaseURL = "metube.server.baseURL"
+        static let apiToken = "metube.apiToken"
+        static let defaultFolder = "metube.defaultFolder"
+    }
+
+    private enum SharedKey {
+        static let serverBaseURL = "shareExtension.serverBaseURL"
+        static let apiToken = "shareExtension.apiToken"
+        static let defaultFolder = "shareExtension.defaultFolder"
+        static let outputType = "shareExtension.outputType"
+        static let quality = "shareExtension.quality"
+    }
+
+    static let appGroupID = "group.uk.co.rossdymond.mediapipe"
+
+    @Published var serverBaseURL: String {
+        didSet { UserDefaults.standard.set(serverBaseURL, forKey: StoredKey.serverBaseURL) }
+    }
+
+    @Published var apiToken: String {
+        didSet {
+            if apiToken.isEmpty {
+                KeychainStore.delete(account: StoredKey.apiToken)
+            } else {
+                KeychainStore.save(apiToken, account: StoredKey.apiToken)
+            }
+        }
+    }
+
+    @Published var defaultFolder: String {
+        didSet {
+            UserDefaults.standard.set(defaultFolder, forKey: StoredKey.defaultFolder)
+            sharedDefaults?.set(defaultFolder, forKey: SharedKey.defaultFolder)
+        }
+    }
+
+    @Published var sharedBaseURL: String {
+        didSet { sharedDefaults?.set(sharedBaseURL, forKey: SharedKey.serverBaseURL) }
+    }
+
+    @Published var sharedToken: String {
+        didSet { sharedDefaults?.set(sharedToken, forKey: SharedKey.apiToken) }
+    }
+
+    @Published var sharedOutputType: OutputType {
+        didSet { sharedDefaults?.set(sharedOutputType.rawValue, forKey: SharedKey.outputType) }
+    }
+
+    @Published var sharedQuality: String {
+        didSet { sharedDefaults?.set(sharedQuality, forKey: SharedKey.quality) }
+    }
+
+    private var sharedDefaults: UserDefaults? {
+        UserDefaults(suiteName: Self.appGroupID)
+    }
+
+    var serverProfile: ServerProfile {
+        ServerProfile(
+            name: "MeTube",
+            baseURL: serverBaseURL,
+            usesToken: !apiToken.isEmpty
+        )
+    }
+
+    var isConfigured: Bool {
+        !serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    init() {
+        serverBaseURL = UserDefaults.standard.string(forKey: StoredKey.serverBaseURL) ?? ""
+        apiToken = KeychainStore.load(account: StoredKey.apiToken) ?? ""
+        defaultFolder = UserDefaults.standard.string(forKey: StoredKey.defaultFolder) ?? "Media/YouTube"
+
+        let shared = sharedDefaults
+        sharedBaseURL = shared?.string(forKey: SharedKey.serverBaseURL) ?? serverBaseURL
+        sharedToken = shared?.string(forKey: SharedKey.apiToken) ?? apiToken
+        sharedOutputType = OutputType(rawValue: shared?.string(forKey: SharedKey.outputType) ?? "") ?? .video
+        sharedQuality = shared?.string(forKey: SharedKey.quality) ?? "best"
+
+        syncSharedSettings()
+    }
+
+    func syncSharedSettings() {
+        sharedDefaults?.set(sharedBaseURL, forKey: SharedKey.serverBaseURL)
+        sharedDefaults?.set(sharedToken, forKey: SharedKey.apiToken)
+        sharedDefaults?.set(defaultFolder, forKey: SharedKey.defaultFolder)
+        sharedDefaults?.set(sharedOutputType.rawValue, forKey: SharedKey.outputType)
+        sharedDefaults?.set(sharedQuality, forKey: SharedKey.quality)
+    }
+}
