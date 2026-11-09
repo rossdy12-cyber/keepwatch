@@ -5,6 +5,7 @@ on:
     branches: [main, "claude/**"]
     paths:
       - "omnicontainer/**"
+      - "t1d-monitor/GlucoPulse/**"
       - ".github/workflows/build-omnicontainer-ipa.yml"
   workflow_dispatch:
 
@@ -18,6 +19,39 @@ jobs:
     steps:
       - name: Check out the code
         uses: actions/checkout@v4
+
+      - name: Sync shared GlucoPulse implementation into embedded module
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          source = Path('../t1d-monitor/GlucoPulse')
+          destination = Path('OmniContainer/KeepwatchCore/GlucoPulse')
+          mapping = {
+              'App/GlucoStore.swift': 'GlucoStore.swift',
+              'App/DexcomG7NativeAuth.swift': 'DexcomG7NativeAuth.swift',
+              'App/BolusRequestService.swift': 'BolusRequestService.swift',
+              'Views/BolusRequestView.swift': 'BolusRequestView.swift',
+              'Views/DashboardView.swift': 'GlucoDashboardView.swift',
+              'Views/PumpHistoryView.swift': 'GlucoPumpHistoryView.swift',
+              'Views/SettingsView.swift': 'GlucoSettingsView.swift',
+          }
+          renames = {
+              'DashboardView': 'GlucoDashboardView',
+              'PumpHistoryView': 'GlucoPumpHistoryView',
+              'SettingsView': 'GlucoSettingsView',
+          }
+          pending = {}
+          for relative, name in mapping.items():
+              text = (source / relative).read_text()
+              for old, new in renames.items():
+                  text = re.sub(r'\b' + old + r'\b', new, text)
+              pending[name] = text
+          destination.mkdir(parents=True, exist_ok=True)
+          for name, text in pending.items():
+              (destination / name).write_text(text)
+              print(f'Synced {name}')
+          PY
 
       - name: Show Xcode version
         run: xcodebuild -version
