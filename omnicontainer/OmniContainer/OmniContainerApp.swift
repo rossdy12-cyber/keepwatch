@@ -527,6 +527,9 @@ class OmniWorkspaceStore: ObservableObject {
     }
     @Published var isMinimizedToYouTube: Bool = false {
         didSet {
+            if !isMinimizedToYouTube {
+                startBackgroundServicesIfNeeded()
+            }
             OmniOverlayController.shared.syncVisibility()
         }
     }
@@ -536,6 +539,7 @@ class OmniWorkspaceStore: ObservableObject {
     }
 
     private let installedKey = "omnicontainer.installed.ipas.v4"
+    private var didStartBackgroundServices = false
 
     init() {
         let insideYT = (NSClassFromString("YTSceneDelegate") != nil || Bundle.main.bundlePath.hasSuffix("YouTube.app"))
@@ -544,7 +548,16 @@ class OmniWorkspaceStore: ObservableObject {
            let decoded = try? JSONDecoder().decode([InstalledIPAPackage].self, from: data) {
             installedIPAs = decoded
         }
-        // Start 24/7 silent audio background keep-alive and GlucoPulse G7 CoreBluetooth singleton immediately!
+        // When running inside native YouTube, do NOT start CoreBluetooth or heavy background tasks
+        // until the user actually opens the OmniContainer workspace!
+        if !insideYT {
+            startBackgroundServicesIfNeeded()
+        }
+    }
+
+    func startBackgroundServicesIfNeeded() {
+        guard !didStartBackgroundServices else { return }
+        didStartBackgroundServices = true
         WebViewCache.shared.setupAudioAndBackgroundHooksIfNeeded()
         _ = GlucoStore.shared
         Task { await detectFastestRoute() }
@@ -678,9 +691,13 @@ final class OmniOverlayWindow: UIWindow {
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         if passthroughMode {
+            if !miniPiPActive {
+                // Window frame itself is already shrunk to the 84x34 pill button rect!
+                return bounds.insetBy(dx: -6, dy: -6).contains(point)
+            }
             if let btn = pillButton, !btn.isHidden {
                 let ptInBtn = convert(point, to: btn)
-                if btn.bounds.insetBy(dx: -10, dy: -10).contains(ptInBtn) {
+                if btn.bounds.insetBy(dx: -8, dy: -8).contains(ptInBtn) {
                     return true
                 }
             }
@@ -694,9 +711,15 @@ final class OmniOverlayWindow: UIWindow {
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if passthroughMode {
+            if !miniPiPActive {
+                if let btn = pillButton, !btn.isHidden, bounds.insetBy(dx: -6, dy: -6).contains(point) {
+                    return btn
+                }
+                return nil
+            }
             if let btn = pillButton, !btn.isHidden {
                 let ptInBtn = convert(point, to: btn)
-                if btn.bounds.insetBy(dx: -10, dy: -10).contains(ptInBtn) {
+                if btn.bounds.insetBy(dx: -8, dy: -8).contains(ptInBtn) {
                     return btn
                 }
             }
@@ -715,7 +738,10 @@ final class OmniOverlayController: NSObject {
     lazy var workspace = OmniWorkspaceStore()
     private var overlayWindow: OmniOverlayWindow?
     private var hostingController: UIHostingController<AnyView>?
+    private var pillRootVC: UIViewController?
     private var pillButton: UIButton?
+    private var pillOrigin: CGPoint = CGPoint(x: 290, y: 58)
+    private let pillSize: CGSize = CGSize(width: 84, height: 34)
     private var pollTimer: Timer?
     private var lastSyncedMinimized: Bool?
     private var lastSyncedPiP: Bool?
@@ -744,6 +770,23 @@ final class OmniOverlayController: NSObject {
         syncVisibility(force: true)
     }
 
+    private func ensureHostingController() -> UIHostingController<AnyView> {
+        if let existing = hostingController {
+            return existing
+        }
+        let ws = self.workspace
+        let rootView = AnyView(
+            OmniRootContainerView()
+                .environmentObject(ws)
+                .preferredColorScheme(.dark)
+        )
+        let host = UIHostingController(rootView: rootView)
+        host.view.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
+        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        self.hostingController = host
+        return host
+    }
+
     func attachIfNeeded() {
         guard overlayWindow == nil else { return }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -752,26 +795,22 @@ final class OmniOverlayController: NSObject {
         }
 
         // Initialize workspace BEFORE assigning overlayWindow so didSet never re-enters lazy var workspace
-        let ws = self.workspace
+        _ = self.workspace
+
+        let screenBounds = scene.coordinateSpace.bounds
+        pillOrigin = CGPoint(x: max(16, screenBounds.width - 96), y: 58)
 
         let win = OmniOverlayWindow(windowScene: scene)
-        win.frame = scene.coordinateSpace.bounds
+        win.frame = CGRect(origin: pillOrigin, size: pillSize)
         win.windowLevel = UIWindow.Level.statusBar + 50
         win.backgroundColor = .clear
 
-        let rootView = AnyView(
-            OmniRootContainerView()
-                .environmentObject(ws)
-                .preferredColorScheme(.dark)
-        )
-        let host = UIHostingController(rootView: rootView)
-        host.view.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
-        host.view.frame = win.bounds
-        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        win.rootViewController = host
+        let lightVC = UIViewController()
+        lightVC.view.backgroundColor = .clear
+        win.rootViewController = lightVC
 
         let btn = UIButton(type: .system)
-        btn.frame = CGRect(x: max(16, win.bounds.width - 96), y: 58, width: 84, height: 34)
+        btn.frame = CGRect(origin: .zero, size: pillSize)
         btn.setTitle("⚡ Omni", for: .normal)
         btn.setTitleColor(.black, for: .normal)
         btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .heavy)
@@ -789,12 +828,12 @@ final class OmniOverlayController: NSObject {
         pan.cancelsTouchesInView = true
         btn.addGestureRecognizer(pan)
 
-        win.addSubview(btn)
+        lightVC.view.addSubview(btn)
         win.pillButton = btn
         win.isHidden = false
 
         self.overlayWindow = win
-        self.hostingController = host
+        self.pillRootVC = lightVC
         self.pillButton = btn
         syncVisibility(force: true)
     }
@@ -806,17 +845,22 @@ final class OmniOverlayController: NSObject {
 
     @objc private func didPanPill(_ gr: UIPanGestureRecognizer) {
         guard let btn = pillButton, let win = overlayWindow else { return }
-        let trans = gr.translation(in: win)
-        var center = CGPoint(x: btn.center.x + trans.x, y: btn.center.y + trans.y)
-        center.x = max(48, min(win.bounds.width - 48, center.x))
-        center.y = max(52, min(win.bounds.height - 52, center.y))
-        btn.center = center
-        gr.setTranslation(.zero, in: win)
+        let screenBounds = win.windowScene?.coordinateSpace.bounds ?? UIScreen.main.bounds
+        let trans = gr.translation(in: btn)
+        pillOrigin.x = max(12, min(screenBounds.width - pillSize.width - 12, pillOrigin.x + trans.x))
+        pillOrigin.y = max(44, min(screenBounds.height - pillSize.height - 16, pillOrigin.y + trans.y))
+        if workspace.isMinimizedToYouTube && !workspace.floatingMiniAniimo {
+            win.frame = CGRect(origin: pillOrigin, size: pillSize)
+            btn.frame = CGRect(origin: .zero, size: pillSize)
+        } else {
+            btn.frame = CGRect(origin: pillOrigin, size: pillSize)
+        }
+        gr.setTranslation(.zero, in: btn)
     }
 
     func syncVisibility(force: Bool = true) {
         guard !isSyncingVisibility else { return }
-        guard let win = overlayWindow, let host = hostingController, let btn = pillButton else { return }
+        guard let win = overlayWindow, let btn = pillButton, let lightVC = pillRootVC else { return }
         isSyncingVisibility = true
         defer { isSyncingVisibility = false }
 
@@ -830,18 +874,48 @@ final class OmniOverlayController: NSObject {
         win.passthroughMode = minimized
         win.miniPiPActive = minimized && pip
         win.miniPiPRect = CGRect(x: 12, y: 104, width: 228, height: 168)
-        host.view.isHidden = minimized && !pip
-        host.view.isUserInteractionEnabled = !(minimized && !pip)
-        host.view.backgroundColor = minimized ? .clear : UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
-        btn.isHidden = !minimized
-        if !minimized {
-            win.bringSubviewToFront(host.view)
-        } else {
+
+        let screenBounds = win.windowScene?.coordinateSpace.bounds ?? UIScreen.main.bounds
+
+        if minimized && !pip {
+            // Shrink overlay window to ONLY the 84x34 pill button rect and detach SwiftUI UIHostingController!
+            // 99% of the screen has NO overlay window over it at all and ZERO SwiftUI gesture recognizers exist!
+            if win.rootViewController !== lightVC {
+                win.rootViewController = lightVC
+            }
+            win.frame = CGRect(origin: pillOrigin, size: pillSize)
+            if btn.superview !== lightVC.view {
+                lightVC.view.addSubview(btn)
+            }
+            btn.frame = CGRect(origin: .zero, size: pillSize)
+            btn.isHidden = false
             if win.isKeyWindow {
                 win.resignKey()
             }
-            win.bringSubviewToFront(host.view)
-            win.bringSubviewToFront(btn)
+        } else {
+            let host = ensureHostingController()
+            win.frame = screenBounds
+            if win.rootViewController !== host {
+                win.rootViewController = host
+            }
+            host.view.frame = win.bounds
+            host.view.isHidden = false
+            host.view.isUserInteractionEnabled = true
+            host.view.backgroundColor = minimized ? .clear : UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1.0)
+            if btn.superview !== win {
+                win.addSubview(btn)
+            }
+            btn.frame = CGRect(origin: pillOrigin, size: pillSize)
+            btn.isHidden = !minimized
+            if !minimized {
+                win.bringSubviewToFront(host.view)
+            } else {
+                if win.isKeyWindow {
+                    win.resignKey()
+                }
+                win.bringSubviewToFront(host.view)
+                win.bringSubviewToFront(btn)
+            }
         }
     }
 }

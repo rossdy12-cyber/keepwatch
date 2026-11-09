@@ -73,11 +73,12 @@ final class MPAppSettings: ObservableObject {
     }
 
     init() {
-        let initialBaseURL = UserDefaults.standard.string(forKey: StoredKey.serverBaseURL) ?? ""
+        let savedBaseURL = UserDefaults.standard.string(forKey: StoredKey.serverBaseURL) ?? ""
+        let initialBaseURL = savedBaseURL.isEmpty ? "https://metube.nas-server.co.uk" : savedBaseURL
         let initialToken = MPKeychainStore.load(account: StoredKey.apiToken) ?? ""
         serverBaseURL = initialBaseURL
         apiToken = initialToken
-        defaultFolder = UserDefaults.standard.string(forKey: StoredKey.defaultFolder) ?? "Media/YouTube"
+        defaultFolder = UserDefaults.standard.string(forKey: StoredKey.defaultFolder) ?? "Music-Videos"
 
         let shared = UserDefaults(suiteName: Self.appGroupID)
         sharedBaseURL = shared?.string(forKey: SharedKey.serverBaseURL) ?? initialBaseURL

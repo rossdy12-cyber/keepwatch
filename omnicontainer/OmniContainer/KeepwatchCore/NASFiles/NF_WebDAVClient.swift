@@ -28,14 +28,31 @@ struct NFWebDAVClient {
         self.settings = settings
     }
 
+    private func resolveURL(for path: String, baseURL: URL, isDirectory: Bool = false) -> URL? {
+        var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        let basePath = (comps?.path ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        let finalPath: String
+        if cleanPath.isEmpty {
+            finalPath = basePath.isEmpty ? "/" : "/\(basePath)/"
+        } else if !basePath.isEmpty && (cleanPath == basePath || cleanPath.hasPrefix(basePath + "/")) {
+            finalPath = "/" + cleanPath + (isDirectory && !cleanPath.hasSuffix("/") ? "/" : "")
+        } else if basePath.isEmpty {
+            finalPath = "/" + cleanPath + (isDirectory && !cleanPath.hasSuffix("/") ? "/" : "")
+        } else {
+            finalPath = "/\(basePath)/\(cleanPath)" + (isDirectory && !cleanPath.hasSuffix("/") ? "/" : "")
+        }
+        comps?.path = finalPath
+        return comps?.url
+    }
+
     func listDirectory(at path: String) async throws -> [NFRemoteFile] {
         guard settings.isConfigured, let baseURL = settings.serverProfile.normalizedBaseURL else {
             throw NFWebDAVError.notConfigured
         }
 
-        let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-
-        guard let url = URL(string: baseURL.absoluteString + encodedPath) else {
+        guard let url = resolveURL(for: path, baseURL: baseURL, isDirectory: true) else {
             throw NFWebDAVError.invalidURL
         }
 
@@ -60,7 +77,7 @@ struct NFWebDAVClient {
             throw NFWebDAVError.requestFailed(http.statusCode)
         }
 
-        return NFWebDAVResponseParser.parse(data: data, baseURL: baseURL, currentPath: path)
+        return NFWebDAVResponseParser.parse(data: data, baseURL: baseURL, currentPath: url.path)
     }
 
     func download(
@@ -71,9 +88,7 @@ struct NFWebDAVClient {
             throw NFWebDAVError.notConfigured
         }
 
-        let encodedPath = file.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.path
-
-        guard let url = URL(string: baseURL.absoluteString + encodedPath) else {
+        guard let url = resolveURL(for: file.path, baseURL: baseURL, isDirectory: false) else {
             throw NFWebDAVError.invalidURL
         }
 
@@ -136,12 +151,9 @@ struct NFWebDAVClient {
             throw NFWebDAVError.notConfigured
         }
 
-        let fileName = fileURL.lastPathComponent
-            .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? fileURL.lastPathComponent
-
-        let encodedDirectory = directory.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? directory
-
-        guard let url = URL(string: baseURL.absoluteString + encodedDirectory + "/" + fileName) else {
+        let dirClean = directory.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let combined = dirClean.isEmpty ? fileURL.lastPathComponent : "\(dirClean)/\(fileURL.lastPathComponent)"
+        guard let url = resolveURL(for: combined, baseURL: baseURL, isDirectory: false) else {
             throw NFWebDAVError.invalidURL
         }
 
@@ -177,9 +189,7 @@ struct NFWebDAVClient {
             throw NFWebDAVError.notConfigured
         }
 
-        let encodedPath = file.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.path
-
-        guard let url = URL(string: baseURL.absoluteString + encodedPath) else {
+        guard let url = resolveURL(for: file.path, baseURL: baseURL, isDirectory: file.isDirectory) else {
             throw NFWebDAVError.invalidURL
         }
 
@@ -207,12 +217,11 @@ struct NFWebDAVClient {
             throw NFWebDAVError.notConfigured
         }
 
-        let encodedSource = file.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.path
-        let encodedDirectory = directory.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? directory
-        let encodedName = newName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? newName
+        let dirClean = directory.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let destRel = dirClean.isEmpty ? newName : "\(dirClean)/\(newName)"
 
-        guard let source = URL(string: baseURL.absoluteString + encodedSource),
-              let destination = URL(string: baseURL.absoluteString + encodedDirectory + "/" + encodedName) else {
+        guard let source = resolveURL(for: file.path, baseURL: baseURL, isDirectory: file.isDirectory),
+              let destination = resolveURL(for: destRel, baseURL: baseURL, isDirectory: file.isDirectory) else {
             throw NFWebDAVError.invalidURL
         }
 

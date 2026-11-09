@@ -1156,8 +1156,12 @@ final class GlucoStore: NSObject, ObservableObject {
             centralManager = CBCentralManager(delegate: self, queue: Self.bleQueue)
         } else if centralManager?.state == .poweredOn {
             pollConnectedG7Peripherals()
+            let targetUUIDs: [CBUUID]? = showAllBLEDevices ? nil : [
+                Self.g7AdvServiceUUID, Self.g7CGMServiceUUID, Self.g7AltServiceUUID,
+                Self.tandemServiceUUID1, Self.tandemFullServiceUUID, Self.tandemTDUServiceUUID, Self.tandemServiceUUID2
+            ]
             centralManager?.scanForPeripherals(
-                withServices: nil,
+                withServices: targetUUIDs,
                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
             )
             if !bleScanning { bleScanning = true }
@@ -1728,8 +1732,12 @@ extension GlucoStore: CBCentralManagerDelegate, CBPeripheralDelegate {
             if isOn {
                 self.pollConnectedG7Peripherals()
                 if self.g7DirectBLEEnabled || self.bleScanning {
+                    let targetUUIDs: [CBUUID]? = self.showAllBLEDevices ? nil : [
+                        Self.g7AdvServiceUUID, Self.g7CGMServiceUUID, Self.g7AltServiceUUID,
+                        Self.tandemServiceUUID1, Self.tandemFullServiceUUID, Self.tandemTDUServiceUUID, Self.tandemServiceUUID2
+                    ]
                     central.scanForPeripherals(
-                        withServices: nil,
+                        withServices: targetUUIDs,
                         options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
                     )
                     if !self.bleScanning { self.bleScanning = true }

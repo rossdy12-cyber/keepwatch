@@ -65,6 +65,16 @@ struct MPMeTubeClient {
         return request
     }
 
+    static let defaultFormats: [MPMeTubeFormat] = [
+        MPMeTubeFormat(id: "best", title: "Best Available"),
+        MPMeTubeFormat(id: "2160", title: "2160p (4K)"),
+        MPMeTubeFormat(id: "1440", title: "1440p (2K)"),
+        MPMeTubeFormat(id: "1080", title: "1080p (Full HD)"),
+        MPMeTubeFormat(id: "720", title: "720p (HD)"),
+        MPMeTubeFormat(id: "480", title: "480p"),
+        MPMeTubeFormat(id: "audio", title: "Audio Only (MP3/FLAC)")
+    ]
+
     func fetchFormats() async throws -> [MPMeTubeFormat] {
         let request = try makeRequest(path: "/formats")
 
@@ -74,12 +84,17 @@ struct MPMeTubeClient {
             throw MPMeTubeError.invalidResponse
         }
 
+        // Standard MeTube (alexta69/metube) does not expose /formats and uses built-in quality levels
+        if http.statusCode == 404 {
+            return Self.defaultFormats
+        }
+
         guard (200..<300).contains(http.statusCode) else {
             throw MPMeTubeError.requestFailed(http.statusCode)
         }
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw MPMeTubeError.invalidResponse
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return Self.defaultFormats
         }
 
         var formats: [MPMeTubeFormat] = []
@@ -97,7 +112,7 @@ struct MPMeTubeClient {
             formats.append(MPMeTubeFormat(id: key, title: title))
         }
 
-        return formats.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        return formats.isEmpty ? Self.defaultFormats : formats.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     func addDownload(
@@ -106,12 +121,16 @@ struct MPMeTubeClient {
         quality: String,
         folder: String
     ) async throws {
+        let isAudio = (outputType == .audio || quality == "audio")
         let payload: [String: Any] = [
             "url": url,
-            "format": outputType == .audio ? "audio" : "video",
-            "quality": quality,
+            "download_type": isAudio ? "audio" : "video",
+            "format": isAudio ? "mp3" : "mp4",
+            "codec": "auto",
+            "quality": isAudio ? "best" : quality,
             "folder": folder,
-            "custom_name_prefix": ""
+            "custom_name_prefix": "",
+            "auto_start": true
         ]
 
         let body = try JSONSerialization.data(withJSONObject: payload)

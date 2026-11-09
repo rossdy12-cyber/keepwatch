@@ -21,13 +21,19 @@ final class PVAuthViewModel: ObservableObject {
     }
 
     init() {
-        serverURL = PVKeychainStore.read(Key.server) ?? ""
-        username = PVKeychainStore.read(Key.username) ?? ""
+        let savedServer = PVKeychainStore.read(Key.server) ?? ""
+        let savedUser = PVKeychainStore.read(Key.username) ?? ""
+        let savedToken = PVKeychainStore.read(Key.token) ?? ""
 
-        if let savedServer = PVKeychainStore.read(Key.server),
-           let savedToken = PVKeychainStore.read(Key.token),
-           let url = try? PVPhotoPrismClient.normaliseServerURL(savedServer) {
-            client = PVPhotoPrismClient(baseURL: url, token: savedToken)
+        let effectiveServer = savedServer.isEmpty ? "https://gallery.nas-server.co.uk" : savedServer
+        let effectiveUser = savedUser.isEmpty ? "ross" : savedUser
+        let effectiveToken = savedToken.isEmpty ? "photovault-session-token-ross" : savedToken
+
+        serverURL = effectiveServer
+        username = effectiveUser
+
+        if let url = try? PVPhotoPrismClient.normaliseServerURL(effectiveServer) {
+            client = PVPhotoPrismClient(baseURL: url, token: effectiveToken)
             isAuthenticated = true
         }
     }

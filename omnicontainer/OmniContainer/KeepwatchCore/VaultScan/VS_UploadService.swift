@@ -38,8 +38,26 @@ struct VSUploadService {
         }
 
         let remotePath = remotePath(for: document)
+        let baseStr = baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
-        guard let url = URL(string: baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + remotePath) else {
+        let credentials = "\(settings.username):\(settings.password)"
+        let encodedCredentials = Data(credentials.utf8).base64EncodedString()
+
+        // Ensure WebDAV parent directories exist via MKCOL before PUT
+        let segments = remotePath.split(separator: "/").dropLast()
+        var currentDir = baseStr
+        for seg in segments {
+            currentDir += "/\(seg)"
+            if let mkURL = URL(string: currentDir + "/") {
+                var mkReq = URLRequest(url: mkURL)
+                mkReq.httpMethod = "MKCOL"
+                mkReq.timeoutInterval = 15
+                mkReq.setValue("Basic \(encodedCredentials)", forHTTPHeaderField: "Authorization")
+                _ = try? await URLSession.shared.data(for: mkReq)
+            }
+        }
+
+        guard let url = URL(string: baseStr + "/" + remotePath) else {
             throw VSUploadError.invalidURL
         }
 
@@ -47,9 +65,6 @@ struct VSUploadService {
         request.httpMethod = "PUT"
         request.timeoutInterval = 120
         request.setValue("application/pdf", forHTTPHeaderField: "Content-Type")
-
-        let credentials = "\(settings.username):\(settings.password)"
-        let encodedCredentials = Data(credentials.utf8).base64EncodedString()
         request.setValue("Basic \(encodedCredentials)", forHTTPHeaderField: "Authorization")
 
         let delegate = VSUploadProgressDelegate(progress: progress)

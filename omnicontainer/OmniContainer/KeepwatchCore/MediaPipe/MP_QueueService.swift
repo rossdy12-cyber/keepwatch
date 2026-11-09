@@ -28,7 +28,7 @@ final class MPQueueService: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
 
     private let observedEvents: Set<String> = [
-        "added", "updated", "completed", "deleted", "queue",
+        "all", "added", "updated", "completed", "canceled", "deleted", "queue",
         "download-started", "download-progress", "download-finished",
         "download-error", "download-cancelled"
     ]
@@ -48,6 +48,10 @@ final class MPQueueService: ObservableObject {
               var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             lastError = "Add a valid MeTube server URL in Settings."
             return
+        }
+
+        Task { [weak self] in
+            await self?.fetchHistorySnapshot(baseURL: baseURL)
         }
 
         comps.scheme = (comps.scheme == "https") ? "wss" : "ws"
@@ -75,6 +79,26 @@ final class MPQueueService: ObservableObject {
         receiveTask = Task { [weak self] in
             await self?.listenLoop(task: task)
         }
+    }
+
+    private func fetchHistorySnapshot(baseURL: URL) async {
+        guard let historyURL = URL(string: baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/history") else {
+            return
+        }
+        var req = URLRequest(url: historyURL)
+        req.timeoutInterval = 15
+        if settings.serverProfile.usesToken, !settings.apiToken.isEmpty {
+            req.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        isConnected = true
+        lastError = nil
+        handle(event: "all", data: [json])
     }
 
     private func listenLoop(task: URLSessionWebSocketTask) async {
@@ -211,18 +235,36 @@ final class MPQueueService: ObservableObject {
     private func decodedPayloads(from data: [Any]) -> [[String: Any]] {
         var payloads: [[String: Any]] = []
 
-        for item in data {
+        func extract(from item: Any) {
+            if let str = item as? String,
+               let strData = str.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: strData) {
+                extract(from: parsed)
+                return
+            }
             if let dictionary = item as? [String: Any] {
-                payloads.append(dictionary)
-            } else if let array = item as? [[String: Any]] {
-                payloads.append(contentsOf: array)
-            } else if let array = item as? [Any] {
-                for nested in array {
-                    if let dictionary = nested as? [String: Any] {
-                        payloads.append(dictionary)
+                var foundBuckets = false
+                for bucket in ["queue", "pending", "done"] {
+                    if let arr = dictionary[bucket] as? [[String: Any]] {
+                        payloads.append(contentsOf: arr)
+                        foundBuckets = true
+                    } else if let dictBucket = dictionary[bucket] as? [String: [String: Any]] {
+                        payloads.append(contentsOf: dictBucket.values)
+                        foundBuckets = true
                     }
                 }
+                if !foundBuckets {
+                    payloads.append(dictionary)
+                }
+            } else if let array = item as? [Any] {
+                for nested in array {
+                    extract(from: nested)
+                }
             }
+        }
+
+        for item in data {
+            extract(from: item)
         }
 
         return payloads
@@ -261,11 +303,27 @@ final class MPQueueService: ObservableObject {
     }
 
     private func uuid(from payload: [String: Any]) -> UUID? {
-        guard let raw = string(from: payload, keys: ["id", "uid", "uuid", "download_id"]) else {
+        guard let raw = string(from: payload, keys: ["id", "uid", "uuid", "download_id", "url"]) else {
             return nil
         }
 
-        return UUID(uuidString: raw)
+        if let u = UUID(uuidString: raw) {
+            return u
+        }
+
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let utf8 = Array(raw.utf8)
+        for (i, b) in utf8.enumerated() {
+            bytes[i % 16] = bytes[i % 16] &+ b &+ UInt8((i &* 31) & 0xFF)
+        }
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     private func string(from payload: [String: Any], keys: [String]) -> String? {
