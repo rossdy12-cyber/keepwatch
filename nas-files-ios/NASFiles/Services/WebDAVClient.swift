@@ -153,7 +153,7 @@ struct WebDAVClient {
         let encoded = Data(credentials.utf8).base64EncodedString()
         request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
 
-        let (_, response) = try await URLSession.shared.upload(for: request, from: fileURL)
+        let (_, response) = try await URLSession.shared.upload(for: request, fromFile: fileURL)
 
         guard let http = response as? HTTPURLResponse else {
             throw WebDAVError.invalidResponse
@@ -165,11 +165,11 @@ struct WebDAVClient {
     }
 
     func rename(_ file: RemoteFile, to newName: String) async throws {
-        try move(file, to: parentDirectory(of: file), newName: newName)
+        try await move(file, to: parentDirectory(of: file), newName: newName)
     }
 
     func move(_ file: RemoteFile, to directory: String) async throws {
-        try move(file, to: directory, newName: file.name)
+        try await move(file, to: directory, newName: file.name)
     }
 
     func delete(_ file: RemoteFile) async throws {

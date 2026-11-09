@@ -25,10 +25,12 @@ struct SettingsView: View {
                     SecureField("Password", text: $settings.password)
                 }
 
-                Section("Root folder") {
+                Section {
                     TextField("/Documents", text: $settings.rootPath)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                } header: {
+                    Text("Root folder")
                 } footer: {
                     Text("Use a WebDAV path such as /Documents or /Media. Leave blank to start at the WebDAV root.")
                 }

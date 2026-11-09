@@ -8,11 +8,11 @@ struct UploadPreferences {
 
     var wifiOnly: Bool {
         get { UserDefaults.standard.bool(forKey: Key.wifiOnly) }
-        set { UserDefaults.standard.set(newValue, forKey: Key.wifiOnly) }
+        nonmutating set { UserDefaults.standard.set(newValue, forKey: Key.wifiOnly) }
     }
 
     var notificationsEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: Key.notificationsEnabled) }
-        set { UserDefaults.standard.set(newValue, forKey: Key.notificationsEnabled) }
+        nonmutating set { UserDefaults.standard.set(newValue, forKey: Key.notificationsEnabled) }
     }
 }

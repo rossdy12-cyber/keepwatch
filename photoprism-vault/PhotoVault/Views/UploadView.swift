@@ -13,7 +13,7 @@ struct UploadView: View {
         NavigationStack {
             List {
                 Section {
-                    PhotosPicker(selection: $pickerItems, matching: .any(of: [.images, .videos]), allowsMultipleSelection: true) {
+                    PhotosPicker(selection: $pickerItems, matching: .any(of: [.images, .videos])) {
                         Label("Choose photos or videos", systemImage: "photo.badge.plus")
                     }
                 }

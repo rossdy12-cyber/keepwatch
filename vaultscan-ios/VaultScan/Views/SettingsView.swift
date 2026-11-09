@@ -28,17 +28,21 @@ struct SettingsView: View {
                     SecureField("Password", text: $settings.password)
                 }
 
-                Section("Remote folder") {
+                Section {
                     TextField("Documents", text: $settings.remoteFolder)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                } header: {
+                    Text("Remote folder")
                 } footer: {
                     Text("Uploads are placed in <remote folder>/<year>/<month>/<day>/<filename>.pdf.")
                 }
 
-                Section("Uploads") {
+                Section {
                     Toggle("Wi-Fi only", isOn: $wifiOnly)
                     Toggle("Upload notifications", isOn: $notificationsEnabled)
+                } header: {
+                    Text("Uploads")
                 } footer: {
                     Text("Wi-Fi only prevents uploads over cellular data. Notifications report completed and failed uploads.")
                 }

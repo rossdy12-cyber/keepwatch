@@ -18,7 +18,7 @@ final class ShareViewController: SLComposeServiceViewController {
 
     override func didSelectPost() {
         guard let url = extractedURL() else {
-            completeRequest(returningItems: [], completionHandler: nil)
+            extensionContext?.completeRequest(returningItems: nil, completionHandler: nil)
             return
         }
 
@@ -90,7 +90,7 @@ final class ShareViewController: SLComposeServiceViewController {
         )
 
         alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
-            self?.completeRequest(returningItems: [], completionHandler: nil)
+            self?.extensionContext?.completeRequest(returningItems: nil, completionHandler: nil)
         })
 
         present(alert, animated: true)
