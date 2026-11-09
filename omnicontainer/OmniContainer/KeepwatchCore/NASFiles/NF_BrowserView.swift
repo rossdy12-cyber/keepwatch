@@ -24,6 +24,8 @@ struct NFBrowserView: View {
     }
 
     @State private var currentPath = "/"
+    @State private var pathStack: [String] = []
+    @State private var hasLoaded = false
     @State private var files: [NFRemoteFile] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
@@ -37,114 +39,227 @@ struct NFBrowserView: View {
     @State private var destinationPath = "/"
 
     private var sortedFiles: [NFRemoteFile] {
+        let base: [NFRemoteFile]
         switch sortOption {
         case .name:
-            return files.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            base = files.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         case .date:
-            return files.sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
+            base = files.sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
         case .size:
-            return files.sorted { $0.size > $1.size }
+            base = files.sorted { $0.size > $1.size }
         case .type:
-            return files.sorted { $0.fileExtension < $1.fileExtension }
+            base = files.sorted { $0.fileExtension < $1.fileExtension }
         }
+        return base.sorted {
+            if $0.isDirectory != $1.isDirectory {
+                return $0.isDirectory
+            }
+            return false
+        }
+    }
+
+    private var isAtRoot: Bool {
+        let normCurrent = currentPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let normRoot = settings.rootDirectory.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return normCurrent == normRoot && pathStack.isEmpty
+    }
+
+    private var breadcrumbs: [(title: String, path: String)] {
+        let clean = currentPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !clean.isEmpty else {
+            return [("TrueNAS", "/")]
+        }
+        var items: [(String, String)] = [("TrueNAS", "/")]
+        var running = ""
+        for part in clean.split(separator: "/").map(String.init) {
+            running += "/\(part)"
+            items.append((part, running + "/"))
+        }
+        return items
     }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if !settings.isConfigured {
-                    ContentUnavailableView(
-                        "WebDAV not configured",
-                        systemImage: "server.rack",
-                        description: Text("Add your TrueNAS WebDAV server details in Settings.")
-                    )
-                } else if isLoading {
-                    ProgressView("Loading files…")
-                } else if let errorMessage {
-                    ContentUnavailableView(
-                        "Unable to load files",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(errorMessage)
-                    )
-                } else if isGrid {
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 12)], spacing: 12) {
-                            ForEach(sortedFiles) { file in
-                                NFFileCell(file: file)
-                                    .onTapGesture {
-                                        if file.isDirectory {
-                                            Task { await navigate(to: file.path) }
-                                        } else {
-                                            selectedFile = file
-                                        }
+            VStack(spacing: 0) {
+                if settings.isConfigured && (!isAtRoot || breadcrumbs.count > 1) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            if !isAtRoot {
+                                Button {
+                                    goBack()
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "chevron.left")
+                                        Text("Back")
                                     }
-                                    .contextMenu { contextMenu(for: file) }
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                }
+                            }
+
+                            ForEach(Array(breadcrumbs.enumerated()), id: \.offset) { idx, crumb in
+                                if idx > 0 {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Button {
+                                    jumpToBreadcrumb(crumb.path, index: idx)
+                                } label: {
+                                    Text(crumb.title)
+                                        .font(.caption.weight(idx == breadcrumbs.count - 1 ? .bold : .regular))
+                                        .foregroundStyle(idx == breadcrumbs.count - 1 ? .primary : .secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 4)
+                                }
                             }
                         }
-                        .padding()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                     }
-                } else {
-                    List(sortedFiles) { file in
-                        if file.isDirectory {
-                            NavigationLink(value: file.path) {
-                                NFFileRow(file: file)
+                    .background(.bar)
+                    Divider()
+                }
+
+                Group {
+                    if !settings.isConfigured {
+                        ContentUnavailableView(
+                            "WebDAV not configured",
+                            systemImage: "server.rack",
+                            description: Text("Add your TrueNAS WebDAV server details in Settings.")
+                        )
+                    } else if isLoading {
+                        VStack(spacing: 12) {
+                            Spacer()
+                            ProgressView("Loading files…")
+                            Spacer()
+                        }
+                    } else if let errorMessage {
+                        ContentUnavailableView {
+                            Label("Unable to load files", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text(errorMessage)
+                        } actions: {
+                            Button("Retry") {
+                                Task { await load() }
                             }
-                            .contextMenu { contextMenu(for: file) }
-                        } else {
+                            .buttonStyle(.borderedProminent)
+                        }
+                    } else if sortedFiles.isEmpty {
+                        ContentUnavailableView(
+                            "Folder is empty",
+                            systemImage: "folder",
+                            description: Text(currentPath)
+                        )
+                    } else if isGrid {
+                        ScrollView {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 12)], spacing: 12) {
+                                ForEach(sortedFiles) { file in
+                                    NFFileCell(file: file)
+                                        .onTapGesture {
+                                            if file.isDirectory {
+                                                openFolder(file.path)
+                                            } else {
+                                                selectedFile = file
+                                            }
+                                        }
+                                        .contextMenu { contextMenu(for: file) }
+                                }
+                            }
+                            .padding()
+                        }
+                    } else {
+                        List(sortedFiles) { file in
                             Button {
-                                selectedFile = file
+                                if file.isDirectory {
+                                    openFolder(file.path)
+                                } else {
+                                    selectedFile = file
+                                }
                             } label: {
-                                NFFileRow(file: file)
+                                HStack {
+                                    NFFileRow(file: file)
+                                    if file.isDirectory {
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
                             .contextMenu { contextMenu(for: file) }
                         }
-                    }
-                    .navigationDestination(for: String.self) { path in
-                        NFBrowserView(initialPath: path)
                     }
                 }
             }
-            .navigationTitle(currentPath == settings.rootDirectory ? "Files" : (currentPath as NSString).lastPathComponent)
+            .navigationTitle(isAtRoot ? "Files" : (currentPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")) as NSString).lastPathComponent)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Menu {
-                        Picker("Sort by", selection: $sortOption) {
-                            ForEach(SortOption.allCases) { option in
-                                Text(option.title).tag(option)
+                    HStack(spacing: 12) {
+                        if !isAtRoot {
+                            Button {
+                                goBack()
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "chevron.left")
+                                    Text("Back")
+                                }
                             }
                         }
 
-                        Button {
-                            isGrid.toggle()
+                        Menu {
+                            Picker("Sort by", selection: $sortOption) {
+                                ForEach(SortOption.allCases) { option in
+                                    Text(option.title).tag(option)
+                                }
+                            }
+
+                            Button {
+                                isGrid.toggle()
+                            } label: {
+                                Label(
+                                    isGrid ? "List view" : "Grid view",
+                                    systemImage: isGrid ? "list.bullet" : "square.grid.2x2"
+                                )
+                            }
                         } label: {
-                            Label(
-                                isGrid ? "List view" : "Grid view",
-                                systemImage: isGrid ? "list.bullet" : "square.grid.2x2"
-                            )
+                            Image(systemName: "line.3.horizontal.decrease.circle")
                         }
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
                     }
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showImporter = true
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
+                    HStack(spacing: 12) {
+                        Button {
+                            Task { await load() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .disabled(!settings.isConfigured || isLoading)
+
+                        Button {
+                            showImporter = true
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                        .disabled(!settings.isConfigured)
                     }
-                    .disabled(!settings.isConfigured)
                 }
             }
             .refreshable {
                 await load()
             }
             .onAppear {
-                if currentPath == "/" {
-                    currentPath = settings.rootDirectory
+                if !hasLoaded {
+                    hasLoaded = true
+                    if currentPath == "/" {
+                        currentPath = settings.rootDirectory
+                    }
+                    Task { await load() }
                 }
-
-                Task { await load() }
             }
             .sheet(item: $selectedFile) { file in
                 NFFilePreviewView(file: file)
@@ -195,6 +310,36 @@ struct NFBrowserView: View {
         _currentPath = State(initialValue: initialPath ?? "/")
     }
 
+    private func openFolder(_ targetPath: String) {
+        pathStack.append(currentPath)
+        currentPath = targetPath
+        Task { await load() }
+    }
+
+    private func goBack() {
+        if let previous = pathStack.popLast() {
+            currentPath = previous
+        } else {
+            let trimmed = currentPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let parent = (trimmed as NSString).deletingLastPathComponent
+            currentPath = parent.isEmpty ? settings.rootDirectory : "/\(parent)/"
+        }
+        Task { await load() }
+    }
+
+    private func jumpToBreadcrumb(_ path: String, index: Int) {
+        if index == 0 {
+            pathStack.removeAll()
+            currentPath = settings.rootDirectory
+        } else {
+            if index < pathStack.count {
+                pathStack = Array(pathStack.prefix(index))
+            }
+            currentPath = path
+        }
+        Task { await load() }
+    }
+
     @ViewBuilder
     private func contextMenu(for file: NFRemoteFile) -> some View {
         Button {
@@ -235,11 +380,6 @@ struct NFBrowserView: View {
         } label: {
             Label("Delete", systemImage: "trash")
         }
-    }
-
-    private func navigate(to path: String) async {
-        currentPath = path
-        await load()
     }
 
     private func load() async {

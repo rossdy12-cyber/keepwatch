@@ -6,6 +6,7 @@ struct VSDocumentListView: View {
     @EnvironmentObject private var uploadQueue: VSUploadQueueService
 
     @State private var searchText = ""
+    @State private var showNewScan = false
 
     private var filteredDocuments: [VSScannedDocument] {
         guard !searchText.isEmpty else {
@@ -34,15 +35,18 @@ struct VSDocumentListView: View {
                             VSDocumentRow(document: document)
                         }
                     }
-                    .navigationDestination(for: UUID.self) { documentID in
-                        if let document = documentStore.documents.first(where: { $0.id == documentID }) {
-                            VSDocumentDetailView(document: document)
-                        }
-                    }
+                }
+            }
+            .navigationDestination(for: UUID.self) { documentID in
+                if let document = documentStore.documents.first(where: { $0.id == documentID }) {
+                    VSDocumentDetailView(document: document)
                 }
             }
             .searchable(text: $searchText, prompt: "Search title, OCR text, supplier, tags, or notes")
             .navigationTitle("VaultScan")
+            .sheet(isPresented: $showNewScan) {
+                VSScanView()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
@@ -61,8 +65,8 @@ struct VSDocumentListView: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        NavigationLink {
-                            VSScanView()
+                        Button {
+                            showNewScan = true
                         } label: {
                             Label("New scan", systemImage: "plus")
                         }
