@@ -119,6 +119,7 @@ enum IPAArchiveExtractor {
             if searchStr.contains("vaultscan") { return ("vaultscan", "") }
             if searchStr.contains("mediapipe") { return ("mediapipe", "") }
             if searchStr.contains("photovault") || searchStr.contains("photoprism") { return ("photovault", "") }
+            if searchStr.contains("retrodeck") { return ("retrodeck", "") }
             if searchStr.contains("twitch") { return ("ipa-\(extractedBundleID)", "https://m.twitch.tv") }
             if searchStr.contains("spotify") { return ("ipa-\(extractedBundleID)", "https://open.spotify.com") }
             if searchStr.contains("discord") { return ("ipa-\(extractedBundleID)", "https://discord.com/app") }
@@ -507,7 +508,8 @@ class OmniWorkspaceStore: ObservableObject {
         OmniAppDescriptor(id: "nasfiles", title: "NAS Files", subtitle: "WebDAV Browser & Offline Cache", icon: "externaldrive.fill.badge.icloud", color: .blue, sym: "NF", rgb: (0.0, 0.48, 1.0)),
         OmniAppDescriptor(id: "vaultscan", title: "VaultScan", subtitle: "Document Scanner, OCR & PDF", icon: "doc.text.viewfinder", color: .teal, sym: "VS", rgb: (0.19, 0.69, 0.78)),
         OmniAppDescriptor(id: "mediapipe", title: "MediaPipe", subtitle: "MeTube Queue & Socket Live", icon: "arrow.down.circle.fill", color: .red, sym: "MP", rgb: (1.0, 0.23, 0.19)),
-        OmniAppDescriptor(id: "photovault", title: "PhotoVault", subtitle: "PhotoPrism FaceID Vault", icon: "lock.rectangle.on.rectangle.fill", color: .pink, sym: "PV", rgb: (1.0, 0.18, 0.33))
+        OmniAppDescriptor(id: "photovault", title: "PhotoVault", subtitle: "PhotoPrism FaceID Vault", icon: "lock.rectangle.on.rectangle.fill", color: .pink, sym: "PV", rgb: (1.0, 0.18, 0.33)),
+        OmniAppDescriptor(id: "retrodeck", title: "RetroDeck", subtitle: "ROM Library & Backbone USB-C", icon: "gamecontroller.fill", color: .orange, sym: "RD", rgb: (1.0, 0.58, 0.0))
     ]
 
     @Published var runningAppIDs: [String] = ["glucopulse"]
@@ -515,7 +517,7 @@ class OmniWorkspaceStore: ObservableObject {
     @Published var splitScreenEnabled: Bool = false
     @Published var secondaryAppID: String = "sentrycam"
     @Published var installedIPAs: [InstalledIPAPackage] = []
-    @Published var statusBanner: String = "24/7 In-Memory Host · GlucoPulse G7 BLE + 20 Integrated Apps!"
+    @Published var statusBanner: String = "24/7 In-Memory Host · GlucoPulse G7 BLE + 21 Integrated Apps!"
     @Published var truenasHost: String = "100.85.127.42"
     @Published var routeLabel: String = "Tailscale"
     @Published var floatingMiniAniimo: Bool = false {
@@ -1248,7 +1250,7 @@ struct OmniSpringBoardView: View {
                 }
 
                 HStack {
-                    Text("All 20 Integrated Apps (Zero-Close Multitasking)")
+                    Text("All 21 Integrated Apps (Zero-Close Multitasking)")
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                     Spacer()
@@ -1382,6 +1384,8 @@ struct EmbeddedLiveAppHost: View {
             MediaPipeEmbeddedHostView()
         case "photovault":
             PhotoVaultEmbeddedHostView()
+        case "retrodeck":
+            RetroDeckEmbeddedHostView()
         default:
             if let pkg = workspace.installedIPAs.first(where: { $0.mappedModuleID == appID }), !pkg.runtimeURL.isEmpty {
                 FastCachedWebView(cacheKey: appID, urlString: pkg.runtimeURL, enableYouTubePro: true)
