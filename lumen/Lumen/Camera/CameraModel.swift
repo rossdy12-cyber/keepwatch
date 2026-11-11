@@ -851,6 +851,33 @@ final class CameraModel: NSObject, ObservableObject {
     /// Zoom as people think of it (0.5×, 1×, 2×…), whichever lens is in use.
     var effectiveZoom: Double { lensBase * Double(zoom) }
 
+    // MARK: Depth-of-field inputs (for the Pro Focus guide)
+
+    /// Live 35mm-equivalent focal length of the taking lens, including digital zoom.
+    var focalLength35: Double {
+        guard let device else { return 26 }
+        let fov = Double(device.activeFormat.videoFieldOfView)   // horizontal, degrees
+        guard fov > 1 else { return 26 * Double(zoom) }
+        let base = 36.0 / (2 * tan(fov * .pi / 180 / 2))         // full-frame-equivalent focal length at 1× digital zoom
+        return base * Double(zoom)
+    }
+
+    /// The fixed aperture of the current iPhone lens (approximate, by lens type).
+    var apertureF: Double {
+        guard let type = device?.deviceType else { return 1.78 }
+        if type == .builtInUltraWideCamera { return 2.2 }
+        if type == .builtInTelephotoCamera { return 2.8 }
+        return device?.position == .front ? 1.9 : 1.78
+    }
+
+    /// Sensor crop factor relative to full-frame, for a realistic depth-of-field estimate.
+    var sensorCrop: Double {
+        guard let type = device?.deviceType else { return 3.8 }
+        if type == .builtInUltraWideCamera { return 4.0 }
+        if type == .builtInTelephotoCamera { return 3.4 }
+        return 3.8
+    }
+
     func setEffectiveZoom(_ value: Double) {
         setZoom(CGFloat(value / max(lensBase, 0.01)))
     }

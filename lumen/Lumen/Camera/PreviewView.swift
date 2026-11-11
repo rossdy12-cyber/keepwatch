@@ -141,6 +141,23 @@ struct GridOverlay: View {
                 case .golden:
                     let phi: CGFloat = 0.382
                     vertical(w * phi); vertical(w * (1 - phi)); horizontal(h * phi); horizontal(h * (1 - phi))
+                case .spiral:
+                    // A golden (logarithmic) spiral: radius grows by φ every quarter turn. Its eye sits on a
+                    // golden-ratio point, the classic "lead the eye into the subject" composition guide.
+                    let phi: CGFloat = 1.6180339887
+                    let b = log(phi) / (.pi / 2)
+                    let eye = CGPoint(x: w * 0.382, y: h * 0.382)
+                    let maxReach = max(w, h)
+                    let thetaMax: CGFloat = 4.5 * .pi
+                    let a = maxReach / exp(b * thetaMax)
+                    var theta: CGFloat = 0
+                    var started = false
+                    while theta <= thetaMax {
+                        let r = a * exp(b * theta)
+                        let p = CGPoint(x: eye.x + r * cos(theta), y: eye.y - r * sin(theta))
+                        if started { path.addLine(to: p) } else { path.move(to: p); started = true }
+                        theta += 0.08
+                    }
                 case .square:
                     let step = w / 4
                     var x = step

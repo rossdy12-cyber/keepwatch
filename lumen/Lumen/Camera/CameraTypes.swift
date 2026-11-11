@@ -46,7 +46,7 @@ enum LongExposureStyle: String, CaseIterable, Identifiable, Codable {
 }
 
 enum GridStyle: String, CaseIterable, Identifiable, Codable {
-    case off = "Off", thirds = "Thirds", golden = "Golden ratio", square = "Square", crosshair = "Centre cross"
+    case off = "Off", thirds = "Thirds", golden = "Golden ratio", spiral = "Golden spiral", square = "Square", crosshair = "Centre cross"
     var id: String { rawValue }
 }
 

@@ -18,6 +18,8 @@ struct CameraView: View {
     @AppStorage("lumen.gridStyle") private var gridStyle: GridStyle = .thirds
     @AppStorage("lumen.histogram") private var showHistogram = true
     @AppStorage("lumen.level") private var showLevel = true
+    @AppStorage("lumen.dofGuide") private var showDoF = false
+    @AppStorage("lumen.dofDistance") private var dofDistance = 2.0
     @AppStorage("lumen.hardwareShutter") private var hardwareShutter = true
     @State private var timer = 0
     @State private var countdown: Int?
@@ -249,6 +251,9 @@ struct CameraView: View {
                     .background(Color.black.opacity(0.6), in: Capsule())
                     .onTapGesture { camera.message = nil }
             }
+            if showDoF {
+                DoFGuideView(camera: camera, distance: $dofDistance)
+            }
             HStack(alignment: .bottom) {
                 presetButtons
                 Spacer()
@@ -452,6 +457,7 @@ struct CameraView: View {
             }
             Toggle("Level", isOn: $showLevel)
             Toggle("Histogram", isOn: $showHistogram)
+            Toggle("Depth-of-field guide", isOn: $showDoF)
             Picker("Scope", selection: $camera.scopeStyle) {
                 ForEach(ScopeStyle.allCases) { Text($0.rawValue).tag($0) }
             }

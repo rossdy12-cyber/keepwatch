@@ -5,7 +5,7 @@ set -uo pipefail
 
 STORE_URL="https://navidrome.nas-server.co.uk"
 TOKEN="ss-deploy-9f8e7d6c5b4a3f2e1d0c"
-VERSION="1.1.0"
+VERSION="1.2.0"
 BUNDLE_ID="app.lumen.camera"
 
 cd "$(dirname "$0")"   # -> lumen/
