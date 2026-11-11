@@ -28,8 +28,18 @@ struct SettingsView: View {
                     field("Relay URL", text: $store.relayURL, placeholder: "jarvis.nas-server.co.uk")
                     field("Token (optional)", text: $store.relayToken)
                     field("Your name", text: $store.displayName)
-                    field("Room", text: $store.chatRoom)
-                    note("Self-hosted chat runs on jarvis-core. Everyone in the same room + relay sees the thread.")
+                    field("Their name", text: $store.partnerName, placeholder: "Lauren")
+                    HStack(alignment: .bottom, spacing: 8) {
+                        field("Private room id", text: $store.chatRoom)
+                        Button {
+                            store.chatRoom = "room-" + UUID().uuidString.prefix(8).lowercased()
+                        } label: {
+                            Image(systemName: "dice").padding(10)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(theme.accentColor.opacity(0.2)))
+                                .foregroundStyle(theme.accentColor)
+                        }
+                    }
+                    note("A private 1:1 room: you and the other person set the same Relay URL, token and room id, with different names. Tap the dice to make a hard-to-guess room, then share it with them.")
                 }
 
                 section("About") {

@@ -42,14 +42,25 @@ services:
       FRIGATE_URL: ""
       FRIGATE_USER: ""
       FRIGATE_PASS: ""
+      # --- Nocturne chat notifications (optional) ---
+      # When NTFY_SERVER is set, a new chat message also fires an ntfy push that deep-links into Nocturne.
+      # Subscribe the ntfy app (iPhone + Windows) to the topic "<prefix>-<room>", e.g. nocturne-ross-lauren.
+      NTFY_SERVER: ""           # e.g. https://ntfy.nas-server.co.uk  (empty = notifications off)
+      NTFY_TOPIC_PREFIX: "nocturne"
+      NTFY_TOKEN: ""            # only if your ntfy server needs auth
+      # --- Nocturne video calls (optional) ---
+      # Public STUN is used automatically. Add your homelab coturn here for calls across different networks.
+      TURN_URL: ""              # e.g. turn:turn.nas-server.co.uk:3478
+      TURN_USER: ""
+      TURN_PASS: ""
       TZ: Europe/London
     command:
       - sh
       - -c
       - >-
-        ([ -f /data/venv/.ready-1 ] || (python -m venv /data/venv
-        && /data/venv/bin/pip install -q --no-cache-dir "fastapi==0.115.6" "uvicorn==0.34.0"
-        && touch /data/venv/.ready-1))
+        ([ -f /data/venv/.ready-2 ] || (python -m venv /data/venv
+        && /data/venv/bin/pip install -q --no-cache-dir "fastapi==0.115.6" "uvicorn[standard]==0.34.0"
+        && touch /data/venv/.ready-2))
         && exec /data/venv/bin/python -u /app/core.py
 
 volumes:
@@ -84,12 +95,13 @@ configs:
       import threading
       import time
       import urllib.error
+      import urllib.parse
       import urllib.request
 
       from typing import List, Optional
 
-      from fastapi import FastAPI, HTTPException, Request
-      from fastapi.responses import JSONResponse
+      from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+      from fastapi.responses import HTMLResponse, JSONResponse
       from pydantic import BaseModel
 
       # ---------------------------------------------------------------------------------------------- config
@@ -123,6 +135,17 @@ configs:
       FRIGATE_URL = os.environ.get("FRIGATE_URL", "").rstrip("/")
       FRIGATE_USER = os.environ.get("FRIGATE_USER", "").strip()
       FRIGATE_PASS = os.environ.get("FRIGATE_PASS", "")
+
+      # Chat relay notifications: when set, a new Nocturne message also fires an ntfy push (tapping it deep-links
+      # into the app). Empty NTFY_SERVER = disabled (unchanged behaviour).
+      NTFY_SERVER = os.environ.get("NTFY_SERVER", "").rstrip("/")        # e.g. https://ntfy.nas-server.co.uk
+      NTFY_TOPIC_PREFIX = os.environ.get("NTFY_TOPIC_PREFIX", "nocturne").strip() or "nocturne"
+      NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "").strip()
+
+      # Video-call ICE servers for the /call page. STUN is free/public; add your homelab coturn for reliability.
+      TURN_URL = os.environ.get("TURN_URL", "").strip()                 # e.g. turn:turn.nas-server.co.uk:3478
+      TURN_USER = os.environ.get("TURN_USER", "").strip()
+      TURN_PASS = os.environ.get("TURN_PASS", "").strip()
 
       USER_AGENT = "JarvisCore/1.0"
 
@@ -699,6 +722,58 @@ configs:
           text: str
 
 
+      class SeenIn(BaseModel):
+          room: Optional[str] = "home"
+          who: Optional[str] = "Someone"
+
+
+      # Last-seen per (room, who) for a light presence indicator. In-memory; resets on restart.
+      PRESENCE = {}
+
+
+      def _ascii_header(value):
+          """ntfy header values must be ASCII; keep it readable."""
+          return (value or "").encode("ascii", "replace").decode("ascii")
+
+
+      def _ntfy_topic(room):
+          safe = re.sub(r"[^A-Za-z0-9_-]", "", room or "")[:48] or "room"
+          return "%s-%s" % (NTFY_TOPIC_PREFIX, safe)
+
+
+      def _ntfy_post(room, title, body, click, tags, priority=None):
+          if not NTFY_SERVER:
+              return
+          try:
+              headers = {
+                  "Title": _ascii_header(title)[:100] or "Nocturne",
+                  "Tags": tags,
+                  "Click": click,
+                  "User-Agent": USER_AGENT,
+              }
+              if priority:
+                  headers["Priority"] = priority
+              if NTFY_TOKEN:
+                  headers["Authorization"] = "Bearer " + NTFY_TOKEN
+              req = urllib.request.Request("%s/%s" % (NTFY_SERVER, _ntfy_topic(room)),
+                                           data=(body or "")[:300].encode("utf-8"), headers=headers, method="POST")
+              with urllib.request.urlopen(req, timeout=8) as response:
+                  response.read()
+          except Exception as error:
+              log("ntfy post failed: %s" % error)
+
+
+      def notify_ntfy(room, sender, text):
+          """Fire-and-forget ntfy push for a new chat message. No-op unless NTFY_SERVER is set."""
+          _ntfy_post(room, sender, text, "nocturne://chat/%s" % urllib.parse.quote(room or "home"), "speech_balloon")
+
+
+      def notify_ntfy_call(room, caller):
+          """Ring the other device: a high-priority ntfy whose tap opens the in-app call."""
+          _ntfy_post(room, "%s is calling" % (caller or "Someone"), "Incoming video call",
+                     "nocturne://call/%s" % urllib.parse.quote(room or "home"), "telephone_receiver", priority="max")
+
+
       @app.post("/api/relay/send")
       def relay_send(body: RelayIn, request: Request):
           """Self-hosted chat relay for the Nocturne Messages app (not iMessage/SMS)."""
@@ -706,12 +781,16 @@ configs:
           text = (body.text or "").strip()
           if not text:
               raise HTTPException(status_code=400, detail="Empty message")
+          room = (body.room or "home")[:64]
+          sender = (body.sender or "Someone")[:64]
           now = time.time()
           with db_lock:
               cur = db.execute("INSERT INTO relay_messages (room, sender, text, ts) VALUES (?, ?, ?, ?)",
-                               ((body.room or "home")[:64], (body.sender or "Someone")[:64], text[:4000], now))
+                               (room, sender, text[:4000], now))
               db.commit()
               mid = cur.lastrowid
+          # Push a notification to the other device without blocking the sender's request.
+          threading.Thread(target=notify_ntfy, args=(room, sender, text), daemon=True).start()
           return {"id": mid, "ts": now}
 
 
@@ -728,6 +807,220 @@ configs:
                   "SELECT id, sender, text, ts FROM relay_messages WHERE room = ? AND id > ? ORDER BY id ASC LIMIT 200",
                   (room, since_id)).fetchall()
           return [{"id": r["id"], "sender": r["sender"], "text": r["text"], "ts": r["ts"]} for r in rows]
+
+
+      @app.post("/api/relay/seen")
+      def relay_seen(body: SeenIn, request: Request):
+          check_auth(request)
+          PRESENCE[((body.room or "home")[:64], (body.who or "Someone")[:64])] = time.time()
+          return {"ok": True}
+
+
+      @app.get("/api/relay/presence")
+      def relay_presence(request: Request):
+          check_auth(request)
+          room = request.query_params.get("room", "home")
+          now = time.time()
+          return [{"who": who, "ts": ts, "ago": round(now - ts)}
+                  for (r, who), ts in PRESENCE.items() if r == room]
+
+
+      # ------------------------------------------------------------------------------------ video call (WebRTC)
+
+      # Open signalling sockets per call room. Peers in a room relay offer/answer/ICE to each other.
+      CALL_ROOMS = {}
+
+
+      class RingIn(BaseModel):
+          room: Optional[str] = "home"
+          caller: Optional[str] = "Someone"
+
+
+      @app.post("/api/call/ring")
+      def call_ring(body: RingIn, request: Request):
+          """Notifies the other person that a video call is starting (ntfy → nocturne://call/<room>)."""
+          check_auth(request)
+          room = (body.room or "home")[:64]
+          caller = (body.caller or "Someone")[:64]
+          threading.Thread(target=notify_ntfy_call, args=(room, caller), daemon=True).start()
+          return {"ok": True}
+
+
+      @app.get("/call/config")
+      def call_config():
+          """ICE servers for the call page: public STUN plus the homelab TURN if configured."""
+          ice = [{"urls": "stun:stun.l.google.com:19302"}]
+          if TURN_URL:
+              ice.append({"urls": TURN_URL, "username": TURN_USER, "credential": TURN_PASS})
+          return {"iceServers": ice}
+
+
+      @app.websocket("/api/call/ws")
+      async def call_ws(ws: WebSocket):
+          """Relays WebRTC signalling text frames to the other peer(s) in the same call room."""
+          room = ws.query_params.get("room", "")
+          token = ws.query_params.get("token", "")
+          if AUTH_TOKEN and token != AUTH_TOKEN:
+              await ws.close(code=1008)
+              return
+          if not room:
+              await ws.close(code=1008)
+              return
+          await ws.accept()
+          peers = CALL_ROOMS.setdefault(room, set())
+          peers.add(ws)
+          try:
+              while True:
+                  message = await ws.receive_text()
+                  for peer in list(peers):
+                      if peer is not ws:
+                          try:
+                              await peer.send_text(message)
+                          except Exception:
+                              pass
+          except WebSocketDisconnect:
+              pass
+          except Exception as error:
+              log("call ws error: %s" % error)
+          finally:
+              peers.discard(ws)
+              if not peers:
+                  CALL_ROOMS.pop(room, None)
+
+
+      @app.get("/call")
+      def call_page():
+          return HTMLResponse(CALL_HTML)
+
+
+      CALL_HTML = r"""<!doctype html>
+      <html lang="en">
+      <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+      <title>Nocturne Call</title>
+      <style>
+        :root { --bg:#0b0608; --panel:#1c1116; --accent:#b01030; --accent2:#e04050; --text:#ede3e6; }
+        * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+        html,body { margin:0; height:100%; background:var(--bg); color:var(--text);
+          font-family:-apple-system,Segoe UI,Roboto,serif; overflow:hidden; }
+        #stage { position:fixed; inset:0; }
+        video { position:absolute; object-fit:cover; background:#000; }
+        #remote { inset:0; width:100%; height:100%; }
+        #local { width:30vw; max-width:160px; aspect-ratio:3/4; right:14px; top:14px; border-radius:14px;
+          border:1px solid rgba(224,64,80,.5); box-shadow:0 6px 20px rgba(0,0,0,.6); z-index:2; }
+        #status { position:absolute; top:16px; left:16px; z-index:3; font-size:14px; letter-spacing:1px;
+          background:rgba(0,0,0,.45); padding:6px 12px; border-radius:20px; }
+        #bar { position:absolute; left:0; right:0; bottom:calc(24px + env(safe-area-inset-bottom)); z-index:3;
+          display:flex; gap:18px; justify-content:center; }
+        button { width:62px; height:62px; border-radius:50%; border:1px solid rgba(255,255,255,.15);
+          background:var(--panel); color:var(--text); font-size:22px; cursor:pointer; }
+        button.end { background:var(--accent); border-color:transparent; }
+        button.off { background:#333; }
+        #title { position:absolute; bottom:calc(104px + env(safe-area-inset-bottom)); left:0; right:0; z-index:3;
+          text-align:center; font-family:Georgia,serif; font-size:20px; text-shadow:0 1px 6px #000; }
+      </style>
+      </head>
+      <body>
+      <div id="stage">
+        <video id="remote" autoplay playsinline></video>
+        <video id="local" autoplay playsinline muted></video>
+        <div id="status">Starting…</div>
+        <div id="title"></div>
+        <div id="bar">
+          <button id="mic" title="Mute">&#127908;</button>
+          <button id="cam" title="Camera">&#128247;</button>
+          <button id="end" class="end" title="Hang up">&#128222;</button>
+        </div>
+      </div>
+      <script>
+      const p = new URLSearchParams(location.search);
+      const room = p.get('room') || 'room';
+      const myName = p.get('name') || 'Me';
+      const token = p.get('token') || '';
+      const myId = Math.random();
+      const S = document.getElementById('status');
+      document.getElementById('title').textContent = p.get('with') || '';
+      const localV = document.getElementById('local'), remoteV = document.getElementById('remote');
+      let pc, ws, localStream, polite=false, otherSeen=false, started=false, makingOffer=false, ignoreOffer=false;
+
+      function setStatus(t){ S.textContent = t; }
+      function sig(o){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+      async function begin(){
+        let cfg = {iceServers:[{urls:'stun:stun.l.google.com:19302'}]};
+        try { cfg = await (await fetch('/call/config')).json(); } catch(e){}
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+        } catch(e){ setStatus('Allow camera & microphone to call'); return; }
+        localV.srcObject = localStream;
+        pc = new RTCPeerConnection(cfg);
+        pc.ontrack = (e)=>{ remoteV.srcObject = e.streams[0]; setStatus('Connected'); };
+        pc.onicecandidate = ({candidate})=>{ if (candidate) sig({candidate}); };
+        pc.onnegotiationneeded = async ()=>{
+          try { makingOffer=true; await pc.setLocalDescription(); sig({desc: pc.localDescription}); }
+          catch(e){ console.error(e); } finally { makingOffer=false; }
+        };
+        pc.onconnectionstatechange = ()=>{
+          if (pc.connectionState==='connected') setStatus('Connected');
+          else if (pc.connectionState==='failed') setStatus('Connection failed');
+        };
+        connect();
+      }
+
+      function connect(){
+        const scheme = location.protocol==='https:' ? 'wss' : 'ws';
+        ws = new WebSocket(scheme+'://'+location.host+'/api/call/ws?room='+encodeURIComponent(room)+'&token='+encodeURIComponent(token));
+        ws.onopen = ()=>{ setStatus('Waiting for the other person…'); sig({hello: myId}); };
+        ws.onclose = ()=> setStatus('Call ended');
+        ws.onmessage = async (ev)=>{
+          const d = JSON.parse(ev.data);
+          if (d.hello !== undefined){
+            if (!otherSeen){ otherSeen = true; polite = myId < d.hello; sig({hello: myId}); addTracks(); }
+            return;
+          }
+          if (d.bye){ setStatus('They hung up'); return; }
+          try {
+            if (d.desc){
+              const collision = d.desc.type==='offer' && (makingOffer || pc.signalingState!=='stable');
+              ignoreOffer = !polite && collision;
+              if (ignoreOffer) return;
+              await pc.setRemoteDescription(d.desc);
+              if (d.desc.type==='offer'){ await pc.setLocalDescription(); sig({desc: pc.localDescription}); }
+            } else if (d.candidate){
+              try { await pc.addIceCandidate(d.candidate); } catch(e){ if (!ignoreOffer) throw e; }
+            }
+          } catch(e){ console.error(e); }
+        };
+      }
+
+      function addTracks(){
+        if (started) return; started = true;
+        setStatus('Ringing…');
+        localStream.getTracks().forEach(t=> pc.addTrack(t, localStream));
+      }
+
+      document.getElementById('mic').onclick = (e)=>{
+        const tr = localStream && localStream.getAudioTracks()[0]; if (!tr) return;
+        tr.enabled = !tr.enabled; e.currentTarget.classList.toggle('off', !tr.enabled);
+      };
+      document.getElementById('cam').onclick = (e)=>{
+        const tr = localStream && localStream.getVideoTracks()[0]; if (!tr) return;
+        tr.enabled = !tr.enabled; e.currentTarget.classList.toggle('off', !tr.enabled);
+      };
+      document.getElementById('end').onclick = ()=>{
+        sig({bye:true});
+        if (pc) pc.close();
+        if (localStream) localStream.getTracks().forEach(t=> t.stop());
+        setStatus('Call ended');
+        setTimeout(()=>{ try{ window.close(); }catch(e){} location.href='about:blank'; }, 300);
+      };
+
+      begin();
+      </script>
+      </body>
+      </html>
+      """
 
 
       @app.get("/api/memory/facts")

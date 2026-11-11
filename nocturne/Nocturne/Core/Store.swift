@@ -18,11 +18,29 @@ final class Store: ObservableObject {
     @AppStorage("relayToken") var relayToken: String = ""
     @AppStorage("displayName") var displayName: String = "Me"
     @AppStorage("chatRoom") var chatRoom: String = "home"
+    @AppStorage("partnerName") var partnerName: String = ""   // the other person in a 1:1 room (e.g. "Lauren")
+
+    /// Transient: set true to open the in-app video call over the current room.
+    @Published var inCall = false
 
     var theme: GothicTheme {
         GothicThemes.all.first { $0.name == themeName } ?? GothicThemes.default
     }
     func selectTheme(_ t: GothicTheme) { themeName = t.name }
+
+    /// The gothic web call page on jarvis-core for the current room/identity (empty if no relay set).
+    var callURL: URL? {
+        let base = ServerAddress.normalize(relayURL)
+        guard !base.isEmpty else { return nil }
+        var comps = URLComponents(string: base + "/call")
+        comps?.queryItems = [
+            URLQueryItem(name: "room", value: chatRoom),
+            URLQueryItem(name: "name", value: displayName),
+            URLQueryItem(name: "with", value: partnerName),
+            URLQueryItem(name: "token", value: relayToken),
+        ]
+        return comps?.url
+    }
 }
 
 /// Normalises a user-typed server address into a usable base URL.

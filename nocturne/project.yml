@@ -9,8 +9,8 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     SWIFT_STRICT_CONCURRENCY: minimal
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "2"
 
 targets:
   Nocturne:
@@ -45,6 +45,8 @@ targets:
           - UIInterfaceOrientationPortrait
         NSContactsUsageDescription: Nocturne shows your contacts and favourites so you can call and message them in a dark theme.
         NSLocationWhenInUseUsageDescription: Nocturne uses your location to show local weather.
+        NSCameraUsageDescription: Nocturne uses your camera for video calls.
+        NSMicrophoneUsageDescription: Nocturne uses your microphone for video calls.
         CFBundleURLTypes:
           - CFBundleURLName: app.nocturne.client
             CFBundleURLSchemes:

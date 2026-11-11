@@ -60,6 +60,13 @@ final class RelayClient: ObservableObject {
             body: ["room": store.chatRoom, "sender": store.displayName, "text": t]) else { return }
         netSession.dataTask(with: r) { _, _, _ in Task { @MainActor in self.poll(store) } }.resume()
     }
+
+    /// Rings the other person (ntfy push that opens the call on their device).
+    func ring(_ store: Store) {
+        guard let r = req(store, "/api/call/ring", method: "POST",
+            body: ["room": store.chatRoom, "caller": store.displayName]) else { return }
+        netSession.dataTask(with: r) { _, _, _ in }.resume()
+    }
 }
 
 struct MessagesView: View {
@@ -73,9 +80,12 @@ struct MessagesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                GothicTitle(text: "Messages", theme: theme, size: 26)
+            HStack(spacing: 14) {
+                GothicTitle(text: store.partnerName.isEmpty ? "Messages" : store.partnerName, theme: theme, size: 26)
                 Spacer()
+                Button { relay.ring(store); store.inCall = true } label: {
+                    Image(systemName: "video.fill").font(.title3).foregroundStyle(theme.accentColor)
+                }
                 Menu {
                     Button { askNumber = true } label: { Label("Quick SMS", systemImage: "bubble.left") }
                     Text("Room: \(store.chatRoom)")

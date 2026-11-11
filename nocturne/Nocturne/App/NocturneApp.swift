@@ -45,9 +45,28 @@ struct NocturneApp: App {
                     ModuleHost(module: module)
                         .environmentObject(store)
                 }
-                .onOpenURL { url in
-                    if let host = url.host, let m = Module(rawValue: host) { route = m }
+                .fullScreenCover(isPresented: $store.inCall) {
+                    CallView().environmentObject(store)
                 }
+                .onOpenURL { url in handle(url) }
+        }
+    }
+
+    /// Routes nocturne:// deep links (e.g. from an ntfy push).
+    private func handle(_ url: URL) {
+        guard let host = url.host else { return }
+        switch host {
+        case "chat", "messages":
+            // Optional room in the path (nocturne://chat/<room>) overrides the current room.
+            let room = url.pathComponents.filter { $0 != "/" }.first
+            if let room, !room.isEmpty { store.chatRoom = room }
+            route = .messages
+        case "call":
+            let room = url.pathComponents.filter { $0 != "/" }.first
+            if let room, !room.isEmpty { store.chatRoom = room }
+            store.inCall = true
+        default:
+            if let m = Module(rawValue: host) { route = m }
         }
     }
 }

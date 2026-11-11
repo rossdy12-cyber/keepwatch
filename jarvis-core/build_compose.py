@@ -52,14 +52,25 @@ services:
       FRIGATE_URL: ""
       FRIGATE_USER: ""
       FRIGATE_PASS: ""
+      # --- Nocturne chat notifications (optional) ---
+      # When NTFY_SERVER is set, a new chat message also fires an ntfy push that deep-links into Nocturne.
+      # Subscribe the ntfy app (iPhone + Windows) to the topic "<prefix>-<room>", e.g. nocturne-ross-lauren.
+      NTFY_SERVER: ""           # e.g. https://ntfy.nas-server.co.uk  (empty = notifications off)
+      NTFY_TOPIC_PREFIX: "nocturne"
+      NTFY_TOKEN: ""            # only if your ntfy server needs auth
+      # --- Nocturne video calls (optional) ---
+      # Public STUN is used automatically. Add your homelab coturn here for calls across different networks.
+      TURN_URL: ""              # e.g. turn:turn.nas-server.co.uk:3478
+      TURN_USER: ""
+      TURN_PASS: ""
       TZ: Europe/London
     command:
       - sh
       - -c
       - >-
-        ([ -f /data/venv/.ready-1 ] || (python -m venv /data/venv
-        && /data/venv/bin/pip install -q --no-cache-dir "fastapi==0.115.6" "uvicorn==0.34.0"
-        && touch /data/venv/.ready-1))
+        ([ -f /data/venv/.ready-2 ] || (python -m venv /data/venv
+        && /data/venv/bin/pip install -q --no-cache-dir "fastapi==0.115.6" "uvicorn[standard]==0.34.0"
+        && touch /data/venv/.ready-2))
         && exec /data/venv/bin/python -u /app/core.py
 
 volumes:
