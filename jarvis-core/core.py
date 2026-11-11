@@ -76,13 +76,13 @@ TURN_URL = os.environ.get("TURN_URL", "").strip()                 # e.g. turn:tu
 TURN_USER = os.environ.get("TURN_USER", "").strip()
 TURN_PASS = os.environ.get("TURN_PASS", "").strip()
 
-# Native Apple push (APNs) for Nocturne. Needs an EXPLICIT App ID (app.nocturne.client) with Push enabled,
+# Native Apple push (APNs) for Nocturne. Needs an EXPLICIT App ID (com.ross.nocturne) with Push enabled,
 # a .p8 auth key from the Apple Developer portal, and the signer resigning with that push profile.
 APNS_KEY_P8 = os.environ.get("APNS_KEY_P8", "")                   # the .p8 file contents (PEM); or set APNS_KEY_FILE
 APNS_KEY_FILE = os.environ.get("APNS_KEY_FILE", "").strip()
 APNS_KEY_ID = os.environ.get("APNS_KEY_ID", "").strip()          # the Key ID of the .p8 (Apple Developer -> Keys)
 APNS_TEAM_ID = os.environ.get("APNS_TEAM_ID", "G42YL9QS8W").strip()
-APNS_BUNDLE_ID = os.environ.get("APNS_BUNDLE_ID", "app.nocturne.client").strip()
+APNS_BUNDLE_ID = os.environ.get("APNS_BUNDLE_ID", "com.ross.nocturne").strip()
 APNS_ENV = os.environ.get("APNS_ENV", "auto").strip().lower()    # auto | production | sandbox
 
 USER_AGENT = "JarvisCore/1.0"

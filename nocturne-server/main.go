@@ -33,7 +33,7 @@ var (
 	dataDir     = env("DATA_DIR", "./data")
 	apnsKeyID   = strings.TrimSpace(os.Getenv("APNS_KEY_ID"))
 	apnsTeamID  = env("APNS_TEAM_ID", "G42YL9QS8W")
-	apnsBundle  = env("APNS_BUNDLE_ID", "app.nocturne.client")
+	apnsBundle  = env("APNS_BUNDLE_ID", "com.ross.nocturne")
 	apnsEnv     = strings.ToLower(env("APNS_ENV", "auto"))
 	turnURL     = strings.TrimSpace(os.Getenv("TURN_URL"))
 	turnUser    = strings.TrimSpace(os.Getenv("TURN_USER"))

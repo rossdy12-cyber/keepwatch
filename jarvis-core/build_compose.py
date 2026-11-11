@@ -64,11 +64,11 @@ services:
       TURN_USER: ""
       TURN_PASS: ""
       # --- Nocturne native push notifications (APNs) ---
-      # Requires an EXPLICIT App ID (app.nocturne.client) with Push enabled + the signer resigning Nocturne with
+      # Requires an EXPLICIT App ID (com.ross.nocturne) with Push enabled + the signer resigning Nocturne with
       # that push profile (NOT a wildcard profile). Create a .p8 Auth Key at Apple Developer -> Keys (APNs), then:
       APNS_KEY_ID: ""           # the Key ID of the .p8
       APNS_TEAM_ID: "G42YL9QS8W"
-      APNS_BUNDLE_ID: "app.nocturne.client"
+      APNS_BUNDLE_ID: "com.ross.nocturne"
       APNS_ENV: "auto"          # auto tries production then sandbox; set "production" or "sandbox" to pin it
       # Paste the whole .p8 file here as a YAML block (keep the indentation), or set APNS_KEY_FILE to a mounted path:
       APNS_KEY_P8: ""

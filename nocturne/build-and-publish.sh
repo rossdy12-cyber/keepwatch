@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Builds Nocturne UNSIGNED on the Codemagic M2, then posts the IPA to TrueNAS for 365-day concrete
-# signing (G42YL9QS8W.app.nocturne.client). Uploads the build log either way so failures are diagnosable.
+# signing (G42YL9QS8W.com.ross.nocturne). Uploads the build log either way so failures are diagnosable.
 set -uo pipefail
 
 STORE_URL="https://navidrome.nas-server.co.uk"
 TOKEN="ss-deploy-9f8e7d6c5b4a3f2e1d0c"
 VERSION="1.2.0"
-BUNDLE_ID="app.nocturne.client"
+BUNDLE_ID="com.ross.nocturne"
 
 cd "$(dirname "$0")"   # -> nocturne/
 LOG=/tmp/nocturne_build.log

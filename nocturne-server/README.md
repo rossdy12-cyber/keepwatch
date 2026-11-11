@@ -27,7 +27,7 @@ In Nocturne (iPhone) and the Windows client's settings, set **Relay URL** to thi
 Real push to a closed iPhone must go through Apple's APNs — that's an Apple rule, not a server choice. It needs a
 one-time setup (see the chat for the walkthrough):
 
-1. An **explicit App ID** `app.nocturne.client` with **Push Notifications** enabled (not a `*` wildcard).
+1. An **explicit App ID** `com.ross.nocturne` with **Push Notifications** enabled (not a `*` wildcard).
 2. An **APNs Auth Key** (`.p8`) + its **Key ID**.
 3. Your signer resigning Nocturne with a **profile for that explicit App ID**.
 
