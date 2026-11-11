@@ -63,14 +63,28 @@ services:
       TURN_URL: ""              # e.g. turn:turn.nas-server.co.uk:3478
       TURN_USER: ""
       TURN_PASS: ""
+      # --- Nocturne native push notifications (APNs) ---
+      # Requires an EXPLICIT App ID (app.nocturne.client) with Push enabled + the signer resigning Nocturne with
+      # that push profile (NOT a wildcard profile). Create a .p8 Auth Key at Apple Developer -> Keys (APNs), then:
+      APNS_KEY_ID: ""           # the Key ID of the .p8
+      APNS_TEAM_ID: "G42YL9QS8W"
+      APNS_BUNDLE_ID: "app.nocturne.client"
+      APNS_ENV: "auto"          # auto tries production then sandbox; set "production" or "sandbox" to pin it
+      # Paste the whole .p8 file here as a YAML block (keep the indentation), or set APNS_KEY_FILE to a mounted path:
+      APNS_KEY_P8: ""
+      #   APNS_KEY_P8: |
+      #     -----BEGIN PRIVATE KEY-----
+      #     ...your key...
+      #     -----END PRIVATE KEY-----
       TZ: Europe/London
     command:
       - sh
       - -c
       - >-
-        ([ -f /data/venv/.ready-2 ] || (python -m venv /data/venv
+        ([ -f /data/venv/.ready-3 ] || (python -m venv /data/venv
         && /data/venv/bin/pip install -q --no-cache-dir "fastapi==0.115.6" "uvicorn[standard]==0.34.0"
-        && touch /data/venv/.ready-2))
+        "httpx[http2]==0.28.1" "pyjwt[crypto]==2.10.1"
+        && touch /data/venv/.ready-3))
         && exec /data/venv/bin/python -u /app/core.py
 
 volumes:

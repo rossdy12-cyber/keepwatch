@@ -76,6 +76,15 @@ TURN_URL = os.environ.get("TURN_URL", "").strip()                 # e.g. turn:tu
 TURN_USER = os.environ.get("TURN_USER", "").strip()
 TURN_PASS = os.environ.get("TURN_PASS", "").strip()
 
+# Native Apple push (APNs) for Nocturne. Needs an EXPLICIT App ID (app.nocturne.client) with Push enabled,
+# a .p8 auth key from the Apple Developer portal, and the signer resigning with that push profile.
+APNS_KEY_P8 = os.environ.get("APNS_KEY_P8", "")                   # the .p8 file contents (PEM); or set APNS_KEY_FILE
+APNS_KEY_FILE = os.environ.get("APNS_KEY_FILE", "").strip()
+APNS_KEY_ID = os.environ.get("APNS_KEY_ID", "").strip()          # the Key ID of the .p8 (Apple Developer -> Keys)
+APNS_TEAM_ID = os.environ.get("APNS_TEAM_ID", "G42YL9QS8W").strip()
+APNS_BUNDLE_ID = os.environ.get("APNS_BUNDLE_ID", "app.nocturne.client").strip()
+APNS_ENV = os.environ.get("APNS_ENV", "auto").strip().lower()    # auto | production | sandbox
+
 USER_AGENT = "JarvisCore/1.0"
 
 DEFAULT_PERSONA = (
@@ -146,6 +155,13 @@ def init_db():
                 ts REAL
             );
             CREATE INDEX IF NOT EXISTS idx_relay_room ON relay_messages(room, id);
+            CREATE TABLE IF NOT EXISTS push_tokens (
+                token TEXT PRIMARY KEY,
+                room TEXT,
+                name TEXT,
+                ts REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_push_room ON push_tokens(room);
             """
         )
         # Migrate older databases to add the memory-scope column (one per character).
@@ -703,6 +719,111 @@ def notify_ntfy_call(room, caller):
                "nocturne://call/%s" % urllib.parse.quote(room or "home"), "telephone_receiver", priority="max")
 
 
+# ---------------------------------------------------------------------------------- native push (APNs)
+
+_apns_jwt = {"token": "", "iat": 0}
+
+
+def _apns_key_pem():
+    if APNS_KEY_P8.strip():
+        return APNS_KEY_P8.replace("\\n", "\n")
+    if APNS_KEY_FILE and os.path.exists(APNS_KEY_FILE):
+        try:
+            with open(APNS_KEY_FILE) as handle:
+                return handle.read()
+        except Exception as error:
+            log("APNs key file unreadable: %s" % error)
+    return ""
+
+
+def apns_configured():
+    return bool(_apns_key_pem() and APNS_KEY_ID)
+
+
+def _apns_bearer():
+    """A cached ES256 JWT for APNs token auth (valid ~1h; Apple wants it refreshed < 60 min)."""
+    if not apns_configured():
+        return ""
+    now = int(time.time())
+    if _apns_jwt["token"] and now - _apns_jwt["iat"] < 2400:
+        return _apns_jwt["token"]
+    try:
+        import jwt  # PyJWT (with cryptography for ES256)
+        token = jwt.encode({"iss": APNS_TEAM_ID, "iat": now}, _apns_key_pem(),
+                           algorithm="ES256", headers={"kid": APNS_KEY_ID})
+        if isinstance(token, bytes):
+            token = token.decode("ascii")
+        _apns_jwt.update(token=token, iat=now)
+        return token
+    except Exception as error:
+        log("APNs JWT failed: %s" % error)
+        return ""
+
+
+def _apns_hosts():
+    if APNS_ENV == "production":
+        return ["https://api.push.apple.com"]
+    if APNS_ENV == "sandbox":
+        return ["https://api.sandbox.push.apple.com"]
+    return ["https://api.push.apple.com", "https://api.sandbox.push.apple.com"]  # auto: try both
+
+
+def apns_push(device_token, title, body, url=None):
+    """Send one alert push. Deletes the token if Apple says it's gone (410). No-op unless configured."""
+    bearer = _apns_bearer()
+    if not bearer:
+        return False
+    try:
+        import httpx
+    except Exception as error:
+        log("httpx missing for APNs: %s" % error)
+        return False
+    payload = {"aps": {"alert": {"title": title, "body": body}, "sound": "default"}}
+    if url:
+        payload["url"] = url
+    headers = {"authorization": "bearer " + bearer, "apns-topic": APNS_BUNDLE_ID,
+               "apns-push-type": "alert", "apns-priority": "10"}
+    hosts = _apns_hosts()
+    for index, host in enumerate(hosts):
+        try:
+            with httpx.Client(http2=True, timeout=10) as client:
+                response = client.post(host + "/3/device/" + device_token, headers=headers, json=payload)
+            if response.status_code == 200:
+                return True
+            reason = ""
+            try:
+                reason = response.json().get("reason", "")
+            except Exception:
+                reason = response.text[:120]
+            if response.status_code == 410 or reason == "Unregistered":
+                _delete_push_token(device_token)
+                return False
+            if reason == "BadDeviceToken" and index < len(hosts) - 1:
+                continue   # wrong environment — try the other APNs host
+            log("APNs %s... -> %s %s" % (device_token[:8], response.status_code, reason))
+            return False
+        except Exception as error:
+            log("APNs send error: %s" % error)
+    return False
+
+
+def _delete_push_token(token):
+    with db_lock:
+        db.execute("DELETE FROM push_tokens WHERE token = ?", (token,))
+        db.commit()
+
+
+def push_to_room(room, exclude_name, title, body, url=None):
+    """Push to everyone registered in the room except the sender."""
+    if not apns_configured():
+        return
+    with db_lock:
+        rows = db.execute("SELECT token, name FROM push_tokens WHERE room = ?", (room,)).fetchall()
+    for row in rows:
+        if row["name"] != exclude_name:
+            apns_push(row["token"], title, body, url)
+
+
 @app.post("/api/relay/send")
 def relay_send(body: RelayIn, request: Request):
     """Self-hosted chat relay for the Nocturne Messages app (not iMessage/SMS)."""
@@ -718,7 +839,9 @@ def relay_send(body: RelayIn, request: Request):
                          (room, sender, text[:4000], now))
         db.commit()
         mid = cur.lastrowid
-    # Push a notification to the other device without blocking the sender's request.
+    # Notify the other device without blocking the sender's request: native APNs push (+ ntfy if configured).
+    deeplink = "nocturne://chat/%s" % urllib.parse.quote(room)
+    threading.Thread(target=push_to_room, args=(room, sender, sender, text[:200], deeplink), daemon=True).start()
     threading.Thread(target=notify_ntfy, args=(room, sender, text), daemon=True).start()
     return {"id": mid, "ts": now}
 
@@ -754,6 +877,26 @@ def relay_presence(request: Request):
             for (r, who), ts in PRESENCE.items() if r == room]
 
 
+class PushReg(BaseModel):
+    token: str
+    room: Optional[str] = "home"
+    name: Optional[str] = "Someone"
+
+
+@app.post("/api/push/register")
+def push_register(body: PushReg, request: Request):
+    """Nocturne registers its APNs device token here so the other person's messages can push to it."""
+    check_auth(request)
+    token = (body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing token")
+    with db_lock:
+        db.execute("INSERT OR REPLACE INTO push_tokens (token, room, name, ts) VALUES (?, ?, ?, ?)",
+                   (token, (body.room or "home")[:64], (body.name or "Someone")[:64], time.time()))
+        db.commit()
+    return {"ok": True, "push": apns_configured()}
+
+
 # ------------------------------------------------------------------------------------ video call (WebRTC)
 
 # Open signalling sockets per call room. Peers in a room relay offer/answer/ICE to each other.
@@ -771,6 +914,9 @@ def call_ring(body: RingIn, request: Request):
     check_auth(request)
     room = (body.room or "home")[:64]
     caller = (body.caller or "Someone")[:64]
+    deeplink = "nocturne://call/%s" % urllib.parse.quote(room)
+    threading.Thread(target=push_to_room,
+                     args=(room, caller, "%s is calling" % caller, "Incoming video call", deeplink), daemon=True).start()
     threading.Thread(target=notify_ntfy_call, args=(room, caller), daemon=True).start()
     return {"ok": True}
 

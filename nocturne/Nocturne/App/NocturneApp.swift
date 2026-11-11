@@ -34,6 +34,8 @@ enum Module: String, Identifiable, CaseIterable {
 struct NocturneApp: App {
     @StateObject private var store = Store()
     @State private var route: Module?
+    @Environment(\.scenePhase) private var scenePhase
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
@@ -49,6 +51,9 @@ struct NocturneApp: App {
                     CallView().environmentObject(store)
                 }
                 .onOpenURL { url in handle(url) }
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active { PushManager.shared.reregister() }
+                }
         }
     }
 

@@ -113,7 +113,7 @@ struct MessagesView: View {
 
             composer
         }
-        .onAppear { relay.start(store) }
+        .onAppear { relay.start(store); PushManager.shared.reregister() }
         .onDisappear { relay.stop() }
         .sheet(isPresented: $showSMS) { SMSComposer(recipients: [smsNumber]) }
         .alert("Quick SMS", isPresented: $askNumber) {
