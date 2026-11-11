@@ -30,3 +30,5 @@ struct RootView: View {
         }
     }
 }
+
+// build: force prism-only rebuild to capture compiler log

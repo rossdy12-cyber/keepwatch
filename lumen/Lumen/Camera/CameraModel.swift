@@ -1158,23 +1158,27 @@ enum Prefs {
 extension CameraModel: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection], error: Error?) {
-        let recordedMode = recordingMode
         let fps = device.map { 1 / $0.activeVideoMinFrameDuration.seconds } ?? 30
-        DispatchQueue.main.async {
-            self.isRecording = false
-            self.recordingStarted = nil
-        }
         // A recording that hit a limit (storage, length) can still have finished properly.
         if let error = error as NSError?,
            (error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) != true {
-            publishMessage("Recording failed: \(error.localizedDescription)")
+            DispatchQueue.main.async {
+                self.isRecording = false
+                self.recordingStarted = nil
+                self.publishMessage("Recording failed: \(error.localizedDescription)")
+            }
             return
         }
-        // Read the few settings we need without DispatchQueue.main.sync: this delegate can be called on the
-        // main thread, and a sync onto main from main deadlocks (the app would be killed and nothing saved).
-        let place = locationTagging ? location.latest : nil
-        let editable = slowMoEditable
-        Task {
+        // Read the model state we need on the main thread, where it is mutated (recordingMode, locationTagging,
+        // location, slowMoEditable are @Published): an off-main read here would be a data race, and a main.sync
+        // would deadlock when this delegate is itself called on main. Hop to main once, snapshot, then save async.
+        DispatchQueue.main.async {
+            self.isRecording = false
+            self.recordingStarted = nil
+            let recordedMode = self.recordingMode
+            let place = self.locationTagging ? self.location.latest : nil
+            let editable = self.slowMoEditable
+            Task {
             var url = outputFileURL
             if recordedMode == .slowMo, fps > 31, editable {
                 // Saved at its full frame rate, sound included: Photos plays it as Slo-mo, and you can move the slow part there.
@@ -1189,7 +1193,8 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
                 }
             }
             await self.saveVideo(url, location: place)
-        }
+            }   // Task
+        }       // DispatchQueue.main.async
     }
 
     /// Saves a finished video to Photos and shows it in the thumbnail.

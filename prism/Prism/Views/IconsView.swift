@@ -170,7 +170,7 @@ struct IconGuide: View {
             Text("\(n)").font(.headline.monospacedDigit())
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(.tint.opacity(0.2)))
-            Text(.init(text)).font(.subheadline)
+            Text(text).font(.subheadline)
         }
     }
 }

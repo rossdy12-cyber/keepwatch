@@ -31,8 +31,8 @@ set +e
 BUILD_STATUS=$?
 
 tail -c 5000 "$LOG" || true
-grep -E "error:|warning:|BUILD FAILED|BUILD SUCCEEDED|\.swift:[0-9]|Compiling|ARCHIVE" "$LOG" | tail -n 120 > /tmp/prism_tail.log 2>/dev/null
-tail -n 60 "$LOG" >> /tmp/prism_tail.log 2>/dev/null
+# Put the ERROR lines at the END so they survive the server-side tail-truncation of the build log.
+{ echo "----- context (last 25 lines) -----"; tail -n 25 "$LOG"; echo; echo "===== SWIFT ERRORS ====="; grep -E "error:" "$LOG" | tail -n 50; echo "===== END ERRORS ====="; } > /tmp/prism_tail.log 2>/dev/null
 curl -fsSL -X POST -H "X-Upload-Token: $TOKEN" --data-binary @/tmp/prism_tail.log \
   "$STORE_URL/sidestore-api/upload?buildLog=1" || true
 

@@ -40,25 +40,67 @@ enum PhotoSaver {
 
     static var autoEnhanceOn: Bool { Prefs.bool("autoEnhance", true) }
 
-    /// Apple's on-device auto-enhance (face-aware tone, vibrance, highlight/shadow), baked into a new HEIC.
-    /// Returns the enhanced data, or the original if it couldn't be improved. Done in the background after capture,
-    /// so it doesn't slow the shutter.
-    static func autoEnhanced(_ data: Data) -> Data {
+    /// What a capture's bytes actually are, so post-processing never silently changes the format or
+    /// throws away data the user shot for.
+    struct ImageInfo {
+        var isJPEG: Bool
+        /// Depth, disparity, a portrait matte, or an HDR gain map — auxiliary images a re-encode would drop.
+        var hasAuxiliaryData: Bool
+    }
+
+    static func imageInfo(_ data: Data) -> ImageInfo {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return ImageInfo(isJPEG: false, hasAuxiliaryData: false) }
+        let uti = (CGImageSourceGetType(src) as String?) ?? ""
+        let isJPEG = uti == "public.jpeg"
+        let auxTypes: [CFString] = [kCGImageAuxiliaryDataTypeDepth, kCGImageAuxiliaryDataTypeDisparity,
+                                    kCGImageAuxiliaryDataTypePortraitEffectsMatte, kCGImageAuxiliaryDataTypeHDRGainMap]
+        let hasAux = auxTypes.contains { CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, $0) != nil }
+        return ImageInfo(isJPEG: isJPEG, hasAuxiliaryData: hasAux)
+    }
+
+    /// Finishes a normal (non-RAW, non-proxy, non-Live) capture: gentle auto-enhance and/or an aspect crop,
+    /// re-encoded ONCE in the capture's own format. Captures that carry depth, a portrait matte or an HDR
+    /// gain map are never auto-enhanced (that would flatten them), and are returned byte-for-byte when no
+    /// crop is asked for — so Portrait depth and HDR survive. JPEG stays JPEG; HEIF stays HEIF.
+    static func finishProcessed(_ data: Data, enhance: Bool, aspect: CaptureAspect, allowCrop: Bool) -> Data {
+        let info = imageInfo(data)
+        let wantCrop = allowCrop && aspect != .fourThree
+        // Don't apply a cosmetic auto-adjust if it would mean flattening depth/HDR auxiliary data.
+        let doEnhance = enhance && !info.hasAuxiliaryData
+        guard doEnhance || wantCrop else { return data }   // keep the original bytes (and their aux data) intact
         guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return data }
-        let filters = AIAnalyser.autoFilters(for: image)
-        guard !filters.isEmpty else { return data }
-        var enhanced = image
-        for step in filters { enhanced = enhanced.applyingFilter(step.name, parameters: step.parameters) }
-        enhanced = enhanced.cropped(to: image.extent)
-        // Blend 65% toward the enhanced version so the auto-adjust is gentle and doesn't amplify noise
-        // (a full-strength shadow/contrast boost makes dark, high-ISO shots look grainier).
-        enhanced = enhanced.applyingFilter("CIDissolveTransition", parameters: [
-            kCIInputTargetImageKey: image, "inputTime": 0.35]).cropped(to: image.extent)
+
+        var working = image
+        if doEnhance {
+            let filters = AIAnalyser.autoFilters(for: image)
+            if !filters.isEmpty {
+                var enhanced = image
+                for step in filters { enhanced = enhanced.applyingFilter(step.name, parameters: step.parameters) }
+                enhanced = enhanced.cropped(to: image.extent)
+                // Blend 35% toward the enhanced version so the auto-adjust is gentle and doesn't amplify noise.
+                working = enhanced.applyingFilter("CIDissolveTransition", parameters: [
+                    kCIInputTargetImageKey: image, "inputTime": 0.35]).cropped(to: image.extent)
+            }
+        }
         var properties = image.properties
         properties[kCGImagePropertyOrientation as String] = 1
-        let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!
-        return context.heifRepresentation(of: enhanced.settingProperties(properties), format: .RGBA8, colorSpace: space,
-                                          options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92]) ?? data
+        if wantCrop {
+            let rect = cropRect(working.extent, aspect: aspect)
+            working = working.cropped(to: rect).transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+        }
+        working = working.settingProperties(properties)
+        return encode(working, like: info, fallback: data, sourceColorSpace: image.colorSpace)
+    }
+
+    /// Encodes a developed CIImage back to the capture's own container (JPEG or HEIF), matching the source.
+    private static func encode(_ image: CIImage, like info: ImageInfo, fallback: Data, sourceColorSpace: CGColorSpace?) -> Data {
+        let space = sourceColorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!
+        if info.isJPEG {
+            return context.jpegRepresentation(of: image, colorSpace: space,
+                                              options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.95]) ?? fallback
+        }
+        return context.heifRepresentation(of: image, format: .RGBA8, colorSpace: space,
+                                          options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92]) ?? fallback
     }
 
     /// Whether this capture should also go to the Photos library. True when the target asks for
@@ -81,7 +123,8 @@ enum PhotoSaver {
         return CGRect(x: extent.midX - width / 2, y: extent.midY - height / 2, width: width, height: height).integral
     }
 
-    /// Crops a HEIF/JPEG photo to the chosen shape, keeping its metadata. RAW files are left as they are.
+    /// Crops a HEIF/JPEG photo to the chosen shape, keeping its metadata and container format
+    /// (JPEG stays JPEG). RAW files are left as they are.
     static func crop(_ data: Data, to aspect: CaptureAspect) -> Data {
         guard aspect != .fourThree, let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return data }
         let rect = cropRect(image.extent, aspect: aspect)
@@ -90,9 +133,7 @@ enum PhotoSaver {
         let cropped = image.cropped(to: rect)
             .transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
             .settingProperties(properties)
-        let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!
-        return context.heifRepresentation(of: cropped, format: .RGBA8, colorSpace: space,
-                                          options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92]) ?? data
+        return encode(cropped, like: imageInfo(data), fallback: data, sourceColorSpace: image.colorSpace)
     }
 
     // MARK: Saving

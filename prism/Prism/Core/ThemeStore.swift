@@ -13,18 +13,23 @@ final class ThemeStore: ObservableObject {
     private var defaults: UserDefaults { ThemeStorage.defaults }
 
     init() {
+        // Compute into locals first: Swift forbids reading self.themes until every stored property is set.
+        let loaded: [ThemeSpec]
         if let data = ThemeStorage.defaults.data(forKey: "themes.v1"),
            let saved = try? JSONDecoder().decode([ThemeSpec].self, from: data), !saved.isEmpty {
-            themes = saved
+            loaded = saved
         } else {
-            themes = ThemePresets.all
+            loaded = ThemePresets.all
         }
+        let initialID: UUID
         if let s = ThemeStorage.defaults.string(forKey: "selectedID.v1"), let id = UUID(uuidString: s),
-           themes.contains(where: { $0.id == id }) {
-            selectedID = id
+           loaded.contains(where: { $0.id == id }) {
+            initialID = id
         } else {
-            selectedID = themes[0].id
+            initialID = loaded[0].id
         }
+        themes = loaded
+        selectedID = initialID
         ThemeStorage.saveSelected(selected)
     }
 
