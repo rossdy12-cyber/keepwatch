@@ -161,13 +161,15 @@ configs:
                       source TEXT DEFAULT 'manual',
                       pinned INTEGER DEFAULT 0,
                       created REAL,
-                      embedding BLOB
+                      embedding BLOB,
+                      scope TEXT DEFAULT ''
                   );
                   CREATE TABLE IF NOT EXISTS kb_docs (
                       id INTEGER PRIMARY KEY AUTOINCREMENT,
                       title TEXT,
                       source TEXT DEFAULT 'manual',
-                      created REAL
+                      created REAL,
+                      scope TEXT DEFAULT ''
                   );
                   CREATE TABLE IF NOT EXISTS kb_chunks (
                       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,9 +186,18 @@ configs:
                       ts REAL
                   );
                   CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session, id);
-                  CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_norm ON facts(norm);
                   """
               )
+              # Migrate older databases to add the memory-scope column (one per character).
+              for statement in ("ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT ''",
+                                "ALTER TABLE kb_docs ADD COLUMN scope TEXT DEFAULT ''"):
+                  try:
+                      db.execute(statement)
+                  except sqlite3.OperationalError:
+                      pass   # column already exists
+              # Fact uniqueness is per (norm, scope) so each character can keep its own copy of a fact.
+              db.execute("DROP INDEX IF EXISTS idx_facts_norm")
+              db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_norm_scope ON facts(norm, scope)")
               db.commit()
 
 
@@ -308,7 +319,7 @@ configs:
 
       # ---------------------------------------------------------------------------------------------- memory store
 
-      def add_fact(text, source="manual", pinned=False):
+      def add_fact(text, source="manual", pinned=False, scope=""):
           text = (text or "").strip()
           if not text:
               return None
@@ -317,21 +328,22 @@ configs:
           with db_lock:
               try:
                   cur = db.execute(
-                      "INSERT INTO facts (text, norm, source, pinned, created, embedding) VALUES (?,?,?,?,?,?)",
-                      (text, norm, source, 1 if pinned else 0, time.time(), pack_vec(vec)),
+                      "INSERT INTO facts (text, norm, source, pinned, created, embedding, scope) VALUES (?,?,?,?,?,?,?)",
+                      (text, norm, source, 1 if pinned else 0, time.time(), pack_vec(vec), scope),
                   )
                   db.commit()
                   return cur.lastrowid
               except sqlite3.IntegrityError:
                   if pinned:   # a fact we already knew is now worth pinning
-                      db.execute("UPDATE facts SET pinned=1 WHERE norm=?", (norm,))
+                      db.execute("UPDATE facts SET pinned=1 WHERE norm=? AND scope=?", (norm, scope))
                       db.commit()
                   return None
 
 
-      def all_facts():
+      def all_facts(scope=""):
           with db_lock:
-              rows = db.execute("SELECT id, text, source, pinned, embedding FROM facts ORDER BY pinned DESC, id DESC").fetchall()
+              rows = db.execute("SELECT id, text, source, pinned, embedding FROM facts WHERE scope=? "
+                                "ORDER BY pinned DESC, id DESC", (scope,)).fetchall()
           out = []
           for r in rows:
               out.append({"id": r["id"], "text": r["text"], "source": r["source"],
@@ -385,14 +397,14 @@ configs:
           return chunks
 
 
-      def add_document(title, text, source="manual"):
+      def add_document(title, text, source="manual", scope=""):
           chunks = chunk_text(text)
           if not chunks:
               return 0, 0
           vectors = embed(chunks) if EMBED_MODEL else [None] * len(chunks)
           with db_lock:
-              cur = db.execute("INSERT INTO kb_docs (title, source, created) VALUES (?,?,?)",
-                               (title or "Untitled", source, time.time()))
+              cur = db.execute("INSERT INTO kb_docs (title, source, created, scope) VALUES (?,?,?,?)",
+                               (title or "Untitled", source, time.time(), scope))
               doc_id = cur.lastrowid
               for chunk, vec in zip(chunks, vectors):
                   db.execute("INSERT INTO kb_chunks (doc_id, text, created, embedding) VALUES (?,?,?,?)",
@@ -401,10 +413,10 @@ configs:
           return doc_id, len(chunks)
 
 
-      def all_chunks():
+      def all_chunks(scope=""):
           with db_lock:
               rows = db.execute("SELECT c.id, c.text, c.embedding, d.title FROM kb_chunks c "
-                                "LEFT JOIN kb_docs d ON d.id = c.doc_id").fetchall()
+                                "JOIN kb_docs d ON d.id = c.doc_id WHERE d.scope=?", (scope,)).fetchall()
           return [{"id": r["id"], "text": r["text"], "title": r["title"], "embedding": unpack_vec(r["embedding"])} for r in rows]
 
 
@@ -547,34 +559,37 @@ configs:
           return "Live status of the user's home systems right now (use it to answer; it is current):\n" + "\n".join(blocks)
 
 
-      def build_system_prompt(message):
-          parts = [PERSONA]
-          facts = all_facts()
+      def build_system_prompt(message, persona="", scope=""):
+          # A character (Kith companion) sends its own persona; otherwise use the default assistant persona.
+          parts = [persona.strip() if persona and persona.strip() else PERSONA]
+          facts = all_facts(scope)
           pinned = [f for f in facts if f["pinned"]]
           others = [f for f in facts if not f["pinned"]]
           chosen = pinned + rank(message, others, max(0, FACT_LIMIT - len(pinned)))
           if chosen:
-              parts.append("What you know about your user and their home:\n"
+              parts.append("What you know about the person you're talking to:\n"
                            + "\n".join("- " + f["text"] for f in chosen))
-          chunks = rank(message, all_chunks(), KB_LIMIT)
+          chunks = rank(message, all_chunks(scope), KB_LIMIT)
           if chunks:
               notes = "\n\n".join(("[%s]\n%s" % (c["title"], c["text"])) if c["title"] else c["text"] for c in chunks)
               parts.append("Relevant notes from your knowledge base (use if helpful, otherwise ignore):\n" + notes)
-          live = homelab_context(message)
-          if live:
-              parts.append(live)
+          # Homelab answers are only for the default assistant, not for companion characters.
+          if not persona:
+              live = homelab_context(message)
+              if live:
+                  parts.append(live)
           return "\n\n".join(parts)
 
 
-      def generate_reply(message, session):
-          system = build_system_prompt(message)
+      def generate_reply(message, session, persona="", scope=""):
+          system = build_system_prompt(message, persona=persona, scope=scope)
           history = recent_history(session, MAX_HISTORY)
           messages = [{"role": "system", "content": system}] + history + [{"role": "user", "content": message}]
           reply = llm_chat(messages)
           save_message(session, "user", message)
           save_message(session, "assistant", reply)
           if AUTO_MEMORY:
-              threading.Thread(target=learn_from_exchange, args=(message, reply), daemon=True).start()
+              threading.Thread(target=learn_from_exchange, args=(message, reply, scope), daemon=True).start()
           return reply
 
 
@@ -585,7 +600,7 @@ configs:
           "saving, reply with exactly: NONE"
       )
 
-      def learn_from_exchange(user_message, assistant_reply):
+      def learn_from_exchange(user_message, assistant_reply, scope=""):
           try:
               prompt = "%s\n\nUser: %s\nAssistant: %s" % (MEMORY_PROMPT, user_message, assistant_reply)
               result = llm_chat([{"role": "user", "content": prompt}], max_tokens=200, timeout=60)
@@ -594,8 +609,8 @@ configs:
               for line in result.splitlines():
                   fact = re.sub(r"^[-*\d.)\s]+", "", line).strip()
                   if len(fact) > 3:
-                      if add_fact(fact, source="auto"):
-                          log("Remembered: %s" % fact)
+                      if add_fact(fact, source="auto", scope=scope):
+                          log("Remembered%s: %s" % ((" [%s]" % scope) if scope else "", fact))
           except Exception as error:
               log("Auto-memory skipped: %s" % error)
 
@@ -617,6 +632,9 @@ configs:
       class ChatIn(BaseModel):
           message: str
           session_id: Optional[str] = "default"
+          # Companion characters (the Kith app) send their own persona + a memory scope; omit for the default assistant.
+          persona: Optional[str] = ""
+          scope: Optional[str] = ""
 
       class ChatOut(BaseModel):
           reply: str
@@ -658,7 +676,7 @@ configs:
               raise HTTPException(status_code=400, detail="Empty message")
           session = body.session_id or "default"
           try:
-              reply = generate_reply(message, session)
+              reply = generate_reply(message, session, persona=body.persona or "", scope=body.scope or "")
           except Exception as error:
               log("Chat error: %s" % error)
               if not LLM_API_KEY:
@@ -670,12 +688,14 @@ configs:
       @app.get("/api/memory/facts")
       def list_facts(request: Request):
           check_auth(request)
-          return [{"id": f["id"], "text": f["text"], "source": f["source"], "pinned": f["pinned"]} for f in all_facts()]
+          scope = request.query_params.get("scope", "")
+          return [{"id": f["id"], "text": f["text"], "source": f["source"], "pinned": f["pinned"]} for f in all_facts(scope)]
 
       @app.post("/api/memory/facts")
       def create_fact(body: FactIn, request: Request):
           check_auth(request)
-          fact_id = add_fact(body.text, source="manual", pinned=bool(body.pinned))
+          scope = request.query_params.get("scope", "")
+          fact_id = add_fact(body.text, source="manual", pinned=bool(body.pinned), scope=scope)
           return {"id": fact_id, "saved": fact_id is not None}
 
       @app.delete("/api/memory/facts/{fact_id}")
