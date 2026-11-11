@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct WallpaperView: View {
     @EnvironmentObject var store: ThemeStore
