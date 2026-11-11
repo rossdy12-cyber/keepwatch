@@ -63,23 +63,26 @@ struct DoFGuideView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12), lineWidth: 0.5))
     }
 
-    /// A horizontal scale showing where the sharp band (near…far) sits around the subject, on a log distance axis.
+    /// Position on a log distance axis (0.2 m … 30 m) for a width.
+    private func axisX(_ d: Double, width w: CGFloat) -> CGFloat {
+        let lo = log10(0.2), hi = log10(30.0)
+        let clamped = min(max(d, 0.2), 30)
+        return CGFloat((log10(clamped) - lo) / (hi - lo)) * w
+    }
+
+    /// A horizontal scale showing where the sharp band (near…far) sits around the subject.
     private var scale: some View {
         GeometryReader { geo in
             let w = geo.size.width
-            func x(_ d: Double) -> CGFloat {
-                let lo = log10(0.2), hi = log10(30.0)
-                let clamped = min(max(d, 0.2), 30)
-                return CGFloat((log10(clamped) - lo) / (hi - lo)) * w
-            }
-            let nearX = x(reading.near)
-            let farX = reading.far.isInfinite ? w : x(reading.far)
+            let nearX = axisX(reading.near, width: w)
+            let farX = reading.far.isInfinite ? w : axisX(reading.far, width: w)
+            let subX = axisX(distance, width: w)
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.15)).frame(height: 4)
                 Capsule().fill(.yellow.opacity(0.85))
                     .frame(width: max(2, farX - nearX), height: 4)
                     .offset(x: nearX)
-                Rectangle().fill(.white).frame(width: 2, height: 14).offset(x: x(distance) - 1)
+                Rectangle().fill(.white).frame(width: 2, height: 14).offset(x: subX - 1)
             }
             .frame(height: 14)
         }
