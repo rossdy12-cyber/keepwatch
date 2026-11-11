@@ -117,5 +117,7 @@ enum ThemePresets {
         ThemeSpec(name: "Candy", colors: ["FF9A9E", "FAD0C4", "FAD0C4", "A18CD1"], accent: "FF4D8D", style: .bands, lightText: false),
         ThemeSpec(name: "Forest", colors: ["134E5E", "71B280"], accent: "EFFFB0", style: .gradient),
         ThemeSpec(name: "Grape", colors: ["41295A", "2F0743"], accent: "B06AB3", style: .aurora),
+        ThemeSpec(name: "Crimson Rose", colors: ["090304", "8C0E1C", "C21E56"], accent: "FF4D6D", style: .aurora),
+        ThemeSpec(name: "Crimson Royale", colors: ["0A0306", "8C0E1C", "4A1E70"], accent: "B06AF0", style: .gradient),
     ]
 }

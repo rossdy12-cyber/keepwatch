@@ -14,10 +14,13 @@ final class ThemeStore: ObservableObject {
 
     init() {
         // Compute into locals first: Swift forbids reading self.themes until every stored property is set.
-        let loaded: [ThemeSpec]
+        var loaded: [ThemeSpec]
         if let data = ThemeStorage.defaults.data(forKey: "themes.v1"),
            let saved = try? JSONDecoder().decode([ThemeSpec].self, from: data), !saved.isEmpty {
             loaded = saved
+            // Bring in any presets added in a newer version (match by name) so existing installs get them.
+            let names = Set(saved.map { $0.name })
+            loaded.append(contentsOf: ThemePresets.all.filter { !names.contains($0.name) })
         } else {
             loaded = ThemePresets.all
         }
