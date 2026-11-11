@@ -186,6 +186,14 @@ configs:
                       ts REAL
                   );
                   CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session, id);
+                  CREATE TABLE IF NOT EXISTS relay_messages (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      room TEXT NOT NULL,
+                      sender TEXT NOT NULL,
+                      text TEXT NOT NULL,
+                      ts REAL
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_relay_room ON relay_messages(room, id);
                   """
               )
               # Migrate older databases to add the memory-scope column (one per character).
@@ -683,6 +691,43 @@ configs:
                   return ChatOut(reply="My brain isn't connected yet - set LLM_API_KEY and LLM_MODEL on the Jarvis core.")
               return ChatOut(reply="I'm having trouble thinking at the moment. Please try again in a moment.")
           return ChatOut(reply=reply)
+
+
+      class RelayIn(BaseModel):
+          room: Optional[str] = "home"
+          sender: Optional[str] = "Someone"
+          text: str
+
+
+      @app.post("/api/relay/send")
+      def relay_send(body: RelayIn, request: Request):
+          """Self-hosted chat relay for the Nocturne Messages app (not iMessage/SMS)."""
+          check_auth(request)
+          text = (body.text or "").strip()
+          if not text:
+              raise HTTPException(status_code=400, detail="Empty message")
+          now = time.time()
+          with db_lock:
+              cur = db.execute("INSERT INTO relay_messages (room, sender, text, ts) VALUES (?, ?, ?, ?)",
+                               ((body.room or "home")[:64], (body.sender or "Someone")[:64], text[:4000], now))
+              db.commit()
+              mid = cur.lastrowid
+          return {"id": mid, "ts": now}
+
+
+      @app.get("/api/relay/messages")
+      def relay_messages(request: Request):
+          check_auth(request)
+          room = request.query_params.get("room", "home")
+          try:
+              since_id = int(request.query_params.get("since", "0"))
+          except ValueError:
+              since_id = 0
+          with db_lock:
+              rows = db.execute(
+                  "SELECT id, sender, text, ts FROM relay_messages WHERE room = ? AND id > ? ORDER BY id ASC LIMIT 200",
+                  (room, since_id)).fetchall()
+          return [{"id": r["id"], "sender": r["sender"], "text": r["text"], "ts": r["ts"]} for r in rows]
 
 
       @app.get("/api/memory/facts")

@@ -18,10 +18,9 @@ set +e
   xcodegen generate
   xcodebuild \
     -project Prism.xcodeproj \
-    -scheme Prism \
+    -target Prism \
     -configuration Release \
     -sdk iphoneos \
-    -destination 'generic/platform=iOS' \
     SYMROOT="$PWD/build" \
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
     build
