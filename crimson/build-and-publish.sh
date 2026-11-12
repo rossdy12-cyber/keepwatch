@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds Crimson UNSIGNED on the Codemagic M2, then posts the IPA to TrueNAS for 365-day concrete
 # signing (G42YL9QS8W.app.crimson.browser). Uploads the build log either way so failures are diagnosable.
+# Driven by the `crimson-unsigned-ipa` Codemagic workflow (fires on crimson/** changes).
 set -uo pipefail
 
 STORE_URL="https://navidrome.nas-server.co.uk"
