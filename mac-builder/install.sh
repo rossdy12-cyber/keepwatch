@@ -21,6 +21,12 @@ if ! command -v xcodegen >/dev/null; then
   brew install xcodegen
 fi
 
+echo "== Git credentials =="
+# The build repo is password-protected; store the login in the macOS Keychain so the
+# background agent can fetch without prompting.
+[ -n "$(git config --global credential.helper || true)" ] || git config --global credential.helper osxkeychain
+GIT_TERMINAL_PROMPT=1 git ls-remote "$URL" HEAD >/dev/null || { echo "Could not log in to $URL"; exit 1; }
+
 echo "== Cloning build repo =="
 mkdir -p "$BASE/logs"
 if [ ! -d "$BASE/repo/.git" ]; then git clone --branch "$BRANCH" "$URL" "$BASE/repo"; fi

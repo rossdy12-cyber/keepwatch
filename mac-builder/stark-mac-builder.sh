@@ -14,6 +14,8 @@ BRANCH="${STARK_BRANCH:-main}"
 
 # launchd starts with a bare PATH; add Homebrew (Intel + Apple Silicon) for xcodegen.
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+# Never block on a password prompt under launchd; credentials come from the macOS Keychain.
+export GIT_TERMINAL_PROMPT=0
 
 mkdir -p "$LOGS"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGS/agent.log"; }
