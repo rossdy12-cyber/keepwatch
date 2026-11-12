@@ -25,7 +25,19 @@ echo "== Git credentials =="
 # The build repo is password-protected; store the login in the macOS Keychain so the
 # background agent can fetch without prompting.
 [ -n "$(git config --global credential.helper || true)" ] || git config --global credential.helper osxkeychain
+echo "If asked: username 'sidestore' and the git password from your credentials file."
 GIT_TERMINAL_PROMPT=1 git ls-remote "$URL" HEAD >/dev/null || { echo "Could not log in to $URL"; exit 1; }
+
+echo "== Store upload token =="
+# Kept in the login Keychain, not in a file. Re-run install.sh to change it.
+if security find-generic-password -s stark-upload-token -w >/dev/null 2>&1; then
+  echo "already in Keychain (service: stark-upload-token)"
+else
+  read -r -s -p "Paste the SIDESTORE upload token (input hidden): " TOK; echo
+  [ -n "$TOK" ] || { echo "No token entered"; exit 1; }
+  security add-generic-password -a "$USER" -s stark-upload-token -w "$TOK" -U
+  unset TOK
+fi
 
 echo "== Cloning build repo =="
 mkdir -p "$BASE/logs"

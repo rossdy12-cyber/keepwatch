@@ -16,6 +16,9 @@ BRANCH="${STARK_BRANCH:-main}"
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 # Never block on a password prompt under launchd; credentials come from the macOS Keychain.
 export GIT_TERMINAL_PROMPT=0
+# The store upload token lives in the login Keychain (install.sh puts it there); build scripts read it from here.
+SIDESTORE_UPLOAD_TOKEN="$(security find-generic-password -s stark-upload-token -w 2>/dev/null || true)"
+export SIDESTORE_UPLOAD_TOKEN
 
 mkdir -p "$LOGS"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGS/agent.log"; }
@@ -28,6 +31,7 @@ fi
 trap 'rm -rf "$LOCK"' EXIT
 
 cd "$REPO" || { log "repo missing at $REPO — run install.sh"; exit 1; }
+[ -n "$SIDESTORE_UPLOAD_TOKEN" ] || { log "no upload token in Keychain (service stark-upload-token) — re-run install.sh"; exit 1; }
 git fetch -q origin "$BRANCH" || { log "git fetch failed"; exit 1; }
 NEW=$(git rev-parse "origin/$BRANCH")
 LAST=$(cat "$STATE" 2>/dev/null || true)
