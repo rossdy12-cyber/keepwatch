@@ -39,6 +39,8 @@ on:
       - ".github/workflows/build-deskswitch-ipa.yml"
       - "racebolt-ops/**"
       - ".github/workflows/build-racebolt-ops-ipa.yml"
+      - "crimson/**"
+      - ".github/workflows/build-crimson-ipa.yml"
       - ".github/workflows/build-ipa.yml"
   workflow_dispatch:
 
