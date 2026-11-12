@@ -9,7 +9,8 @@ enum SMTPSecurity: String, Codable, CaseIterable, Identifiable {
     var label: String { self == .tls ? "SSL/TLS" : "STARTTLS" }
 }
 
-struct MailAccount: Codable, Equatable {
+struct MailAccount: Codable, Equatable, Identifiable, Hashable {
+    var id = UUID()
     var displayName: String = ""
     var email: String = ""
     var username: String = ""
@@ -22,6 +23,28 @@ struct MailAccount: Codable, Equatable {
 
     var loginName: String { username.isEmpty ? email : username }
     var sender: EmailAddress { EmailAddress(name: displayName, address: email) }
+    var label: String { displayName.isEmpty ? email : displayName }
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case id, displayName, email, username, imapHost, imapPort, smtpHost, smtpPort, smtpSecurity, saveSentCopy
+    }
+
+    // Tolerates accounts saved by older versions, which had no id.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName) ?? ""
+        email = try c.decodeIfPresent(String.self, forKey: .email) ?? ""
+        username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        imapHost = try c.decodeIfPresent(String.self, forKey: .imapHost) ?? ""
+        imapPort = try c.decodeIfPresent(Int.self, forKey: .imapPort) ?? 993
+        smtpHost = try c.decodeIfPresent(String.self, forKey: .smtpHost) ?? ""
+        smtpPort = try c.decodeIfPresent(Int.self, forKey: .smtpPort) ?? 587
+        smtpSecurity = try c.decodeIfPresent(SMTPSecurity.self, forKey: .smtpSecurity) ?? .startTLS
+        saveSentCopy = try c.decodeIfPresent(Bool.self, forKey: .saveSentCopy) ?? true
+    }
 }
 
 struct MailProvider: Identifiable, Hashable {
@@ -63,28 +86,57 @@ struct MailProvider: Identifiable, Hashable {
 }
 
 enum AccountStorage {
-    private static let accountKey = "crypt.account"
-    private static let passwordAccount = "mail-password"
+    private static let accountsKey = "crypt.accounts"
+    private static let activeKey = "crypt.activeAccount"
+    private static let legacyAccountKey = "crypt.account"
+    private static let legacyPasswordAccount = "mail-password"
 
-    static func load() -> MailAccount? {
-        guard let data = UserDefaults.standard.data(forKey: accountKey) else { return nil }
-        return try? JSONDecoder().decode(MailAccount.self, from: data)
+    static func loadAll() -> [MailAccount] {
+        migrateLegacy()
+        guard let data = UserDefaults.standard.data(forKey: accountsKey),
+              let accounts = try? JSONDecoder().decode([MailAccount].self, from: data) else { return [] }
+        return accounts
     }
 
-    static func save(_ account: MailAccount, password: String) {
-        if let data = try? JSONEncoder().encode(account) {
-            UserDefaults.standard.set(data, forKey: accountKey)
+    static func saveAll(_ accounts: [MailAccount]) {
+        if let data = try? JSONEncoder().encode(accounts) {
+            UserDefaults.standard.set(data, forKey: accountsKey)
         }
-        Keychain.save(password, account: passwordAccount)
     }
 
-    static func password() -> String? {
-        Keychain.read(account: passwordAccount)
+    static var activeID: UUID? {
+        get { UserDefaults.standard.string(forKey: activeKey).flatMap(UUID.init(uuidString:)) }
+        set { UserDefaults.standard.set(newValue?.uuidString, forKey: activeKey) }
     }
 
-    static func clear() {
-        UserDefaults.standard.removeObject(forKey: accountKey)
-        Keychain.delete(account: passwordAccount)
+    static func password(for id: UUID) -> String? {
+        Keychain.read(account: "password-\(id.uuidString)")
+    }
+
+    static func setPassword(_ password: String, for id: UUID) {
+        Keychain.save(password, account: "password-\(id.uuidString)")
+    }
+
+    static func deletePassword(for id: UUID) {
+        Keychain.delete(account: "password-\(id.uuidString)")
+    }
+
+    /// Version 1 stored a single account; move it into the list.
+    private static func migrateLegacy() {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: legacyAccountKey) else { return }
+        if defaults.data(forKey: accountsKey) == nil,
+           let account = try? JSONDecoder().decode(MailAccount.self, from: data) {
+            if let password = Keychain.read(account: legacyPasswordAccount) {
+                setPassword(password, for: account.id)
+            }
+            if let encoded = try? JSONEncoder().encode([account]) {
+                defaults.set(encoded, forKey: accountsKey)
+            }
+            activeID = account.id
+        }
+        defaults.removeObject(forKey: legacyAccountKey)
+        Keychain.delete(account: legacyPasswordAccount)
     }
 }
 

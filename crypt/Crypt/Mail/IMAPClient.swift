@@ -297,6 +297,21 @@ actor IMAPClient {
         }
     }
 
+    func unseenCount(in mailbox: String = "INBOX") async throws -> Int {
+        try await run { conn in
+            let responses = try await conn.execute("STATUS \(IMAPConnection.quote(mailbox)) (UNSEEN)")
+            for response in responses where response.starts(with: Data("* STATUS".utf8)) {
+                guard let items = IMAPParser.parse(response).last?.list else { continue }
+                var i = 0
+                while i + 1 < items.count {
+                    if items[i].text?.uppercased() == "UNSEEN", let n = Int(items[i + 1].text ?? "") { return n }
+                    i += 2
+                }
+            }
+            return 0
+        }
+    }
+
     @discardableResult
     private func select(_ mailbox: String, on conn: IMAPConnection, force: Bool = false) async throws -> Int {
         let responses = try await conn.execute("SELECT \(IMAPConnection.quote(mailbox))")

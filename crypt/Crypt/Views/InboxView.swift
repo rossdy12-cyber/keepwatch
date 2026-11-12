@@ -19,8 +19,23 @@ struct InboxView: View {
                 content
             }
             .navigationBarTitleDisplayMode(.inline)
-            .gothicTitle(store.currentMailbox?.displayName ?? "Crypt")
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 0) {
+                        Text(store.currentMailbox?.displayName ?? "Crypt")
+                            .font(Theme.gothic(26))
+                            .foregroundStyle(Theme.bone)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        if store.accounts.count > 1, let account = store.account {
+                            Text(account.label.uppercased())
+                                .font(Theme.engraved(9))
+                                .tracking(1.5)
+                                .foregroundStyle(Theme.ash)
+                                .lineLimit(1)
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         showMailboxes = true
@@ -31,7 +46,7 @@ struct InboxView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        compose = Draft()
+                        compose = store.newDraft()
                     } label: {
                         Image(systemName: "square.and.pencil")
                     }
@@ -77,6 +92,18 @@ struct InboxView: View {
             path = []
             query = ""
         }
+        .onChange(of: store.activeID) { _, _ in
+            path = []
+            query = ""
+        }
+        .onChange(of: store.messages) { _, _ in openPending() }
+        .onChange(of: store.pendingOpenUID) { _, _ in openPending() }
+    }
+
+    private func openPending() {
+        guard let uid = store.pendingOpenUID, let summary = store.messages.first(where: { $0.uid == uid }) else { return }
+        store.pendingOpenUID = nil
+        path = [summary]
     }
 
     @ViewBuilder

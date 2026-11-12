@@ -44,5 +44,7 @@ targets:
         UIAppFonts:
           - UnifrakturMaguntia-Book.ttf
           - Cinzel.ttf
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

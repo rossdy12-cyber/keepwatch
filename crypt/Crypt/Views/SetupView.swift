@@ -2,6 +2,8 @@ import SwiftUI
 
 struct SetupView: View {
     @EnvironmentObject private var store: MailStore
+    /// Set when adding a second account: shows Cancel and is called when done.
+    var onClose: (() -> Void)?
 
     @State private var name = ""
     @State private var email = ""
@@ -50,7 +52,7 @@ struct SetupView: View {
                     } label: {
                         HStack(spacing: 10) {
                             if working { ProgressView().tint(Theme.bone) }
-                            Text(working ? "Opening the gates…" : "Enter the Crypt")
+                            Text(working ? "Opening the gates…" : (onClose == nil ? "Enter the Crypt" : "Add this account"))
                         }
                     }
                     .buttonStyle(CrimsonButtonStyle())
@@ -67,6 +69,15 @@ struct SetupView: View {
             }
             .scrollDismissesKeyboard(.interactively)
         }
+        .overlay(alignment: .topLeading) {
+            if let onClose {
+                Button("Cancel", action: onClose)
+                    .font(Theme.engraved(14))
+                    .foregroundStyle(Theme.ash)
+                    .padding()
+                    .disabled(working)
+            }
+        }
         .onAppear { apply(provider) }
         .onChange(of: email) { _, value in
             guard !providerTouched, let guess = MailProvider.guess(for: value), guess != provider else { return }
@@ -81,8 +92,8 @@ struct SetupView: View {
                 .font(.system(size: 26))
                 .foregroundStyle(Theme.blood)
                 .shadow(color: Theme.blood, radius: 12)
-            Text("Crypt")
-                .font(Theme.gothic(72))
+            Text(onClose == nil ? "Crypt" : "Another Soul")
+                .font(Theme.gothic(onClose == nil ? 72 : 52))
                 .foregroundStyle(
                     LinearGradient(colors: [Theme.bone, Theme.ember], startPoint: .top, endPoint: .bottom)
                 )
@@ -192,7 +203,8 @@ struct SetupView: View {
         account.smtpSecurity = smtpSecurity
         account.saveSentCopy = saveSent
         do {
-            try await store.signIn(account: account, password: password.trimmingCharacters(in: .whitespaces))
+            try await store.addAccount(account, password: password.trimmingCharacters(in: .whitespaces))
+            onClose?()
         } catch {
             self.error = error.localizedDescription
         }

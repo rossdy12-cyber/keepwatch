@@ -39,6 +39,14 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Embed the push notification entitlement
+        working-directory: crypt
+        run: |
+          # An ad-hoc signature carries aps-environment into the IPA, so Sideloadly
+          # (signing with a paid developer account) keeps push enabled.
+          codesign --force --sign - --timestamp=none --entitlements Crypt.entitlements build/Release-iphoneos/Crypt.app
+          codesign -d --entitlements - build/Release-iphoneos/Crypt.app
+
       - name: Package unsigned IPA
         working-directory: crypt
         run: |

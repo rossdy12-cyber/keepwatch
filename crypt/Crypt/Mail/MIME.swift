@@ -527,6 +527,7 @@ enum MIME {
         cc: [EmailAddress],
         subject: String,
         body: String,
+        attachments: [Attachment] = [],
         inReplyTo: String?,
         references: String?
     ) -> (data: Data, messageID: String) {
@@ -545,14 +546,56 @@ enum MIME {
             lines.append("References: \(refs)")
         }
         lines.append("MIME-Version: 1.0")
-        lines.append("Content-Type: text/plain; charset=utf-8")
-        lines.append("Content-Transfer-Encoding: base64")
         lines.append("X-Mailer: Crypt for iPhone")
-        lines.append("")
+
         let normalized = body.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\n", with: "\r\n")
-        let encoded = Data(normalized.utf8).base64EncodedString(options: [.lineLength76Characters, .endLineWithCarriageReturn, .endLineWithLineFeed])
-        lines.append(encoded)
+        let textPart = [
+            "Content-Type: text/plain; charset=utf-8",
+            "Content-Transfer-Encoding: base64",
+            "",
+            base64Lines(Data(normalized.utf8))
+        ]
+
+        if attachments.isEmpty {
+            lines += textPart
+        } else {
+            let boundary = "crypt-\(UUID().uuidString)"
+            lines.append("Content-Type: multipart/mixed; boundary=\"\(boundary)\"")
+            lines.append("")
+            lines.append("This is a multi-part message in MIME format.")
+            lines.append("--\(boundary)")
+            lines += textPart
+            for attachment in attachments {
+                lines.append("--\(boundary)")
+                let type = attachment.mimeType.isEmpty ? "application/octet-stream" : attachment.mimeType
+                lines.append("Content-Type: \(type); name=\"\(asciiFilename(attachment.filename))\"")
+                lines.append("Content-Disposition: attachment; \(filenameParameter(attachment.filename))")
+                lines.append("Content-Transfer-Encoding: base64")
+                lines.append("")
+                lines.append(base64Lines(attachment.data))
+            }
+            lines.append("--\(boundary)--")
+        }
         let text = lines.joined(separator: "\r\n") + "\r\n"
         return (Data(text.utf8), messageID)
+    }
+
+    private static func base64Lines(_ data: Data) -> String {
+        data.base64EncodedString(options: [.lineLength76Characters, .endLineWithCarriageReturn, .endLineWithLineFeed])
+    }
+
+    private static func asciiFilename(_ name: String) -> String {
+        let cleaned = name.replacingOccurrences(of: "\"", with: "'").replacingOccurrences(of: "\\", with: "")
+        if cleaned.unicodeScalars.allSatisfy({ $0.isASCII }) { return cleaned }
+        return encodeHeaderWord(cleaned)
+    }
+
+    /// `filename="..."` for ASCII names, plus RFC 2231 `filename*=` for anything else.
+    private static func filenameParameter(_ name: String) -> String {
+        let ascii = asciiFilename(name)
+        guard !name.unicodeScalars.allSatisfy({ $0.isASCII }) else { return "filename=\"\(ascii)\"" }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: allowed) ?? ascii
+        return "filename=\"\(ascii)\"; filename*=utf-8''\(encoded)"
     }
 }
