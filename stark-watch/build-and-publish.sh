@@ -5,7 +5,9 @@
 set -uo pipefail
 
 STORE_URL="https://navidrome.nas-server.co.uk"
-TOKEN="${SIDESTORE_UPLOAD_TOKEN:?set SIDESTORE_UPLOAD_TOKEN}"
+# NO_UPLOAD=1 builds the IPA (out_store/StarkFace.ipa) without publishing, e.g. on CI without the token.
+NO_UPLOAD="${NO_UPLOAD:-0}"
+if [ "$NO_UPLOAD" = 1 ]; then TOKEN=""; else TOKEN="${SIDESTORE_UPLOAD_TOKEN:?set SIDESTORE_UPLOAD_TOKEN}"; fi
 VERSION="1.0.0"
 BUNDLE_ID="com.ross.starkface"
 
@@ -52,13 +54,16 @@ BUILD_STATUS=$?
 tail -c 5000 "$LOG" || true
 grep -E "error:|warning:|BUILD FAILED|BUILD SUCCEEDED|\.swift:[0-9]|bundle layout|Info.plist:" "$LOG" | tail -n 120 > /tmp/starkface_tail.log 2>/dev/null
 tail -n 60 "$LOG" >> /tmp/starkface_tail.log 2>/dev/null
-curl -fsSL -X POST -H "X-Upload-Token: $TOKEN" --data-binary @/tmp/starkface_tail.log \
-  "$STORE_URL/sidestore-api/upload?buildLog=1" || true
+if [ "$NO_UPLOAD" != 1 ]; then
+  curl -fsSL -X POST -H "X-Upload-Token: $TOKEN" --data-binary @/tmp/starkface_tail.log \
+    "$STORE_URL/sidestore-api/upload?buildLog=1" || true
+fi
 
 if [ "$BUILD_STATUS" -ne 0 ]; then
   echo "BUILD FAILED ($BUILD_STATUS)"
   exit "$BUILD_STATUS"
 fi
+[ "$NO_UPLOAD" = 1 ] && { echo "NO_UPLOAD=1: built out_store/StarkFace.ipa, not publishing"; exit 0; }
 
 echo "=== Upload to TrueNAS for concrete signing ==="
 curl -fsSL -X POST \

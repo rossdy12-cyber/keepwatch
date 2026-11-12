@@ -9,15 +9,29 @@ on:
   workflow_dispatch:
 
 jobs:
-  watch-app:
+  watch-only:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build the watch-only Stark Face app (unsigned)
+      - name: Build the watch-only app (for watchsign)
         run: bash stark-watch/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: StarkFace-ipa
+          name: StarkFace-watchonly-ipa
           path: stark-watch/out/StarkFace.ipa
+          retention-days: 30
+
+  store:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - name: Build the store IPA (iPhone wrapper + Watch app), no upload
+        run: NO_UPLOAD=1 bash stark-watch/build-and-publish.sh; cat /tmp/starkface_build.log | grep -E "error:|bundle layout|Info.plist:|BUILD" | tail -40
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarkFace-store-ipa
+          path: stark-watch/out_store/StarkFace.ipa
           retention-days: 30
