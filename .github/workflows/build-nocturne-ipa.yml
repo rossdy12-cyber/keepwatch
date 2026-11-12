@@ -1,0 +1,28 @@
+name: Build Nocturne (compile check)
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "nocturne/**"
+      - ".github/workflows/build-nocturne-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: nocturne
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Build (no signing, no upload — the store build runs on Codemagic)
+        run: |
+          set -o pipefail
+          xcodebuild -project Nocturne.xcodeproj -target Nocturne -configuration Release -sdk iphoneos \
+            SYMROOT="$PWD/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build \
+            | grep -E "error:|warning: .*(isolat|Sendable|deprecated)|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Release-iphoneos/Nocturne.app

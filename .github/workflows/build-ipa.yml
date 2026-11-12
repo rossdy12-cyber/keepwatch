@@ -43,6 +43,10 @@ on:
       - "mac-builder/**"
       - ".github/workflows/build-racebolt-ops-ipa.yml"
       - "crimson/**"
+      - "nocturne/**"
+      - "nocturne-android/**"
+      - "nocturne-server/**"
+      - ".github/workflows/build-nocturne-ipa.yml"
       - ".github/workflows/build-ipa.yml"
   workflow_dispatch:
 

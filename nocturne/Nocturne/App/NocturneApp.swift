@@ -61,10 +61,23 @@ struct NocturneApp: App {
     private func handle(_ url: URL) {
         guard let host = url.host else { return }
         switch host {
+        case "setup":
+            // From a join link: nocturne://setup?server=…&token=… signs this person in.
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            if let server = items.first(where: { $0.name == "server" })?.value, !server.isEmpty,
+               let token = items.first(where: { $0.name == "token" })?.value, !token.isEmpty {
+                store.relayURL = server
+                store.relayToken = token
+                Task { @MainActor in
+                    if let me = await Account.fetchMe(store) { Account.apply(me, to: store) }
+                    PushManager.shared.reregister()
+                    route = .messages
+                }
+            }
         case "chat", "messages":
-            // Optional room in the path (nocturne://chat/<room>) overrides the current room.
+            // Optional room in the path (nocturne://chat/<room>) opens that conversation.
             let room = url.pathComponents.filter { $0 != "/" }.first
-            if let room, !room.isEmpty { store.chatRoom = room }
+            if let room, !room.isEmpty { store.chatRoom = room; store.pendingRoom = room }
             route = .messages
         case "call":
             let room = url.pathComponents.filter { $0 != "/" }.first
@@ -103,7 +116,7 @@ struct ModuleHost: View {
     @ViewBuilder private var content: some View {
         switch module {
         case .phone: PhoneView()
-        case .messages: MessagesView()
+        case .messages: MessagesHome()
         case .clock: ClockView()
         case .weather: WeatherView()
         case .notes: NotesView()

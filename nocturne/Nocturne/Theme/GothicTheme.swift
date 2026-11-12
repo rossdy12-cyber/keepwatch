@@ -23,6 +23,8 @@ struct GothicTheme: Identifiable, Equatable, Codable {
 
 enum GothicThemes {
     static let all: [GothicTheme] = [
+        GothicTheme(name: "Vampire", bg: ["050203", "1C060B", "030102"], panel: "120609",
+                    accent: "D4163A", accent2: "FF6B81", text: "EFE4E1", muted: "9C8589"),
         GothicTheme(name: "Crimson Vigil", bg: ["0B0608", "1A0A0E", "070406"], panel: "1C1116",
                     accent: "B01030", accent2: "E04050", text: "EDE3E6", muted: "8A7076"),
         GothicTheme(name: "Amethyst Mourning", bg: ["0A0710", "160B22", "060410"], panel: "19122A",

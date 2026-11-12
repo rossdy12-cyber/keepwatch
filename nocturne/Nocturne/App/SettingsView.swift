@@ -39,7 +39,7 @@ struct SettingsView: View {
                                 .foregroundStyle(theme.accentColor)
                         }
                     }
-                    note("A private 1:1 room: you and the other person set the same Relay URL, token and room id, with different names. Tap the dice to make a hard-to-guess room, then share it with them.")
+                    note("Easiest: open your invitation link from the Nocturne server and tap \"Open Nocturne and sign in\" — it fills all of this in. With a personal sign-in, your name and conversations come from the server.")
                 }
 
                 section("About") {

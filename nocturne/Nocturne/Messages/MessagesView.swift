@@ -2,7 +2,7 @@ import SwiftUI
 import MessageUI
 import UIKit
 
-struct RelayMessage: Identifiable, Decodable {
+struct RelayMessage: Identifiable, Decodable, Equatable {
     let id: Int
     let sender: String
     let text: String
@@ -48,6 +48,7 @@ final class RelayClient: ObservableObject {
                 if !arr.isEmpty {
                     self.messages.append(contentsOf: arr)
                     self.lastID = arr.map(\.id).max() ?? self.lastID
+                    Account.markSeen(store.chatRoom, self.lastID)
                 }
                 self.status = ""
             }
@@ -71,6 +72,8 @@ final class RelayClient: ObservableObject {
 
 struct MessagesView: View {
     @EnvironmentObject var store: Store
+    /// Set when there are several conversations: shows a button back to the list.
+    var onShowList: (() -> Void)? = nil
     @StateObject private var relay = RelayClient()
     @State private var draft = ""
     @State private var showSMS = false
@@ -81,6 +84,11 @@ struct MessagesView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 14) {
+                if let onShowList {
+                    Button(action: onShowList) {
+                        Image(systemName: "list.bullet").font(.title3).foregroundStyle(theme.accentColor)
+                    }
+                }
                 GothicTitle(text: store.partnerName.isEmpty ? "Messages" : store.partnerName, theme: theme, size: 26)
                 Spacer()
                 Button { relay.ring(store); store.inCall = true } label: {

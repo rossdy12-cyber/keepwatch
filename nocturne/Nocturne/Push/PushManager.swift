@@ -29,6 +29,7 @@ final class PushManager {
             "token": token,
             "room": defaults.string(forKey: "chatRoom") ?? "home",
             "name": defaults.string(forKey: "displayName") ?? "Me",
+            "platform": "ios",
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         netSession.dataTask(with: request).resume()

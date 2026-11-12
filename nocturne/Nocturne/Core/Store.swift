@@ -22,6 +22,10 @@ final class Store: ObservableObject {
 
     /// Transient: set true to open the in-app video call over the current room.
     @Published var inCall = false
+    /// The signed-in person's conversations (from the server's /api/me); empty on older servers.
+    @Published var rooms: [ChatRoom] = []
+    /// A conversation to open next (from a notification or link), consumed by the Messages module.
+    @Published var pendingRoom: String?
 
     var theme: GothicTheme {
         GothicThemes.all.first { $0.name == themeName } ?? GothicThemes.default
