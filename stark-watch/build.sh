@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Builds Stark Face as a stand-alone (watch-only) Apple Watch app: out/StarkFace.ipa
-# (Payload/StarkFace.app with its complications). It's unsigned: sign it with watchsign.exe, then install it
-# with watch-devmode/watch_install.py.
+# Builds the Stark Face Apple Watch app (with its complications), unsigned.
+#   Default: watch-only app -> out/StarkFace.ipa, for watchsign.exe + watch-devmode/watch_install.py.
+#   COMPANION_ID=<iOS bundle id>: builds it to sit inside that iPhone app (Watch/StarkFace.app), which is
+#   how the Stark Store installs it; build-and-publish.sh uses this mode.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SRC=stark-watch
 OUT=stark-watch/out
 APP="$OUT/Payload/StarkFace.app"
 EXT="$APP/PlugIns/StarkFaceWidgets.appex"
-BUNDLE_ID="com.ross.starkface"
+COMPANION_ID="${COMPANION_ID:-}"
+if [ -n "$COMPANION_ID" ]; then BUNDLE_ID="$COMPANION_ID.watchkitapp"; else BUNDLE_ID="com.ross.starkface.watchonly"; fi
 VERSION="1.0.0"
 BUILD="$(date +%Y%m%d%H%M)"
 rm -rf "$OUT" && mkdir -p "$EXT"
@@ -58,7 +60,7 @@ cat > "$APP/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
 $(platform_keys)
   <key>WKApplication</key><true/>
-  <key>WKWatchOnly</key><true/>
+$(if [ -n "$COMPANION_ID" ]; then echo "  <key>WKCompanionAppBundleIdentifier</key><string>$COMPANION_ID</string>"; else echo "  <key>WKWatchOnly</key><true/>"; fi)
   <key>WKRunsIndependentlyOfCompanionApp</key><true/>
   <key>WKBackgroundModes</key>
   <array><string>mindfulness</string></array>
@@ -89,5 +91,7 @@ $(platform_keys)
 PLIST
 
 plutil -lint "$APP/Info.plist" "$EXT/Info.plist"
-(cd "$OUT" && zip -qry StarkFace.ipa Payload)
-ls -lh "$OUT/StarkFace.ipa"
+if [ -z "$COMPANION_ID" ]; then
+  (cd "$OUT" && zip -qry StarkFace.ipa Payload)
+  ls -lh "$OUT/StarkFace.ipa"
+fi

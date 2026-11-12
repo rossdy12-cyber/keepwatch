@@ -1,0 +1,6 @@
+out/
+out_store/
+pkg/
+build/
+*.xcodeproj/
+StarkFacePhone/Info.plist
