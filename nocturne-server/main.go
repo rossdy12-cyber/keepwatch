@@ -1,6 +1,6 @@
-// Nocturne Server — a single self-contained relay for the Nocturne chat apps (iPhone + Windows).
-// It does NOT need jarvis-core. One binary provides: the chat relay, the video-call signalling + call page,
-// and native Apple push (APNs) — so a closed iPhone still gets notified, with no ntfy and no third party.
+// Nocturne Server — a single self-contained relay for the Nocturne chat apps (iPhone, Android, Windows).
+// It does NOT need jarvis-core. One binary provides: the chat relay with per-person logins and private rooms,
+// the video-call signalling + call page, native Apple push (APNs) and Android push (Firebase).
 //
 // Run it on your homelab (TrueNAS). Configure with environment variables (see README).
 package main
@@ -28,16 +28,16 @@ import (
 // -------------------------------------------------------------------------------- config
 
 var (
-	port        = env("PORT", "8990")
-	authToken   = strings.TrimSpace(os.Getenv("AUTH_TOKEN"))
-	dataDir     = env("DATA_DIR", "./data")
-	apnsKeyID   = strings.TrimSpace(os.Getenv("APNS_KEY_ID"))
-	apnsTeamID  = env("APNS_TEAM_ID", "G42YL9QS8W")
-	apnsBundle  = env("APNS_BUNDLE_ID", "com.ross.nocturne")
-	apnsEnv     = strings.ToLower(env("APNS_ENV", "auto"))
-	turnURL     = strings.TrimSpace(os.Getenv("TURN_URL"))
-	turnUser    = strings.TrimSpace(os.Getenv("TURN_USER"))
-	turnPass    = strings.TrimSpace(os.Getenv("TURN_PASS"))
+	port       = env("PORT", "8990")
+	authToken  = strings.TrimSpace(os.Getenv("AUTH_TOKEN"))
+	dataDir    = env("DATA_DIR", "./data")
+	apnsKeyID  = strings.TrimSpace(os.Getenv("APNS_KEY_ID"))
+	apnsTeamID = env("APNS_TEAM_ID", "G42YL9QS8W")
+	apnsBundle = env("APNS_BUNDLE_ID", "com.ross.nocturne")
+	apnsEnv    = strings.ToLower(env("APNS_ENV", "auto"))
+	turnURL    = strings.TrimSpace(os.Getenv("TURN_URL"))
+	turnUser   = strings.TrimSpace(os.Getenv("TURN_USER"))
+	turnPass   = strings.TrimSpace(os.Getenv("TURN_PASS"))
 )
 
 func env(k, def string) string {
@@ -67,12 +67,15 @@ type Msg struct {
 	Sender string  `json:"sender"`
 	Text   string  `json:"text"`
 	TS     float64 `json:"ts"`
-	Room   string  `json:"-"`
+	Room   string  `json:"room"`
 }
 
+// A registered push device. User is set for people with a personal token; legacy devices use Room+Name.
 type token struct {
-	Room string `json:"room"`
-	Name string `json:"name"`
+	Room     string `json:"room"`
+	Name     string `json:"name"`
+	User     string `json:"user,omitempty"`
+	Platform string `json:"platform,omitempty"` // "ios" (APNs, default) or "android" (FCM)
 }
 
 var (
@@ -86,8 +89,12 @@ var (
 // -------------------------------------------------------------------------------- main
 
 func main() {
+	if runCLI(os.Args[1:]) {
+		return
+	}
 	_ = os.MkdirAll(dataDir, 0o700)
 	loadState()
+	loadUsers(true)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
@@ -101,9 +108,12 @@ func main() {
 	mux.HandleFunc("/api/call/signal", handleCallSignal)
 	mux.HandleFunc("/call/config", handleCallConfig)
 	mux.HandleFunc("/call", handleCallPage)
+	mux.HandleFunc("/api/me", handleMe)
+	mux.HandleFunc("/join", handleJoin)
+	mux.HandleFunc("/app/nocturne.apk", handleAPK)
 
 	addr := ":" + port
-	fmt.Printf("Nocturne Server on %s  (APNs configured: %v)\n", addr, apnsConfigured())
+	fmt.Printf("Nocturne Server on %s  (APNs: %v, FCM: %v, people: %d)\n", addr, apnsConfigured(), fcmConfigured(), len(usersSnapshot()))
 	srv := &http.Server{Addr: addr, Handler: logReqs(mux), ReadHeaderTimeout: 10 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Println("server stopped:", err)
@@ -122,50 +132,55 @@ func logReqs(h http.Handler) http.Handler {
 	})
 }
 
-func authed(r *http.Request) bool {
-	if authToken == "" {
-		return true
+// allow authenticates the request and checks it may use `room`; it writes the error itself.
+func allow(w http.ResponseWriter, r *http.Request, room string) (identity, bool) {
+	id, ok := whoami(r)
+	if !ok {
+		http.Error(w, "unauthorized", 401)
+		return id, false
 	}
-	return r.Header.Get("Authorization") == "Bearer "+authToken ||
-		r.URL.Query().Get("token") == authToken
+	if room != "" && !id.can(room) {
+		http.Error(w, "not your conversation", 403)
+		return id, false
+	}
+	return id, true
 }
 
 // -------------------------------------------------------------------------------- relay
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"status": "ok", "push": apnsConfigured()})
+	writeJSON(w, map[string]any{"status": "ok", "push": apnsConfigured(), "fcm": fcmConfigured()})
 }
 
 func handleSend(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
-		return
-	}
 	var in struct{ Room, Sender, Text string }
 	_ = json.NewDecoder(r.Body).Decode(&in)
+	room := clip(orDef(in.Room, "home"), 64)
+	id, ok := allow(w, r, room)
+	if !ok {
+		return
+	}
 	in.Text = strings.TrimSpace(in.Text)
 	if in.Text == "" {
 		http.Error(w, "empty", 400)
 		return
 	}
-	room := clip(orDef(in.Room, "home"), 64)
-	sender := clip(orDef(in.Sender, "Someone"), 64)
+	sender := id.displayName(in.Sender)
 	mu.Lock()
 	nextID++
 	m := Msg{ID: nextID, Sender: sender, Text: clip(in.Text, 4000), TS: nowUnix(), Room: room}
 	messages = append(messages, m)
 	appendLog(m)
 	mu.Unlock()
-	go pushToRoom(room, sender, sender, clip(in.Text, 200), "nocturne://chat/"+room)
+	go pushToRoom(room, sender, sender, clip(in.Text, 200), "nocturne://chat/"+room, "message")
 	writeJSON(w, map[string]any{"id": m.ID, "ts": m.TS})
 }
 
 func handleMessages(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
+	room := orDef(r.URL.Query().Get("room"), "home")
+	if _, ok := allow(w, r, room); !ok {
 		return
 	}
-	room := orDef(r.URL.Query().Get("room"), "home")
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	out := []Msg{}
 	mu.Lock()
@@ -182,24 +197,24 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleSeen(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
-		return
-	}
 	var in struct{ Room, Who string }
 	_ = json.NewDecoder(r.Body).Decode(&in)
+	room := orDef(in.Room, "home")
+	id, ok := allow(w, r, room)
+	if !ok {
+		return
+	}
 	mu.Lock()
-	presence[orDef(in.Room, "home")+"\x00"+orDef(in.Who, "Someone")] = nowUnix()
+	presence[room+"\x00"+id.displayName(in.Who)] = nowUnix()
 	mu.Unlock()
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 func handlePresence(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
+	room := orDef(r.URL.Query().Get("room"), "home")
+	if _, ok := allow(w, r, room); !ok {
 		return
 	}
-	room := orDef(r.URL.Query().Get("room"), "home")
 	now := nowUnix()
 	out := []map[string]any{}
 	mu.Lock()
@@ -216,50 +231,76 @@ func handlePresence(w http.ResponseWriter, r *http.Request) {
 // -------------------------------------------------------------------------------- push registration + APNs
 
 func handleRegister(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
+	id, ok := allow(w, r, "")
+	if !ok {
 		return
 	}
-	var in struct{ Token, Room, Name string }
+	var in struct{ Token, Room, Name, Platform string }
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if strings.TrimSpace(in.Token) == "" {
 		http.Error(w, "missing token", 400)
 		return
 	}
+	platform := "ios"
+	if strings.EqualFold(in.Platform, "android") {
+		platform = "android"
+	}
+	rec := token{Room: clip(orDef(in.Room, "home"), 64), Name: id.displayName(in.Name), User: id.name, Platform: platform}
+	if id.name == "" && !id.can(rec.Room) {
+		http.Error(w, "not your conversation", 403)
+		return
+	}
 	mu.Lock()
-	tokens[in.Token] = token{Room: clip(orDef(in.Room, "home"), 64), Name: clip(orDef(in.Name, "Someone"), 64)}
+	tokens[in.Token] = rec
 	saveTokens()
 	mu.Unlock()
-	writeJSON(w, map[string]any{"ok": true, "push": apnsConfigured()})
+	writeJSON(w, map[string]any{"ok": true, "push": apnsConfigured(), "fcm": fcmConfigured()})
 }
 
 func handleRing(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
-		return
-	}
 	var in struct{ Room, Caller string }
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	room := orDef(in.Room, "home")
-	caller := orDef(in.Caller, "Someone")
-	go pushToRoom(room, caller, caller+" is calling", "Incoming video call", "nocturne://call/"+room)
+	id, ok := allow(w, r, room)
+	if !ok {
+		return
+	}
+	caller := id.displayName(in.Caller)
+	go pushToRoom(room, caller, caller+" is calling", "Incoming video call", "nocturne://call/"+room, "call")
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func pushToRoom(room, excludeName, title, body, url string) {
-	if !apnsConfigured() {
-		return
-	}
+// pushToRoom notifies every device of the room's other members (personal tokens) or, for legacy devices,
+// every device registered to the room under a different name.
+func pushToRoom(room, sender, title, body, url, kind string) {
+	type target struct{ tok, platform string }
+	var targets []target
 	mu.Lock()
-	var targets []string
 	for tok, t := range tokens {
-		if t.Room == room && t.Name != excludeName {
-			targets = append(targets, tok)
+		var match bool
+		if t.User != "" {
+			match = t.User != sender && userInRoom(t.User, room)
+		} else {
+			match = t.Room == room && t.Name != sender
+		}
+		if match {
+			targets = append(targets, target{tok, t.Platform})
 		}
 	}
 	mu.Unlock()
-	for _, tok := range targets {
-		apnsPush(tok, title, body, url)
+	for _, t := range targets {
+		if t.platform == "android" {
+			data := map[string]string{"kind": kind, "room": room, "title": title, "body": body, "url": url,
+				"sender": sender, "roomTitle": sender}
+			if err := fcmSend(t.tok, data, kind == "call"); err == errFCMGone {
+				mu.Lock()
+				delete(tokens, t.tok)
+				saveTokens()
+				mu.Unlock()
+			}
+		} else if apnsConfigured() {
+			apnsPush(t.tok, title, body, url)
+		}
 	}
 }
 
@@ -409,11 +450,10 @@ func (h *sseHub) broadcast(room, fromID, msg string) {
 }
 
 func handleCallStream(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
+	room := r.URL.Query().Get("room")
+	if _, ok := allow(w, r, room); !ok {
 		return
 	}
-	room := r.URL.Query().Get("room")
 	id := r.URL.Query().Get("id")
 	flusher, ok := w.(http.Flusher)
 	if room == "" || !ok {
@@ -444,11 +484,10 @@ func handleCallStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleCallSignal(w http.ResponseWriter, r *http.Request) {
-	if !authed(r) {
-		http.Error(w, "unauthorized", 401)
+	room := r.URL.Query().Get("room")
+	if _, ok := allow(w, r, room); !ok {
 		return
 	}
-	room := r.URL.Query().Get("room")
 	id := r.URL.Query().Get("id")
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	hub.broadcast(room, id, string(body))
@@ -490,6 +529,9 @@ func loadState() {
 		for sc.Scan() {
 			var m Msg
 			if json.Unmarshal(sc.Bytes(), &m) == nil {
+				if m.Room == "" {
+					m.Room = "home" // lines written before rooms were saved belong to the original room
+				}
 				messages = append(messages, m)
 				if m.ID > nextID {
 					nextID = m.ID
@@ -536,4 +578,3 @@ func safePrefix(s string) string {
 	}
 	return s
 }
-

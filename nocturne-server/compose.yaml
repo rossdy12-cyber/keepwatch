@@ -1,4 +1,5 @@
-# Standalone Nocturne server — chat relay + video-call signalling + native Apple push. No jarvis-core needed.
+# Standalone Nocturne server — chat relay with a private conversation per person, video-call signalling,
+# Apple push (iPhone) and Firebase push (Android). No jarvis-core needed.
 # Put this folder on your TrueNAS and deploy as a custom app (it builds the small Go binary itself).
 services:
   nocturne-server:
@@ -7,11 +8,24 @@ services:
     ports:
       - "8990:8990"
     volumes:
-      - nocturne-data:/data        # chat history + registered push tokens
+      - nocturne-data:/data        # chat history, people (users.json), push tokens, nocturne.apk
+      # Firebase service-account key for Android push (keep it out of git). Adjust the left-hand path:
+      - /mnt/tank/apps/nocturne/firebase-service-account.json:/secrets/firebase.json:ro
     environment:
       PORT: "8990"
-      # Optional shared secret. If set, put the SAME value as the "Token" in the apps. Empty = open on your LAN.
+      # Public address of this server — used in each person's join link.
+      PUBLIC_URL: "https://nocturne.nas-server.co.uk"
+      # People: add them with  docker exec <container> nocturne-server adduser <Name> <room,...>
+      # Once anyone is added, every request needs that person's own token.
+      # The OLD shared token (if any). Keeps existing apps working, but only in LEGACY_ROOMS, until they
+      # sign in with their personal link. Empty it once everyone has switched.
       AUTH_TOKEN: ""
+      LEGACY_ROOMS: "home"
+      # --- Android push (Firebase Cloud Messaging) ---
+      FCM_SERVICE_ACCOUNT: "/secrets/firebase.json"
+      # Where the join page sends Android users for the app. Empty = this server's /app/nocturne.apk
+      # (copy the APK to /data/nocturne.apk).
+      APK_URL: ""
       # --- Native Apple push (APNs) ---
       # Needs an EXPLICIT App ID (com.ross.nocturne) with Push enabled + a .p8 key, and the signer resigning
       # Nocturne with that push profile. Leave APNS_KEY_P8 empty to run without push (chat still works).

@@ -1,11 +1,30 @@
 # Nocturne Server
 
-One small self-contained server for the Nocturne chat apps — **no jarvis-core, no ntfy, no Python**. A single Go
-binary that does:
+One small self-contained server for the Nocturne chat apps (iPhone, Android, Windows) — **no jarvis-core, no ntfy,
+no Python**. A single Go binary that does:
 
-- the **chat relay** (`/api/relay/*`),
+- the **chat relay** (`/api/relay/*`) with a **private conversation per pair of people** and a login per person,
 - the **video-call signalling + call page** (`/call`, SSE based),
-- **native Apple push** (APNs) so a closed iPhone still gets notified.
+- **Apple push** (APNs) for iPhones and **Firebase push** (FCM) for Android phones,
+- **join links**: a page per person with the Android download and a one-tap "Open Nocturne and sign in".
+
+## People and conversations
+Each person gets their own token and only sees their own conversations ("rooms"). Manage them from the NAS:
+```sh
+docker exec nocturne-server nocturne-server adduser Ross home,mum --admin
+docker exec nocturne-server nocturne-server adduser Lauren home
+docker exec nocturne-server nocturne-server adduser Mum mum
+docker exec nocturne-server nocturne-server users          # list
+docker exec nocturne-server nocturne-server link Mum       # print Mum's join link again
+docker exec nocturne-server nocturne-server adduser Mum mum --new-token   # revoke + issue a new link
+```
+Each command prints that person's **join link** (set `PUBLIC_URL`). Send it to them; opening it on their phone
+offers the app and signs them in. Room `home` is the original Ross & Lauren conversation, so its history carries
+over. Changes apply immediately, without a restart.
+
+## Android push (Firebase)
+Firebase console → Project settings → Service accounts → **Generate new private key**. Save that JSON on the NAS
+(not in git), mount it into the container and point `FCM_SERVICE_ACCOUNT` at it (see `compose.yaml`).
 
 Your iPhone (Nocturne) and the Windows client just point their **Relay URL** at this server.
 
@@ -42,5 +61,6 @@ relay and set `TURN_URL`/`TURN_USER`/`TURN_PASS` (coturn snippet in `../nocturne
 
 ## Endpoints
 `GET /health` · `POST /api/relay/send` · `GET /api/relay/messages?room=&since=` · `POST /api/relay/seen` ·
-`GET /api/relay/presence?room=` · `POST /api/push/register` · `POST /api/call/ring` ·
+`GET /api/relay/presence?room=` · `POST /api/push/register` (`platform`: `ios`/`android`) · `POST /api/call/ring` ·
+`GET /api/me` (who am I + my conversations) · `GET /join?t=` · `GET /app/nocturne.apk` ·
 `GET /api/call/stream?room=&id=` (SSE) · `POST /api/call/signal?room=&id=` · `GET /call` · `GET /call/config`
