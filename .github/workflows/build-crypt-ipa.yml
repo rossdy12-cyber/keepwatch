@@ -1,0 +1,56 @@
+name: Build Crypt IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "crypt/**"
+      - ".github/workflows/build-crypt-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Crypt Xcode project
+        working-directory: crypt
+        run: xcodegen generate
+
+      - name: Build unsigned Crypt app
+        working-directory: crypt
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Crypt.xcodeproj \
+            -target Crypt \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: crypt
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Crypt.app out/Payload/
+          cd out
+          zip -qry Crypt.ipa Payload
+          ls -lh Crypt.ipa
+
+      - name: Upload Crypt IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Crypt-ipa
+          path: crypt/out/Crypt.ipa
+          retention-days: 30
