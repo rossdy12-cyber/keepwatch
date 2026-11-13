@@ -1,0 +1,58 @@
+name: Build Seance IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "seance/**"
+      - "shared/GothicKit/**"
+      - "shared/MatrixKit/**"
+      - ".github/workflows/build-seance-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Seance Xcode project
+        working-directory: seance
+        run: xcodegen generate
+
+      - name: Build unsigned Seance app
+        working-directory: seance
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Seance.xcodeproj \
+            -target Seance \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: seance
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Seance.app out/Payload/
+          cd out
+          zip -qry Seance.ipa Payload
+          ls -lh Seance.ipa
+
+      - name: Upload Seance IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seance-ipa
+          path: seance/out/Seance.ipa
+          retention-days: 30
