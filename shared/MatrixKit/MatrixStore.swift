@@ -4,7 +4,7 @@ import UIKit
 
 // MARK: Models used by the UI
 
-struct MediaInfo: Hashable {
+struct MediaInfo: Hashable, Codable {
     var mxc: String
     var mimetype: String?
     var size: Int?
@@ -17,11 +17,11 @@ struct MediaInfo: Hashable {
     var waveform: [Int] = []
 }
 
-enum MessageKind: Hashable {
+enum MessageKind: Hashable, Codable {
     case text, notice, emote, image, video, audio, file, sticker, location, encrypted, redacted, unsupported(String)
 }
 
-struct Message: Identifiable, Hashable {
+struct Message: Identifiable, Hashable, Codable {
     var id: String                 // event ID, or a transaction ID while sending
     var eventID: String?
     var txnID: String?
@@ -39,7 +39,7 @@ struct Message: Identifiable, Hashable {
     var geoURI: String?
 }
 
-struct BridgeInfo: Hashable {
+struct BridgeInfo: Hashable, Codable {
     var protocolID: String          // "whatsapp", "discord", ...
     var networkID: String?
     var networkName: String?
@@ -47,13 +47,13 @@ struct BridgeInfo: Hashable {
     var channelName: String?
 }
 
-struct Member: Hashable {
+struct Member: Hashable, Codable {
     var name: String?
     var avatar: String?
     var membership: String
 }
 
-struct Room: Identifiable, Hashable {
+struct Room: Identifiable, Hashable, Codable {
     let id: String
     var name: String?
     var topic: String?
@@ -105,7 +105,57 @@ class MatrixStore: ObservableObject {
            let base = URL(string: saved.homeserver) {
             session = saved
             api = MatrixAPI(base: base, token: saved.accessToken)
+            loadCache()
         }
+    }
+
+    // MARK: Cache
+
+    /// Rooms and the sync position, saved so a restart doesn't need a full (slow) sync again.
+    private struct Cache: Codable {
+        var userID: String
+        var since: String
+        var rooms: [String: Room]
+        var direct: [String]
+    }
+
+    private var lastCacheSave = Date.distantPast
+
+    private var cacheURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("matrix-\(keychainService).json")
+    }
+
+    private func loadCache() {
+        guard let data = try? Data(contentsOf: cacheURL),
+              let cache = try? JSONDecoder().decode(Cache.self, from: data),
+              cache.userID == session?.userID else { return }
+        rooms = cache.rooms
+        since = cache.since
+        directRooms = Set(cache.direct)
+        initialSyncDone = true
+    }
+
+    private func saveCache(force: Bool = false) {
+        guard let since, let user = session?.userID, force || Date().timeIntervalSince(lastCacheSave) > 20 else { return }
+        lastCacheSave = Date()
+        var trimmed = rooms
+        for id in trimmed.keys {
+            if let count = trimmed[id]?.messages.count, count > 40 {
+                trimmed[id]?.messages.removeFirst(count - 40)
+                trimmed[id]?.reachedStart = false
+            }
+            trimmed[id]?.messages.removeAll { $0.pending || $0.failed }
+            trimmed[id]?.typing = []
+        }
+        let cache = Cache(userID: user, since: since, rooms: trimmed, direct: Array(directRooms))
+        let url = cacheURL
+        Task.detached(priority: .background) {
+            if let data = try? JSONEncoder().encode(cache) { try? data.write(to: url, options: .atomic) }
+        }
+    }
+
+    private func clearCache() {
+        try? FileManager.default.removeItem(at: cacheURL)
     }
 
     var client: MatrixAPI? { api }
@@ -127,6 +177,7 @@ class MatrixStore: ObservableObject {
         rooms = [:]
         since = nil
         initialSyncDone = false
+        clearCache()
         start()
     }
 
@@ -134,6 +185,7 @@ class MatrixStore: ObservableObject {
         syncTask?.cancel()
         await api?.logout()
         MatrixKeychain.save("", service: keychainService, account: "session")
+        clearCache()
         session = nil
         api = nil
         rooms = [:]
@@ -155,6 +207,7 @@ class MatrixStore: ObservableObject {
                     self.apply(response)
                     self.since = response.next_batch
                     self.initialSyncDone = true
+                    self.saveCache()
                     self.connectionProblem = nil
                     failures = 0
                 } catch is CancellationError {
@@ -564,6 +617,7 @@ class MatrixStore: ObservableObject {
     func send(_ roomID: String, type: String = "m.room.message", content: [String: Any], preview: Message? = nil) async {
         guard let api else { return }
         let txn = newTxn()
+        if rooms[roomID] == nil { rooms[roomID] = Room(id: roomID) }
         if var echo = preview {
             echo.id = txn
             echo.txnID = txn
@@ -722,6 +776,13 @@ class MatrixStore: ObservableObject {
     func managementRoom(for bridge: String) async throws -> String {
         let bot = botID(bridge)
         let key = "matrix.management.\(bridge)"
+        // Until the first sync finishes we don't know which rooms exist; don't create duplicates.
+        for _ in 0..<360 where !initialSyncDone {
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        guard initialSyncDone else {
+            throw MatrixError.server(code: "M_LOADING", message: "Still loading your chats from the server. Try again in a minute.", status: 0)
+        }
         // Only plain chats with just you and the bot (bridges also create spaces with the bot in them).
         let candidates = rooms.values.filter {
             !$0.isInvite && !$0.isSpace && $0.bridge == nil && $0.members[bot]?.membership == "join" && $0.joinedCount <= 2

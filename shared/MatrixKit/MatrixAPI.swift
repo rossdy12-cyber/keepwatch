@@ -236,12 +236,13 @@ struct MatrixAPI {
         _ = try? await request("POST", "/_matrix/client/v3/logout", body: [String: Any]())
     }
 
-    static let syncFilter = #"{"room":{"timeline":{"limit":30,"lazy_load_members":true},"state":{"lazy_load_members":true},"include_leave":false},"presence":{"types":[]}}"#
+    static let syncFilter = #"{"room":{"timeline":{"limit":15,"lazy_load_members":true},"state":{"lazy_load_members":true},"include_leave":false},"presence":{"types":[]}}"#
 
     func sync(since: String?, timeout: Int) async throws -> SyncResponse {
         var query = ["filter": Self.syncFilter, "timeout": String(timeout)]
         if let since { query["since"] = since }
-        let data = try await request("GET", "/_matrix/client/v3/sync", query: query, timeout: TimeInterval(timeout / 1000 + 60))
+        // The first sync of a big account can take minutes on a small server.
+        let data = try await request("GET", "/_matrix/client/v3/sync", query: query, timeout: since == nil ? 600 : TimeInterval(timeout / 1000 + 60))
         return try JSONDecoder().decode(SyncResponse.self, from: data)
     }
 
