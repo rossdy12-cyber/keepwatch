@@ -38,6 +38,7 @@ if [ "$BRIDGE" = whatsapp ]; then
       .bridge.private_chat_portal_meta = true |
       .encryption.allow = false |
       .encryption.default = false |
+      .network.os_name = "Mautrix-WhatsApp bridge" |
       .network.displayname_template = "{{or .FullName .BusinessName .PushName .Phone \"Unknown\"}}" |
       .network.history_sync.request_full_sync = false |
       .backfill.enabled = true |
