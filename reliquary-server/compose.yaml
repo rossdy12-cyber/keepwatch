@@ -12,8 +12,8 @@ services:
       - source: server
         target: /server.py
     volumes:
-      # CHANGE: the real path of your IDrive-Sync folder on the NAS (the left side). ":ro" = read-only:
-      # Reliquary can never change or delete anything in it.
+      # CHANGE: the real path of your IDrive-Sync folder on the NAS (the left side). It must start with /mnt/
+      # (keep the leading slash). ":ro" = read-only: Reliquary can never change or delete anything in it.
       - /mnt/CHANGE-ME-pool/IDrive-Sync:/gallery:ro
       # Thumbnails, the date index and favourites.
       - reliquary-cache:/cache
