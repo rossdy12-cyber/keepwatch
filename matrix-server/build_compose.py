@@ -34,7 +34,30 @@ x-env: &env
   MAX_UPLOAD: 2G
   TZ: Europe/London
 
+x-db: &db
+  # The database password. It never leaves the private network between these containers,
+  # but you can change it before the first start (not afterwards).
+  POSTGRES_USER: synapse
+  POSTGRES_PASSWORD: synapse-internal-db-password
+  POSTGRES_DB: synapse
+
 services:
+  postgres:
+    <<: *common
+    image: postgres:16-alpine
+    container_name: matrix-postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      <<: *db
+      # Synapse needs the C collation.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
   synapse:
     <<: *common
     image: matrixdotorg/synapse:v1.165.0
@@ -45,11 +68,15 @@ services:
         target: /setup/synapse.sh
       - source: patch_synapse
         target: /setup/patch_synapse.py
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
-      - synapse-data:/data
-      - appservices:/appservices
+      - synapse-pg-data:/data
+      - appservices-pg:/appservices
     environment:
-      <<: *env
+      <<: [*env, *db]
+      POSTGRES_HOST: postgres
     ports:
       # The apps connect to http://<your NAS's Tailscale IP>:8790
       - "8790:8008"
@@ -63,8 +90,8 @@ services:
       - source: bridge_sh
         target: /setup/bridge.sh
     volumes:
-      - whatsapp-data:/data
-      - appservices:/appservices
+      - whatsapp-pg-data:/data
+      - appservices-pg:/appservices
     environment:
       <<: *env
       BRIDGE: whatsapp
@@ -79,8 +106,8 @@ services:
       - source: bridge_sh
         target: /setup/bridge.sh
     volumes:
-      - discord-data:/data
-      - appservices:/appservices
+      - discord-pg-data:/data
+      - appservices-pg:/appservices
     environment:
       <<: *env
       BRIDGE: discord
@@ -89,11 +116,14 @@ services:
 networks:
   matrix:
 
+# New volume names: switching to PostgreSQL starts everything fresh. The old volumes
+# (synapse-data, whatsapp-data, discord-data, appservices) can be deleted afterwards.
 volumes:
-  synapse-data:
-  whatsapp-data:
-  discord-data:
-  appservices:
+  postgres-data:
+  synapse-pg-data:
+  whatsapp-pg-data:
+  discord-pg-data:
+  appservices-pg:
 
 configs:
   synapse_sh:

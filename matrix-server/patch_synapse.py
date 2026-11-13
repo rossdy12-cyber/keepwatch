@@ -35,6 +35,22 @@ def config():
     files = [os.path.join(APPSERVICES, name) for name in ("doublepuppet.yaml", "whatsapp.yaml", "discord.yaml")
              if os.path.exists(os.path.join(APPSERVICES, name))]
     conf["app_service_config_files"] = files
+    # PostgreSQL (much faster than the default SQLite once bridges create hundreds of rooms).
+    if os.environ.get("POSTGRES_HOST"):
+        conf["database"] = {
+            "name": "psycopg2",
+            "txn_limit": 10000,
+            "args": {
+                "user": os.environ.get("POSTGRES_USER", "synapse"),
+                "password": os.environ.get("POSTGRES_PASSWORD", ""),
+                "dbname": os.environ.get("POSTGRES_DB", "synapse"),
+                "host": os.environ["POSTGRES_HOST"],
+                "cp_min": 5,
+                "cp_max": 10,
+            },
+        }
+    # Keep the in-memory caches generous; sync is the hot path for the apps.
+    conf["caches"] = {"global_factor": 2.0}
     # Private server: no federation, no public sign-ups, no phoning home.
     conf["federation_domain_whitelist"] = []
     conf["trusted_key_servers"] = []
