@@ -15,7 +15,10 @@ struct AgendaView: View {
         let from = calendar.startOfDay(for: start)
         let to = calendar.date(byAdding: .day, value: days, to: from)!
         let events = store.events(from: from, to: to)
-        let grouped = Dictionary(grouping: events) { calendar.startOfDay(for: max($0.startDate, from)) }
+        let grouped = Dictionary(grouping: events) { (event: EKEvent) -> Date in
+            let eventStart: Date = event.startDate
+            return calendar.startOfDay(for: max(eventStart, from))
+        }
         let keys = grouped.keys.sorted()
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8, pinnedViews: [.sectionHeaders]) {

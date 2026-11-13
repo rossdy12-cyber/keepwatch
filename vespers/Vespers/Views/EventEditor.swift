@@ -108,7 +108,8 @@ struct EventDraft: Identifiable {
         location = event.location ?? ""
         isAllDay = event.isAllDay
         start = event.startDate
-        end = event.isAllDay ? event.endDate.addingTimeInterval(-1) : event.endDate
+        let eventEnd: Date = event.endDate
+        end = event.isAllDay ? eventEnd.addingTimeInterval(-1) : eventEnd
         calendarID = event.calendar.calendarIdentifier
         repeatOption = RepeatOption(rule: event.recurrenceRules?.first)
         alert = event.alarms?.first.flatMap { AlertOption(rawValue: $0.relativeOffset) } ?? .none

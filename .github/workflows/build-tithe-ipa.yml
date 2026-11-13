@@ -1,0 +1,57 @@
+name: Build Tithe IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "tithe/**"
+      - "shared/GothicKit/**"
+      - ".github/workflows/build-tithe-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Tithe Xcode project
+        working-directory: tithe
+        run: xcodegen generate
+
+      - name: Build unsigned Tithe app
+        working-directory: tithe
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Tithe.xcodeproj \
+            -target Tithe \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: tithe
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Tithe.app out/Payload/
+          cd out
+          zip -qry Tithe.ipa Payload
+          ls -lh Tithe.ipa
+
+      - name: Upload Tithe IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tithe-ipa
+          path: tithe/out/Tithe.ipa
+          retention-days: 30

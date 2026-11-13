@@ -26,7 +26,7 @@ final class CalendarStore: ObservableObject {
     }
 
     var hasAccess: Bool {
-        access == .fullAccess || access == .authorized
+        access == .fullAccess
     }
 
     func requestAccess() async {
@@ -83,8 +83,10 @@ final class CalendarStore: ObservableObject {
         var result: [Date: [Color]] = [:]
         let calendar = Calendar.current
         for event in events(from: start, to: end) {
-            var day = calendar.startOfDay(for: max(event.startDate, start))
-            let last = event.endDate > event.startDate ? event.endDate.addingTimeInterval(-1) : event.endDate
+            let eventStart: Date = event.startDate
+            let eventEnd: Date = event.endDate
+            var day = calendar.startOfDay(for: max(eventStart, start))
+            let last: Date = eventEnd > eventStart ? eventEnd.addingTimeInterval(-1) : eventEnd
             let stop = min(last, end)
             while day <= stop {
                 var colours = result[day, default: []]
