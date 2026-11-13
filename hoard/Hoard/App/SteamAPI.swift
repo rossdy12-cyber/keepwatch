@@ -99,7 +99,7 @@ enum SteamError: LocalizedError {
         case .notConfigured: return "Add your Steam Web API key and Steam ID in Sanctum."
         case .privateProfile: return "Steam returned nothing. In Steam → Profile → Edit Profile → Privacy, set “Game details” (and “Friends list”) to Public."
         case .badKey: return "Steam refused the API key. Check it at steamcommunity.com/dev/apikey."
-        case .notFound(let what): return "Couldn't find the Steam profile “\(what)”."
+        case .notFound(let what): return "The key works, but Steam couldn't find the profile “\(what)”. Paste your profile link (Steam → your name → Profile → Copy page URL) or your 17-digit Steam ID."
         case .server(let text): return text
         }
     }

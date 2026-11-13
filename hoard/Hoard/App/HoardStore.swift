@@ -33,7 +33,17 @@ final class HoardStore: ObservableObject {
     var unplayedCount: Int { games.filter { $0.minutes == 0 }.count }
 
     func configure(key: String, profile: String) async throws {
-        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Pick the 32-character key out of whatever was pasted (labels, spaces, invisible characters).
+        guard let range = key.range(of: "[0-9A-Fa-f]{32}", options: .regularExpression) else {
+            throw SteamError.server("That doesn't look like a Steam Web API key. It's 32 letters and numbers, shown on steamcommunity.com/dev/apikey after “Key:”.")
+        }
+        let trimmedKey = String(key[range]).uppercased()
+        // Check the key on its own first, so a key problem and a profile problem give different messages.
+        do {
+            _ = try await Steam.players(["76561197960287930"], key: trimmedKey)
+        } catch SteamError.badKey {
+            throw SteamError.server("Steam rejected this key. Check it matches the one on steamcommunity.com/dev/apikey exactly. If you've only just made it, wait a few minutes and try again.")
+        }
         let id = try await Steam.resolve(profile, key: trimmedKey)
         let players = try await Steam.players([id], key: trimmedKey)
         guard let player = players.first else { throw SteamError.notFound(profile) }
