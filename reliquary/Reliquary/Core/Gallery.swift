@@ -200,7 +200,8 @@ struct GalleryClient {
 actor ImageLoader {
     static let shared = ImageLoader()
 
-    private let memory = NSCache<NSURL, UIImage>()
+    // NSCache is thread-safe, so it can be read from outside the actor.
+    nonisolated(unsafe) private let memory = NSCache<NSURL, UIImage>()
     private var inFlight: [URL: Task<UIImage?, Never>] = [:]
 
     init() {
