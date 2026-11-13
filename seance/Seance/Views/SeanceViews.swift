@@ -451,6 +451,8 @@ struct LinkWhatsAppView: View {
     @State private var code: String?
     @State private var log: [String] = []
     @State private var working = false
+    @State private var loginStart = 0
+    @State private var logged: Set<String> = []
 
     enum Stage { case enterNumber, waitingForCode, linked }
 
@@ -531,36 +533,50 @@ struct LinkWhatsAppView: View {
     private func requestCode() async {
         working = true
         defer { working = false }
+        code = nil
+        logged = []
+        log = []
         do {
-            _ = try await matrix.ask("whatsapp", "cancel", wait: 2)
-            let prompt = try await matrix.ask("whatsapp", "login phone", wait: 6)
-            log += prompt.map(\.body)
-            let replies = try await matrix.ask("whatsapp", whatsappNumber(number), wait: 15)
-            log += replies.map(\.body)
-            code = findCode(replies.map(\.body).joined(separator: "\n"))
+            let room = try await matrix.managementRoom(for: "whatsapp")
+            _ = try await matrix.ask("whatsapp", "cancel", wait: 3)
+            // Everything the bot says from here on belongs to this login.
+            loginStart = matrix.rooms[room]?.messages.count ?? 0
+            _ = try await matrix.ask("whatsapp", "login phone", wait: 20)
+            // Wait until the bot actually asks for the number (a busy NAS can be slow).
+            for _ in 0..<40 where !botSince(room).contains(where: { $0.body.lowercased().contains("phone number") }) {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+            await matrix.sendText(room, whatsappNumber(number))
             stage = .waitingForCode
         } catch {
             log.append(error.localizedDescription)
         }
     }
 
-    /// Keeps reading the bot's messages until it reports success (or a new code).
+    private func botSince(_ room: String) -> [Message] {
+        let messages = matrix.rooms[room]?.messages ?? []
+        guard loginStart < messages.count else { return [] }
+        return messages[loginStart...].filter { $0.sender == matrix.botID("whatsapp") }
+    }
+
+    /// Reads every bot message since the login began: the code, success, or a failure.
     private func watchForResult() async {
-        guard let roomID = try? await matrix.managementRoom(for: "whatsapp") else { return }
-        var seen = matrix.rooms[roomID]?.messages.count ?? 0
+        guard let room = try? await matrix.managementRoom(for: "whatsapp") else { return }
         while !Task.isCancelled && stage == .waitingForCode {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            let messages = matrix.rooms[roomID]?.messages ?? []
-            guard messages.count > seen else { continue }
-            for message in messages[seen...] where message.sender == matrix.botID("whatsapp") {
+            for message in botSince(room) where !logged.contains(message.id) {
+                logged.insert(message.id)
                 log.append(message.body)
-                if code == nil, let found = findCode(message.body) { code = found }
+                if let found = findCode(message.body) { code = found }
                 let lower = message.body.lowercased()
                 if lower.contains("successfully logged in") || lower.contains("logged in as") {
                     stage = .linked
+                } else if lower.contains("login failed") || lower.contains("failed to submit") || lower.contains("timed out") {
+                    // Let the user try again with a fresh code.
+                    code = nil
+                    stage = .enterNumber
                 }
             }
-            seen = messages.count
+            try? await Task.sleep(nanoseconds: 700_000_000)
         }
     }
 
