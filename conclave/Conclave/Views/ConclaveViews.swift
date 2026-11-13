@@ -536,7 +536,7 @@ struct ServersView: View {
                         }
                     }
                     if !working && entries.isEmpty {
-                        Text(lines.isEmpty ? "Link Discord first." : lines.joined(separator: "\n")).font(Theme.serif(13)).foregroundStyle(Theme.ash)
+                        Text(lines.isEmpty ? "The bridge didn't answer. Pull down to try again, or check that Discord is linked." : lines.joined(separator: "\n")).font(Theme.serif(13)).foregroundStyle(Theme.ash)
                     }
                 } footer: {
                     Text("Bringing a server across creates a room for every channel you can see. Big servers take a minute.")
@@ -562,7 +562,7 @@ struct ServersView: View {
     private func load() async {
         working = true
         defer { working = false }
-        let replies = (try? await matrix.ask("discord", "guilds status", wait: 6)) ?? []
+        let replies = (try? await matrix.ask("discord", "guilds status", wait: 20)) ?? []
         lines = replies.flatMap { $0.body.components(separatedBy: .newlines) }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }
 

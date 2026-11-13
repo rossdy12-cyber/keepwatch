@@ -701,11 +701,25 @@ class MatrixStore: ObservableObject {
     /// The management room with a bridge bot, created if needed.
     func managementRoom(for bridge: String) async throws -> String {
         let bot = botID(bridge)
-        if let existing = rooms.values.first(where: { !$0.isInvite && $0.members[bot]?.membership == "join" && $0.joinedCount <= 2 && $0.bridge == nil }) {
-            return existing.id
+        let key = "matrix.management.\(bridge)"
+        // Only plain chats with just you and the bot (bridges also create spaces with the bot in them).
+        let candidates = rooms.values.filter {
+            !$0.isInvite && !$0.isSpace && $0.bridge == nil && $0.members[bot]?.membership == "join" && $0.joinedCount <= 2
+        }
+        if let saved = UserDefaults.standard.string(forKey: key), candidates.contains(where: { $0.id == saved }) {
+            return saved
+        }
+        // Prefer the room the bot has called its management room.
+        let marked = candidates.first { room in
+            room.messages.contains { $0.sender == bot && $0.body.lowercased().contains("management") }
+        }
+        if let chosen = marked ?? candidates.first(where: { $0.messages.contains { $0.sender == bot } }) {
+            UserDefaults.standard.set(chosen.id, forKey: key)
+            return chosen.id
         }
         guard let api else { throw MatrixError.notSignedIn }
         let id = try await api.createDirect(with: bot)
+        UserDefaults.standard.set(id, forKey: key)
         // Wait for the bot to join.
         for _ in 0..<20 {
             if rooms[id]?.members[bot]?.membership == "join" { break }
