@@ -59,7 +59,7 @@ struct Guild: Identifiable, Hashable {
 
 extension MatrixStore {
     var discordRooms: [Room] {
-        rooms.values.filter { $0.bridge?.protocolID == "discord" && !$0.isSpace }
+        rooms.values.filter { ($0.bridge?.protocolID.hasPrefix("discord") ?? false) && !$0.isSpace }
     }
 
     var guilds: [Guild] {
