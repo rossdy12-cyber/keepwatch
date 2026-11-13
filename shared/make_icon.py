@@ -4,7 +4,8 @@ import math, sys
 LETTER, OUT = sys.argv[1], sys.argv[2]
 PREVIEW = sys.argv[3] if len(sys.argv) > 3 else None
 import os
-FONT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'GothicKit/Fonts/UnifrakturMaguntia-Book.ttf')
+FONT = os.environ.get('ICON_FONT') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'GothicKit/Fonts/UnifrakturMaguntia-Book.ttf')
+FONT_SIZE = int(os.environ.get('ICON_FONT_SIZE', '500'))
 S=1024
 img=Image.new('RGB',(S,S),(6,3,4))
 glow=Image.new('L',(S,S),0)
@@ -34,7 +35,7 @@ d=ImageDraw.Draw(img)
 d.polygon(outer,fill=(14,5,8))
 d.line(outer+[outer[0]],fill=(196,30,58),width=14,joint='curve')
 d.line(inner+[inner[0]],fill=(110,10,26),width=5,joint='curve')
-font=ImageFont.truetype(FONT,500)
+font=ImageFont.truetype(FONT,FONT_SIZE)
 txt=Image.new('L',(S,S),0); td=ImageDraw.Draw(txt)
 bb=td.textbbox((0,0),LETTER,font=font); w=bb[2]-bb[0]; h=bb[3]-bb[1]
 td.text((S/2-w/2-bb[0], 590-h/2-bb[1]),LETTER,font=font,fill=255)
