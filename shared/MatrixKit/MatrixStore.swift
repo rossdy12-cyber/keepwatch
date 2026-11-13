@@ -238,7 +238,27 @@ class MatrixStore: ObservableObject {
     }
 
     /// Subclasses can react to new data (for example, auto-accepting bridge invites).
-    func didApplySync() {}
+    func didApplySync() {
+        acceptBridgeInvites()
+    }
+
+    private var acceptedInvites: Set<String> = []
+
+    /// Bridges invite you to a room for every chat or channel. Join those automatically
+    /// (double puppeting usually does this, but not always).
+    private func acceptBridgeInvites() {
+        guard let api else { return }
+        let server = ":" + serverName
+        for room in rooms.values where room.isInvite && !acceptedInvites.contains(room.id) {
+            guard let inviter = room.inviter, inviter.hasSuffix(server) else { continue }
+            let local = inviter.dropFirst().split(separator: ":").first.map(String.init) ?? ""
+            let fromBridge = ["whatsapp", "discord"].contains { local == $0 + "bot" || local.hasPrefix($0 + "_") }
+            guard fromBridge else { continue }
+            acceptedInvites.insert(room.id)
+            let id = room.id
+            Task { try? await api.join(room: id) }
+        }
+    }
 
     private func applyState(_ event: MatrixEvent, to room: inout Room) {
         let c = event.content

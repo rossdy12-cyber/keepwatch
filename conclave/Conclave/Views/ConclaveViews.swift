@@ -526,6 +526,14 @@ struct ServersView: View {
                             if busyID == entry.id {
                                 ProgressView().tint(Theme.blood)
                             } else {
+                                if bridged {
+                                    Button("Resync") {
+                                        Task { await resync(entry.id) }
+                                    }
+                                    .font(Theme.engraved(12))
+                                    .foregroundStyle(Theme.ember)
+                                    .buttonStyle(.borderless)
+                                }
                                 Button(bridged ? "Remove" : "Bring across") {
                                     Task { await toggle(entry.id, bridged: bridged) }
                                 }
@@ -539,7 +547,7 @@ struct ServersView: View {
                         Text(lines.isEmpty ? "The bridge didn't answer. Pull down to try again, or check that Discord is linked." : lines.joined(separator: "\n")).font(Theme.serif(13)).foregroundStyle(Theme.ash)
                     }
                 } footer: {
-                    Text("Bringing a server across creates a room for every channel you can see. Big servers take a minute.")
+                    Text("Bringing a server across creates a room for every channel your Discord roles let you see. Big servers take a minute. Resync picks up channels added since, including ones unlocked by picking roles in the server's Channels & Roles.")
                         .font(Theme.serifItalic(12)).foregroundStyle(Theme.ash)
                 }
                 .listRowBackground(Theme.surface)
@@ -564,6 +572,14 @@ struct ServersView: View {
         defer { working = false }
         let replies = (try? await matrix.ask("discord", "guilds status", wait: 20)) ?? []
         lines = replies.flatMap { $0.body.components(separatedBy: .newlines) }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    /// Asks the bridge again for every channel you can see (picks up new or missed channels).
+    private func resync(_ id: String) async {
+        busyID = id
+        defer { busyID = nil }
+        _ = try? await matrix.ask("discord", "guilds bridge \(id) --entire", wait: 20)
+        await load()
     }
 
     private func toggle(_ id: String, bridged: Bool) async {
