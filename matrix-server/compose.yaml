@@ -16,6 +16,9 @@ x-env: &env
   # CHANGE: the username and password you'll sign in to Seance and Conclave with.
   MATRIX_USER: CHANGE-ME-username
   MATRIX_PASSWORD: CHANGE-ME-to-a-long-random-password
+  # Largest single file (photo, video, document) you can send or receive. There's no paid plan:
+  # this is your own server, so raise it as far as your NAS's disk allows.
+  MAX_UPLOAD: 2G
   TZ: Europe/London
 
 services:
