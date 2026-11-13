@@ -36,6 +36,10 @@ You need a **paid Apple Developer account**, and you must install Crypt with Sid
 
 Crypt sends the relay your accounts again whenever you add or remove one.
 
+## Séance and Conclave
+
+The same relay pushes new WhatsApp and Discord messages for **Séance** and **Conclave**. It acts as the Matrix "push gateway" that Synapse sends notifications to. In either app, open **Sanctum → Notifications**, enter the relay's address and `RELAY_SECRET`, and tap **Turn on notifications**. Install those apps with your paid developer Apple ID too. If Sideloadly doesn't switch on push for them, tick **Push Notifications** on their app IDs at developer.apple.com.
+
 ## Notes
 
 - **Your mail passwords are stored on the NAS** (in the `crypt-relay-data` volume, readable only by the container) so the relay can watch your inboxes. Keep port 8787 reachable over Tailscale only: don't forward it on your router.

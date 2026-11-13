@@ -34,4 +34,5 @@ The apps walk you through it:
 - The data lives in the `synapse-data`, `whatsapp-data`, `discord-data` and `appservices` volumes. Deleting the app keeps them unless you delete those volumes too.
 - To start over completely, delete the app *and* those four volumes.
 - `compose.yaml` is generated from `synapse.sh`, `patch_synapse.py` and `bridge.sh`. Edit those, then run `python3 build_compose.py`.
-- Tested end to end with Docker Compose: the server starts, the account is created, both bridge bots answer, and authenticated media upload and download work.
+- Synapse is allowed to reach private and Tailscale addresses so it can send pushes to the crypt-relay (it blocks them by default). Federation stays off.
+- Tested end to end with Docker Compose: the server starts, the account is created, both bridge bots answer, authenticated media upload and download work, and a message from a second user is pushed through the relay.

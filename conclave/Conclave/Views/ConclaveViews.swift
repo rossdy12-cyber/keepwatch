@@ -23,6 +23,12 @@ struct ConclaveHome: View {
             .sheet(isPresented: $showSettings) {
                 ConclaveSettings().presentationBackground(Theme.void)
             }
+            .onReceive(MatrixPush.shared.$openRoomID) { room in
+                guard let room else { return }
+                MatrixPush.shared.openRoomID = nil
+                showSettings = false
+                path = [room]
+            }
         }
     }
 
@@ -388,6 +394,7 @@ struct ConclaveSettings: View {
                         NavigationLink { LinkDiscordView() } label: { Label("Link Discord", systemImage: "link") }
                         NavigationLink { ServersView() } label: { Label("Choose servers", systemImage: "building.columns") }
                         NavigationLink { ConsoleView() } label: { Label("Bridge console", systemImage: "terminal") }
+                        NavigationLink { PushSettingsView() } label: { Label("Notifications", systemImage: "bell.badge") }
                     } header: {
                         Text("DISCORD").font(Theme.engraved(12)).tracking(2).foregroundStyle(Theme.ash)
                     } footer: {

@@ -14,4 +14,4 @@ A gothic black-and-crimson messenger for your WhatsApp chats, through the Matrix
 3. Sign in with `http://<NAS Tailscale IP>:8790` and your `MATRIX_USER` / `MATRIX_PASSWORD`.
 4. **Link WhatsApp:** enter your number. On your phone, open WhatsApp → Settings → Linked Devices → Link a Device → **Link with phone number instead**, and type the code Séance shows.
 
-Recent history (the last 50 messages per chat) is brought across when you link. New messages arrive live while the app is open. There are no push notifications yet.
+Recent history (the last 50 messages per chat) is brought across when you link. New messages arrive live while the app is open. For notifications when it's closed, set up the crypt-relay (`crypt-relay/README.md`) and turn on **Sanctum → Notifications**. Install with your paid developer Apple ID for push to work.

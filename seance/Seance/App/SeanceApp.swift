@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct SeanceApp: App {
+    @UIApplicationDelegateAdaptor(MatrixAppDelegate.self) private var appDelegate
     @StateObject private var matrix = MatrixStore(keychainService: "app.keepwatch.seance")
     @Environment(\.scenePhase) private var phase
 
@@ -37,6 +38,11 @@ struct SeanceApp: App {
                 }
             }
             .environmentObject(matrix)
+            .onChange(of: matrix.initialSyncDone) { _, done in
+                guard done else { return }
+                MatrixPush.shared.matrix = matrix
+                Task { await MatrixPush.shared.sync() }
+            }
             .preferredColorScheme(.dark)
             .tint(Theme.blood)
             .overlay(alignment: .top) {

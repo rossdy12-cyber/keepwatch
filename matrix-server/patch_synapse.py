@@ -44,6 +44,11 @@ def config():
     conf["url_preview_enabled"] = False
     conf["max_upload_size"] = os.environ.get("MAX_UPLOAD", "100M")
     conf["presence"] = {"enabled": True}
+    # Push notifications go to the relay on the NAS (a LAN or Tailscale address), which Synapse
+    # blocks by default. Allow private and Tailscale ranges; federation is off anyway.
+    conf["ip_range_whitelist"] = [
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "127.0.0.0/8", "fd7a:115c:a1e0::/48",
+    ]
     conf["media_retention"] = conf.get("media_retention") or {}
     # Bridges create many rooms and send many messages: loosen the default rate limits.
     conf["rc_message"] = {"per_second": 50, "burst_count": 200}

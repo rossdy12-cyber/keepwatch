@@ -86,6 +86,11 @@ struct ChatsView: View {
                     ChatView(roomID: value)
                 }
             }
+            .onReceive(MatrixPush.shared.$openRoomID) { room in
+                guard let room else { return }
+                MatrixPush.shared.openRoomID = nil
+                path = [room]
+            }
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet { roomID in
                     showNewChat = false
@@ -603,6 +608,9 @@ struct SanctumView: View {
                         NavigationLink {
                             BridgeConsole()
                         } label: { Label("Bridge console", systemImage: "terminal") }
+                        NavigationLink {
+                            PushSettingsView()
+                        } label: { Label("Notifications", systemImage: "bell.badge") }
                     } header: {
                         Text("WHATSAPP").font(Theme.engraved(12)).tracking(2).foregroundStyle(Theme.ash)
                     } footer: {

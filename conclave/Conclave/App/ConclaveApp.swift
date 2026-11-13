@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct ConclaveApp: App {
+    @UIApplicationDelegateAdaptor(MatrixAppDelegate.self) private var appDelegate
     @StateObject private var matrix = MatrixStore(keychainService: "app.keepwatch.conclave")
     @Environment(\.scenePhase) private var phase
 
@@ -20,6 +21,11 @@ struct ConclaveApp: App {
                 }
             }
             .environmentObject(matrix)
+            .onChange(of: matrix.initialSyncDone) { _, done in
+                guard done else { return }
+                MatrixPush.shared.matrix = matrix
+                Task { await MatrixPush.shared.sync() }
+            }
             .preferredColorScheme(.dark)
             .tint(Theme.blood)
             .overlay(alignment: .top) {

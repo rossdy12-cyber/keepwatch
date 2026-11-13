@@ -16,3 +16,5 @@ A gothic black-and-crimson Discord-style app for your Discord servers and DMs, t
 5. **Choose servers** (⚙ → Choose servers) and tap **Bring across** for each one you want.
 
 **Risk:** Discord's terms forbid automating user accounts, and this bridge does exactly that. Bans are rare but possible, so think about using a spare account.
+
+**Notifications:** set up the crypt-relay (`crypt-relay/README.md`), then open **⚙ → Notifications** and enter its address and secret. Install with your paid developer Apple ID for push to work.

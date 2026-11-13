@@ -41,6 +41,12 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Embed the push notification entitlement
+        working-directory: conclave
+        run: |
+          codesign --force --sign - --timestamp=none --entitlements Conclave.entitlements build/Release-iphoneos/Conclave.app
+          codesign -d --entitlements - build/Release-iphoneos/Conclave.app
+
       - name: Package unsigned IPA
         working-directory: conclave
         run: |

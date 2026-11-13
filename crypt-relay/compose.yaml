@@ -520,14 +520,76 @@ configs:
               device = self.store.snapshot().get(token)
               if device is None:
                   return False, "this iPhone isn't registered yet; tap Save and reconnect first"
+              app = (device.get("bundle_id") or "crypt").rsplit(".", 1)[-1]
+              names = {"crypt": "Crypt", "seance": "Séance", "conclave": "Conclave"}
               payload = {
                   "aps": {
-                      "alert": {"title": "Crypt", "body": "The relay is listening. New letters will find you here."},
+                      "alert": {"title": names.get(app, app.title()), "body": "The relay is listening. New messages will find you here."},
                       "sound": "default",
-                      "badge": self.badge_for(device),
                   }
               }
+              if device.get("accounts"):
+                  payload["aps"]["badge"] = self.badge_for(device)
               return self.apns.send(self.store, token, device, payload)
+
+          def matrix_notify(self, notification):
+              """Handles a push from Synapse (the Matrix push gateway API). Returns rejected pushkeys."""
+              devices = self.store.snapshot()
+              rejected = []
+              counts = notification.get("counts") or {}
+              content = notification.get("content") or {}
+              sender = notification.get("sender_display_name") or (notification.get("sender") or "").lstrip("@").split(":")[0]
+              room = notification.get("room_name") or ""
+              for target in notification.get("devices") or []:
+                  token = str(target.get("pushkey", "")).lower()
+                  device = devices.get(token)
+                  if device is None:
+                      rejected.append(target.get("pushkey"))
+                      continue
+                  aps = {}
+                  if "unread" in counts:
+                      aps["badge"] = int(counts.get("unread") or 0)
+                  if notification.get("event_id"):
+                      title = room or sender or "New message"
+                      alert = {"title": clip(title, 80)}
+                      if room and sender and sender != room:
+                          alert["subtitle"] = clip(sender, 60)
+                      alert["body"] = clip(describe(notification.get("type"), content), 180) if SHOW_PREVIEW else "New message"
+                      aps["alert"] = alert
+                      aps["sound"] = "default"
+                      aps["thread-id"] = notification.get("room_id") or ""
+                  if not aps:
+                      continue
+                  payload = {"aps": aps, "matrix": {"room_id": notification.get("room_id"), "event_id": notification.get("event_id")}}
+                  ok, detail = self.apns.send(self.store, token, device, payload, collapse_id=notification.get("event_id"))
+                  if not ok and detail in ("Unregistered", EXPLAIN.get("Unregistered")):
+                      rejected.append(target.get("pushkey"))
+              return rejected
+
+
+      def describe(event_type, content):
+          """A one-line description of a Matrix message for a notification."""
+          if event_type == "m.room.encrypted":
+              return "Encrypted message"
+          if event_type == "m.sticker":
+              return "Sticker"
+          kind = content.get("msgtype")
+          if kind == "m.image":
+              return "📷 Photo"
+          if kind == "m.video":
+              return "🎞 Video"
+          if kind == "m.audio":
+              return "🎙 Voice note" if "org.matrix.msc3245.voice" in content else "🎵 Audio"
+          if kind == "m.file":
+              return "📎 " + str(content.get("body") or "File")
+          if kind == "m.location":
+              return "📍 Location"
+          body = str(content.get("body") or "New message")
+          # Drop a quoted reply ("> <@user> text") so the new text shows.
+          lines = body.split("\n")
+          while lines and lines[0].startswith(">"):
+              lines.pop(0)
+          return "\n".join(lines).strip() or body
 
 
       relay = None
@@ -559,6 +621,17 @@ configs:
                   self.reply(404, {"error": "not found"})
 
           def do_POST(self):
+              if self.path.rstrip("/") == "/_matrix/push/v1/notify":
+                  # Synapse's pushes. Only devices the apps registered (with the secret) are accepted.
+                  try:
+                      length = int(self.headers.get("Content-Length", "0"))
+                      body = json.loads(self.rfile.read(length) or b"{}")
+                      rejected = relay.matrix_notify(body.get("notification") or {})
+                  except Exception as error:
+                      log.warning("Bad push from Matrix: %s", error)
+                      rejected = []
+                  self.reply(200, {"rejected": [r for r in rejected if r]})
+                  return
               auth = self.headers.get("Authorization", "")
               if not RELAY_SECRET or auth != "Bearer " + RELAY_SECRET:
                   self.reply(401, {"error": "wrong secret"})

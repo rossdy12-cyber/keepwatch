@@ -41,6 +41,12 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Embed the push notification entitlement
+        working-directory: seance
+        run: |
+          codesign --force --sign - --timestamp=none --entitlements Seance.entitlements build/Release-iphoneos/Seance.app
+          codesign -d --entitlements - build/Release-iphoneos/Seance.app
+
       - name: Package unsigned IPA
         working-directory: seance
         run: |
