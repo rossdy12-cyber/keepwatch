@@ -1,0 +1,57 @@
+name: Build Vespers IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "vespers/**"
+      - "shared/GothicKit/**"
+      - ".github/workflows/build-vespers-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Vespers Xcode project
+        working-directory: vespers
+        run: xcodegen generate
+
+      - name: Build unsigned Vespers app
+        working-directory: vespers
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Vespers.xcodeproj \
+            -target Vespers \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: vespers
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Vespers.app out/Payload/
+          cd out
+          zip -qry Vespers.ipa Payload
+          ls -lh Vespers.ipa
+
+      - name: Upload Vespers IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vespers-ipa
+          path: vespers/out/Vespers.ipa
+          retention-days: 30
