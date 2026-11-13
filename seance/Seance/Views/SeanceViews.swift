@@ -453,6 +453,7 @@ struct LinkWhatsAppView: View {
     @State private var working = false
     @State private var loginStart = 0
     @State private var logged: Set<String> = []
+    @State private var consoleRoom: String?
 
     enum Stage { case enterNumber, waitingForCode, linked }
 
@@ -505,11 +506,25 @@ struct LinkWhatsAppView: View {
                         Label("WhatsApp is linked. Your chats will appear as they sync.", systemImage: "checkmark.seal.fill")
                             .font(Theme.serif(17)).foregroundStyle(Theme.ember)
                     }
-                    if !log.isEmpty {
-                        OrnamentDivider()
-                        Text("FROM THE BRIDGE").font(Theme.engraved(11)).tracking(2).foregroundStyle(Theme.ash)
-                        ForEach(Array(log.enumerated()), id: \.offset) { _, line in
-                            Text(line).font(Theme.serif(13)).foregroundStyle(Theme.ash).textSelection(.enabled)
+                    OrnamentDivider()
+                    HStack {
+                        Text("FROM THE BRIDGE, LIVE").font(Theme.engraved(11)).tracking(2).foregroundStyle(Theme.ash)
+                        Spacer()
+                        if let problem = matrix.connectionProblem {
+                            Text(problem).font(Theme.serifItalic(11)).foregroundStyle(Theme.ember).lineLimit(1)
+                        }
+                    }
+                    let recent = consoleRoom.flatMap { matrix.rooms[$0]?.messages.suffix(10) }.map(Array.init) ?? []
+                    if recent.isEmpty {
+                        Text("Nothing yet. If this stays empty, Séance can't reach the bridge bot.")
+                            .font(Theme.serifItalic(13)).foregroundStyle(Theme.ash)
+                    }
+                    ForEach(recent) { message in
+                        let fromBot = message.sender == matrix.botID("whatsapp")
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(fromBot ? "Bridge" : "You").font(Theme.engraved(10)).foregroundStyle(fromBot ? Theme.ember : Theme.ash)
+                                .frame(width: 44, alignment: .leading)
+                            Text(message.body).font(Theme.serif(13)).foregroundStyle(fromBot ? Theme.bone : Theme.ash).textSelection(.enabled)
                         }
                     }
                 }
@@ -521,6 +536,7 @@ struct LinkWhatsAppView: View {
             guard stage == .waitingForCode else { return }
             await watchForResult()
         }
+        .task { consoleRoom = try? await matrix.managementRoom(for: "whatsapp") }
     }
 
     private func step(_ n: Int, _ text: String) -> some View {
@@ -538,6 +554,7 @@ struct LinkWhatsAppView: View {
         log = []
         do {
             let room = try await matrix.managementRoom(for: "whatsapp")
+            consoleRoom = room
             _ = try await matrix.ask("whatsapp", "cancel", wait: 3)
             // Everything the bot says from here on belongs to this login.
             loginStart = matrix.rooms[room]?.messages.count ?? 0
