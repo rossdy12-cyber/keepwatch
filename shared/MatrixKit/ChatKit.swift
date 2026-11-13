@@ -392,6 +392,7 @@ struct Composer: View {
     @StateObject private var recorder = VoiceRecorder()
     @State private var lastTyping = Date.distantPast
     @State private var holding = false
+    @State private var fieldID = 0
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -431,6 +432,7 @@ struct Composer: View {
                         .font(Theme.serif(16))
                         .foregroundStyle(Theme.bone)
                         .focused($focused)
+                        .id(fieldID)
                         .padding(.horizontal, 12).padding(.vertical, 8)
                         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 18))
                         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.line))
@@ -505,7 +507,11 @@ struct Composer: View {
     private func send() {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        // A focused multi-line field can re-insert pending autocorrect text after
+        // being cleared, so rebuild it and clear again on the next run loop.
         text = ""
+        fieldID += 1
+        DispatchQueue.main.async { text = ""; focused = true }
         matrix.setTyping(roomID, false)
         lastTyping = .distantPast
         let reply = replyTo, edit = editing
