@@ -1,0 +1,590 @@
+"""Crypt push relay.
+
+Keeps a live IMAP IDLE connection to the inbox of every account that Crypt registers, and sends an
+Apple push notification (APNs) to the iPhone when a new letter arrives.
+
+The iPhone registers itself with POST /register (device token plus each account's IMAP server and
+password); everything is stored in DATA_DIR/devices.json, readable only by the container.
+Configured with environment variables (see compose.yaml). Needs httpx[http2] and PyJWT[crypto].
+"""
+
+import email.header
+import email.utils
+import imaplib
+import json
+import logging
+import os
+import re
+import socket
+import ssl
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import httpx
+import jwt
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger("crypt-relay")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+EXPLAIN = {
+    "InvalidProviderToken": "Apple rejected the key: check APNS_KEY, APNS_KEY_ID and APNS_TEAM_ID",
+    "ExpiredProviderToken": "the relay's clock is wrong, so Apple rejected the key",
+    "BadDeviceToken": "Apple doesn't know this iPhone's token (wrong environment, or Crypt was reinstalled)",
+    "DeviceTokenNotForTopic": "the key's team doesn't match the developer account that signed Crypt",
+    "TopicDisallowed": "push isn't enabled for this app ID in your developer account",
+    "BadTopic": "the app's bundle ID isn't valid for this key",
+    "Unregistered": "this iPhone is no longer registered for Crypt notifications",
+}
+
+
+def env(name, default=""):
+    return os.environ.get(name, default).strip()
+
+
+APNS_KEY = env("APNS_KEY").replace("\\n", "\n")
+APNS_KEY_ID = env("APNS_KEY_ID")
+APNS_TEAM_ID = env("APNS_TEAM_ID")
+APNS_ENVIRONMENT = env("APNS_ENVIRONMENT", "auto").lower()  # auto, sandbox or production
+RELAY_SECRET = env("RELAY_SECRET")
+PORT = int(env("PORT", "8787") or "8787")
+DATA_DIR = env("DATA_DIR", "/data")
+IDLE_MINUTES = int(env("IDLE_MINUTES", "25") or "25")
+SHOW_PREVIEW = env("SHOW_PREVIEW", "true").lower() != "false"
+
+HOSTS = {
+    "production": "https://api.push.apple.com",
+    "sandbox": "https://api.sandbox.push.apple.com",
+}
+
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+class Store:
+    """devices.json: {token: {bundle_id, device_name, environment, accounts: [...]}}"""
+
+    def __init__(self, folder):
+        self.path = os.path.join(folder, "devices.json")
+        self.lock = threading.RLock()
+        os.makedirs(folder, exist_ok=True)
+        try:
+            with open(self.path) as handle:
+                self.devices = json.load(handle)
+        except FileNotFoundError:
+            self.devices = {}
+        except Exception as error:
+            log.error("Couldn't read %s (%s); starting empty", self.path, error)
+            self.devices = {}
+
+    def save(self):
+        with self.lock:
+            temp = self.path + ".tmp"
+            with open(temp, "w") as handle:
+                json.dump(self.devices, handle, indent=1)
+            os.chmod(temp, 0o600)
+            os.replace(temp, self.path)
+
+    def register(self, token, bundle_id, device_name, accounts):
+        with self.lock:
+            previous = self.devices.get(token, {})
+            self.devices[token] = {
+                "bundle_id": bundle_id,
+                "device_name": device_name,
+                "environment": previous.get("environment"),
+                "accounts": accounts,
+            }
+            self.save()
+
+    def unregister(self, token):
+        with self.lock:
+            if self.devices.pop(token, None) is not None:
+                self.save()
+
+    def set_environment(self, token, environment):
+        with self.lock:
+            device = self.devices.get(token)
+            if device is not None and device.get("environment") != environment:
+                device["environment"] = environment
+                self.save()
+
+    def snapshot(self):
+        with self.lock:
+            return json.loads(json.dumps(self.devices))
+
+
+def account_key(account):
+    return "%s:%s:%s" % (account["host"].lower(), account.get("port", 993), account["username"].lower())
+
+
+# ---------------------------------------------------------------------------
+# APNs
+# ---------------------------------------------------------------------------
+
+class APNs:
+    def __init__(self):
+        self.client = httpx.Client(http2=True, timeout=20)
+        self.token = None
+        self.token_time = 0
+        self.lock = threading.Lock()
+
+    def configured(self):
+        values = (APNS_KEY, APNS_KEY_ID, APNS_TEAM_ID)
+        return all(values) and not any("CHANGE" in value for value in values)
+
+    def bearer(self):
+        with self.lock:
+            # Apple wants the token refreshed at most every 20 minutes and at least every hour.
+            if self.token is None or time.time() - self.token_time > 40 * 60:
+                self.token = jwt.encode(
+                    {"iss": APNS_TEAM_ID, "iat": int(time.time())},
+                    APNS_KEY,
+                    algorithm="ES256",
+                    headers={"kid": APNS_KEY_ID},
+                )
+                self.token_time = time.time()
+            return self.token
+
+    def send(self, store, token, device, payload, collapse_id=None):
+        """Sends one notification. Returns (ok, environment or reason)."""
+        if not self.configured():
+            return False, "APNS_KEY, APNS_KEY_ID and APNS_TEAM_ID aren't all set on the relay"
+        known = device.get("environment")
+        if APNS_ENVIRONMENT in HOSTS:
+            order = [APNS_ENVIRONMENT]
+        elif known in HOSTS:
+            order = [known] + [e for e in ("sandbox", "production") if e != known]
+        else:
+            # Apps installed with Sideloadly use a development profile, so try sandbox first.
+            order = ["sandbox", "production"]
+        reason = "unknown error"
+        for environment in order:
+            headers = {
+                "authorization": "bearer " + self.bearer(),
+                "apns-topic": device.get("bundle_id") or "app.keepwatch.crypt",
+                "apns-push-type": "alert",
+                "apns-priority": "10",
+            }
+            if collapse_id:
+                headers["apns-collapse-id"] = collapse_id[:64]
+            try:
+                response = self.client.post(
+                    HOSTS[environment] + "/3/device/" + token,
+                    headers=headers,
+                    content=json.dumps(payload).encode(),
+                )
+            except Exception as error:
+                reason = "couldn't reach Apple: %s" % error
+                continue
+            if response.status_code == 200:
+                store.set_environment(token, environment)
+                return True, environment
+            try:
+                reason = response.json().get("reason", str(response.status_code))
+            except Exception:
+                reason = str(response.status_code)
+            if reason in ("BadDeviceToken", "DeviceTokenNotForTopic") and len(order) > 1:
+                continue  # wrong environment: try the other one
+            if response.status_code == 410 or reason == "Unregistered":
+                log.info("Device %s... is no longer registered with Apple; forgetting it", token[:8])
+                store.unregister(token)
+                return False, reason
+            if reason in ("InvalidProviderToken", "ExpiredProviderToken"):
+                with self.lock:
+                    self.token = None
+            break
+        reason = EXPLAIN.get(reason, reason)
+        log.warning("APNs refused a notification for %s...: %s", token[:8], reason)
+        return False, reason
+
+
+# ---------------------------------------------------------------------------
+# Mail watching
+# ---------------------------------------------------------------------------
+
+def decode(value):
+    if not value:
+        return ""
+    try:
+        return str(email.header.make_header(email.header.decode_header(value)))
+    except Exception:
+        return value
+
+
+def clip(text, limit):
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+class Watcher(threading.Thread):
+    """IDLEs on one account's INBOX and reports new letters."""
+
+    def __init__(self, relay, key, account):
+        super().__init__(daemon=True, name="watch-" + account.get("email", key))
+        self.relay = relay
+        self.key = key
+        self.account = account
+        self.stop_event = threading.Event()
+        self.imap = None
+        self.last_uid = None
+        self.uid_validity = None
+
+    def stop(self):
+        self.stop_event.set()
+        imap = self.imap
+        if imap is not None:
+            # Shutting the raw socket wakes the thread blocked in IDLE; it then cleans up itself.
+            # (Closing imaplib's file object here would deadlock against that read.)
+            try:
+                imap.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+
+    def run(self):
+        delay = 5
+        while not self.stop_event.is_set():
+            try:
+                self.session()
+                delay = 5
+            except imaplib.IMAP4.error as error:
+                text = str(error)
+                if "AUTHENTICATIONFAILED" in text.upper() or "LOGIN" in text.upper() or "credentials" in text.lower():
+                    log.error("%s: sign-in refused (%s). Retrying in 15 minutes.", self.account["email"], text)
+                    delay = 900
+                else:
+                    log.warning("%s: IMAP error: %s", self.account["email"], text)
+                    delay = min(delay * 2, 300)
+            except Exception as error:
+                if self.stop_event.is_set():
+                    break
+                log.warning("%s: connection lost (%s); reconnecting in %ss", self.account["email"], error, delay)
+                delay = min(delay * 2, 300)
+            finally:
+                if self.imap is not None:
+                    try:
+                        self.imap.shutdown()
+                    except Exception:
+                        pass
+                    self.imap = None
+            self.stop_event.wait(delay)
+
+    def session(self):
+        account = self.account
+        context = ssl.create_default_context()
+        imap = imaplib.IMAP4_SSL(account["host"], int(account.get("port", 993)), ssl_context=context, timeout=60)
+        self.imap = imap
+        imap.login(account["username"], account["password"])
+        typ, _ = imap.select("INBOX", readonly=True)
+        if typ != "OK":
+            raise imaplib.IMAP4.error("couldn't open INBOX")
+        validity = (imap.untagged_responses.get("UIDVALIDITY") or [None])[0]
+        uidnext = (imap.untagged_responses.get("UIDNEXT") or [None])[0]
+        self.relay.update_unseen(self.key, self.count_unseen(imap))
+        if validity != self.uid_validity or self.last_uid is None:
+            self.uid_validity = validity
+            if uidnext is not None:
+                self.last_uid = int(uidnext) - 1
+            else:
+                self.last_uid = self.highest_uid(imap)
+        else:
+            # Reconnected: catch up on anything that arrived while we were away.
+            self.check_new(imap)
+        log.info("%s: watching INBOX", account["email"])
+
+        has_idle = "IDLE" in imap.capabilities
+        while not self.stop_event.is_set():
+            if has_idle:
+                changed = self.idle(imap)
+            else:
+                self.stop_event.wait(120)
+                imap.noop()
+                changed = True
+            if self.stop_event.is_set():
+                break
+            if changed:
+                self.relay.update_unseen(self.key, self.count_unseen(imap))
+                self.check_new(imap)
+            else:
+                imap.noop()
+
+    def idle(self, imap):
+        """Waits in IDLE until the mailbox changes or IDLE_MINUTES pass. Returns True on a change."""
+        tag = imap._new_tag().decode()
+        imap.send(("%s IDLE\r\n" % tag).encode())
+        line = imap.readline()
+        if not line.startswith(b"+"):
+            raise imaplib.IMAP4.error("IDLE refused: %r" % line[:80])
+        changed = False
+        # A long socket timeout: servers send keep-alives, and a silent connection is replaced.
+        imap.sock.settimeout(IDLE_MINUTES * 60 + 60)
+        deadline = time.time() + IDLE_MINUTES * 60
+        while time.time() < deadline and not self.stop_event.is_set():
+            imap.sock.settimeout(max(5, deadline - time.time()))
+            try:
+                line = imap.readline()
+            except (socket.timeout, TimeoutError):
+                # The socket can't be read again after a timeout; reconnect.
+                raise ConnectionError("IDLE timed out")
+            if not line:
+                raise ConnectionError("server closed the connection")
+            upper = line.upper()
+            if upper.startswith(b"* BYE"):
+                raise ConnectionError("server said BYE")
+            if b"EXISTS" in upper or b"RECENT" in upper or b"FETCH" in upper or b"EXPUNGE" in upper:
+                changed = True
+                if b"EXISTS" in upper:
+                    break
+        imap.sock.settimeout(60)
+        imap.send(b"DONE\r\n")
+        while True:
+            line = imap.readline()
+            if not line:
+                raise ConnectionError("server closed the connection")
+            if line.startswith(tag.encode()):
+                imap.tagged_commands.pop(tag.encode(), None)
+                break
+            if b"EXISTS" in line.upper():
+                changed = True
+        return changed
+
+    def highest_uid(self, imap):
+        typ, data = imap.uid("SEARCH", None, "ALL")
+        uids = [int(x) for x in (data[0] or b"").split()] if typ == "OK" else []
+        return max(uids) if uids else 0
+
+    def count_unseen(self, imap):
+        typ, data = imap.search(None, "UNSEEN")
+        if typ != "OK":
+            return 0
+        return len((data[0] or b"").split())
+
+    def check_new(self, imap):
+        typ, data = imap.uid("SEARCH", None, "UID", "%d:*" % (self.last_uid + 1))
+        if typ != "OK":
+            return
+        uids = sorted(int(x) for x in (data[0] or b"").split() if int(x) > self.last_uid)
+        if not uids:
+            return
+        self.last_uid = uids[-1]
+        letters = []
+        for uid in uids[-5:]:
+            typ, parts = imap.uid("FETCH", str(uid), "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+            if typ != "OK":
+                continue
+            header = b""
+            seen = False
+            for part in parts:
+                if isinstance(part, tuple):
+                    header += part[1]
+                    if b"\\SEEN" in part[0].upper():
+                        seen = True
+            if seen:
+                continue  # already read elsewhere (for example, sent from another device)
+            message = email.message_from_bytes(header)
+            name, address = email.utils.parseaddr(decode(message.get("From", "")))
+            letters.append({"uid": uid, "from": name or address or "Unknown", "subject": decode(message.get("Subject", ""))})
+        if not letters:
+            return
+        extra = len(uids) - 5 if len(uids) > 5 else 0
+        log.info("%s: %d new letter(s)", self.account["email"], len(uids))
+        self.relay.notify(self.key, letters, extra)
+
+
+# ---------------------------------------------------------------------------
+# Relay
+# ---------------------------------------------------------------------------
+
+class Relay:
+    def __init__(self):
+        self.store = Store(DATA_DIR)
+        self.apns = APNs()
+        self.watchers = {}
+        self.unseen = {}
+        self.lock = threading.RLock()
+
+    def accounts_by_key(self):
+        """{account_key: account} across every registered device."""
+        result = {}
+        for device in self.store.snapshot().values():
+            for account in device.get("accounts", []):
+                result.setdefault(account_key(account), account)
+        return result
+
+    def reconcile(self):
+        """Starts, restarts and stops watchers to match the registered accounts."""
+        with self.lock:
+            wanted = self.accounts_by_key()
+            for key in list(self.watchers):
+                watcher = self.watchers[key]
+                account = wanted.get(key)
+                if account is None or account.get("password") != watcher.account.get("password"):
+                    watcher.stop()
+                    del self.watchers[key]
+            for key, account in wanted.items():
+                if key not in self.watchers:
+                    watcher = Watcher(self, key, account)
+                    self.watchers[key] = watcher
+                    watcher.start()
+            log.info("Watching %d account(s) for %d device(s)", len(self.watchers), len(self.store.snapshot()))
+
+    def update_unseen(self, key, count):
+        with self.lock:
+            self.unseen[key] = count
+
+    def badge_for(self, device):
+        with self.lock:
+            return sum(self.unseen.get(account_key(a), 0) for a in device.get("accounts", []))
+
+    def notify(self, key, letters, extra):
+        devices = self.store.snapshot()
+        for token, device in devices.items():
+            mine = [a for a in device.get("accounts", []) if account_key(a) == key]
+            if not mine:
+                continue
+            account = mine[0]
+            many_accounts = len(device.get("accounts", [])) > 1
+            badge = self.badge_for(device)
+            for index, letter in enumerate(letters):
+                body = clip(letter["subject"], 180) or "(no subject)"
+                if index == len(letters) - 1 and extra:
+                    body += " (and %d more)" % extra
+                alert = {"title": clip(letter["from"], 80)}
+                if SHOW_PREVIEW:
+                    alert["body"] = body
+                else:
+                    alert["body"] = "New letter"
+                if many_accounts:
+                    alert["subtitle"] = clip(account.get("label") or account.get("email", ""), 60)
+                payload = {
+                    "aps": {
+                        "alert": alert,
+                        "sound": "default",
+                        "badge": badge,
+                        "thread-id": account.get("id", key),
+                    },
+                    "crypt": {"account": account.get("id"), "uid": letter["uid"], "mailbox": "INBOX"},
+                }
+                self.apns.send(self.store, token, device, payload, collapse_id="%s-%s" % (account.get("id"), letter["uid"]))
+
+    def send_test(self, token):
+        device = self.store.snapshot().get(token)
+        if device is None:
+            return False, "this iPhone isn't registered yet; tap Save and reconnect first"
+        payload = {
+            "aps": {
+                "alert": {"title": "Crypt", "body": "The relay is listening. New letters will find you here."},
+                "sound": "default",
+                "badge": self.badge_for(device),
+            }
+        }
+        return self.apns.send(self.store, token, device, payload)
+
+
+relay = None
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "CryptRelay/1.0"
+
+    def log_message(self, format, *args):
+        pass
+
+    def reply(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self.reply(200, {
+                "ok": True,
+                "devices": len(relay.store.snapshot()),
+                "accounts": len(relay.watchers),
+                "apns_configured": relay.apns.configured(),
+            })
+        else:
+            self.reply(404, {"error": "not found"})
+
+    def do_POST(self):
+        auth = self.headers.get("Authorization", "")
+        if not RELAY_SECRET or auth != "Bearer " + RELAY_SECRET:
+            self.reply(401, {"error": "wrong secret"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            self.reply(400, {"error": "invalid JSON"})
+            return
+        token = str(body.get("device_token", "")).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{32,200}", token):
+            self.reply(400, {"error": "missing or invalid device_token"})
+            return
+        path = self.path.rstrip("/")
+        if path == "/register":
+            accounts = []
+            for account in body.get("accounts", []):
+                if not all(account.get(field) for field in ("host", "username", "password")):
+                    continue
+                accounts.append({
+                    "id": str(account.get("id", "")),
+                    "email": str(account.get("email", "")),
+                    "label": str(account.get("label", "")),
+                    "host": str(account["host"]),
+                    "port": int(account.get("port") or 993),
+                    "username": str(account["username"]),
+                    "password": str(account["password"]),
+                })
+            relay.store.register(token, str(body.get("bundle_id", "")), str(body.get("device_name", "")), accounts)
+            log.info("Registered %s (%s...) with %d account(s)", body.get("device_name", "a device"), token[:8], len(accounts))
+            relay.reconcile()
+            if not relay.apns.configured():
+                self.reply(500, {"error": "the relay has no APNs key; set APNS_KEY, APNS_KEY_ID and APNS_TEAM_ID"})
+                return
+            self.reply(200, {"ok": True, "accounts": len(accounts)})
+        elif path == "/unregister":
+            relay.store.unregister(token)
+            relay.reconcile()
+            self.reply(200, {"ok": True})
+        elif path == "/test":
+            ok, detail = relay.send_test(token)
+            if ok:
+                self.reply(200, {"ok": True, "environment": detail})
+            else:
+                self.reply(502, {"error": "Apple refused the test: %s" % detail})
+        else:
+            self.reply(404, {"error": "not found"})
+
+
+def main():
+    global relay
+    if not RELAY_SECRET or RELAY_SECRET.startswith("CHANGE-ME"):
+        log.error("Set RELAY_SECRET in the app's YAML to a long random password, then restart.")
+        sys.exit(1)
+    relay = Relay()
+    if relay.apns.configured():
+        try:
+            relay.apns.bearer()
+            log.info("APNs key %s for team %s loaded", APNS_KEY_ID, APNS_TEAM_ID)
+        except Exception as error:
+            log.error("The APNs key couldn't be read (%s). Paste the whole .p8 file into APNS_KEY.", error)
+    else:
+        log.warning("APNS_KEY, APNS_KEY_ID or APNS_TEAM_ID is missing: mail is watched but nothing is sent.")
+    relay.reconcile()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    log.info("Crypt relay listening on port %d", PORT)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

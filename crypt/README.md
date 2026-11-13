@@ -5,7 +5,10 @@ Crypt is a gothic email app for iPhone: black and crimson, blackletter titles, w
 - **Inbox and every folder:** newest first, with previews; pull down to refresh; scroll to load older mail.
 - **Swipe:** right to mark read/unread; left to flag or delete (deleting moves to Trash; in Trash it deletes for good).
 - **Reading:** HTML emails are recoloured to match the dark theme (tap the sun to see the original colours). JavaScript is off, and links open in Safari. Attachments can be opened or saved with the share sheet.
+- **Several accounts:** add as many as you like from the sidebar (☰). Each shows its unread count, and you can switch between them or swipe to remove one. When you have more than one, compose lets you choose which address to send from.
 - **Writing:** new letters, Reply, Reply All and Forward. A copy goes to Sent when your provider doesn't do that itself.
+- **Attachments:** the paperclip adds photos, videos or files (HEIC photos are sent as JPEG). Forward keeps the original attachments. Crypt warns you above 18 MB, because many servers refuse larger letters.
+- **Push notifications** within seconds of new mail, through a small relay on your NAS. See [`../crypt-relay`](../crypt-relay/README.md). This needs a paid Apple Developer account.
 - **Search** the current folder on the server.
 - **Move** a letter to Archive, Junk or any folder.
 
@@ -35,9 +38,9 @@ Type your email and Crypt picks the provider. For anything else, choose **Other*
 
 ## Limits
 
-- One account at a time.
-- No push: mail is fetched when you open the app or pull to refresh.
-- Letters are sent as plain text; you can't attach files yet.
+- Letters are written as plain text (no bold, colours or inline pictures).
+- There's no combined inbox: you look at one account at a time.
+- Without the relay, mail is only fetched when you open the app or pull to refresh.
 - IMAP must use SSL/TLS (usually port 993).
 
 ## How it's built

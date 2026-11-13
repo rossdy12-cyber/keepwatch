@@ -81,7 +81,7 @@ final class PushManager: ObservableObject {
     func didFailToRegister(_ error: Error) {
         let text = error.localizedDescription
         if text.contains("aps-environment") {
-            setStatus("This copy of Crypt isn't allowed to receive push. Install it with Sideloadly using your paid developer Apple ID.", error: true)
+            setStatus("This copy of Crypt isn't allowed to receive push. Install it with Sideloadly using your paid developer Apple ID. If you did, tick Push Notifications on Crypt's app ID at developer.apple.com (Identifiers), then reinstall.", error: true)
         } else {
             setStatus("Apple refused a push token: \(text)", error: true)
         }
