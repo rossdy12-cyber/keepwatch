@@ -1,0 +1,57 @@
+name: Build Ossuary IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "ossuary/**"
+      - "shared/GothicKit/**"
+      - ".github/workflows/build-ossuary-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Ossuary Xcode project
+        working-directory: ossuary
+        run: xcodegen generate
+
+      - name: Build unsigned Ossuary app
+        working-directory: ossuary
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Ossuary.xcodeproj \
+            -target Ossuary \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: ossuary
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Ossuary.app out/Payload/
+          cd out
+          zip -qry Ossuary.ipa Payload
+          ls -lh Ossuary.ipa
+
+      - name: Upload Ossuary IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ossuary-ipa
+          path: ossuary/out/Ossuary.ipa
+          retention-days: 30
