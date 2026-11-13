@@ -1,0 +1,609 @@
+"""Reliquary gallery server.
+
+Serves the photos and videos in one folder on the NAS (mounted read-only at /gallery) to the
+Reliquary iPhone app: folder listings, a date-sorted timeline, thumbnails, originals with range
+requests for video streaming, search and favourites.
+
+Nothing in the gallery folder is ever changed. Thumbnails, the index and favourites live in /cache.
+Configured with environment variables (see compose.yaml). Needs Pillow and pillow-heif, plus ffmpeg.
+"""
+
+import hashlib
+import json
+import logging
+import mimetypes
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from PIL import Image, ImageOps
+
+try:
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except Exception:  # HEIC thumbnails are skipped without it
+    pillow_heif = None
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
+log = logging.getLogger("reliquary")
+
+
+def env(name, default=""):
+    return os.environ.get(name, default).strip()
+
+
+ROOT = os.path.realpath(env("GALLERY_ROOT", "/gallery"))
+CACHE = env("CACHE_DIR", "/cache")
+TOKEN = env("GALLERY_TOKEN")
+PORT = int(env("PORT", "8788") or "8788")
+RESCAN_MINUTES = int(env("RESCAN_MINUTES", "30") or "30")
+SHOW_HIDDEN = env("SHOW_HIDDEN", "false").lower() == "true"
+
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
+VIDEO_EXT = {".mp4", ".mov", ".m4v", ".3gp", ".avi", ".mkv", ".webm", ".mts", ".m2ts", ".wmv", ".mpg", ".mpeg"}
+THUMB_SIZES = {"s": 400, "m": 1600}
+
+os.makedirs(os.path.join(CACHE, "thumbs"), exist_ok=True)
+thumb_slots = threading.BoundedSemaphore(4)
+
+
+def kind_of(name):
+    ext = os.path.splitext(name)[1].lower()
+    if ext in IMAGE_EXT:
+        return "image"
+    if ext in VIDEO_EXT:
+        return "video"
+    return None
+
+
+def visible(name):
+    if name.startswith(".") or name.startswith("@") or name in ("#recycle", "lost+found", "Thumbs.db"):
+        return SHOW_HIDDEN and name not in ("#recycle", "lost+found")
+    return True
+
+
+def resolve(relative):
+    """Maps a gallery-relative path to a real path, refusing anything outside the gallery."""
+    relative = (relative or "").strip("/")
+    full = os.path.realpath(os.path.join(ROOT, relative))
+    if full != ROOT and not full.startswith(ROOT + os.sep):
+        raise PermissionError("outside the gallery")
+    return full
+
+
+def rel(full):
+    return os.path.relpath(full, ROOT).replace(os.sep, "/") if full != ROOT else ""
+
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+def parse_exif_date(text):
+    if not text:
+        return None
+    text = str(text).strip().replace("\x00", "")
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M"):
+        try:
+            return datetime.strptime(text[:19], fmt).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def image_info(path):
+    """(taken, width, height) from the image header and EXIF."""
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+            taken = None
+            exif = image.getexif()
+            if exif:
+                sub = exif.get_ifd(0x8769)
+                taken = parse_exif_date(sub.get(36867) or sub.get(36868) or exif.get(306))
+                if exif.get(274) in (5, 6, 7, 8):
+                    width, height = height, width
+            return taken, width, height
+    except Exception:
+        return None, None, None
+
+
+def video_info(path):
+    """(taken, width, height, duration) from ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
+            capture_output=True, timeout=30,
+        )
+        data = json.loads(result.stdout or b"{}")
+    except Exception:
+        return None, None, None, None
+    taken = None
+    created = (data.get("format", {}).get("tags", {}) or {}).get("creation_time")
+    if created:
+        try:
+            taken = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            taken = None
+    width = height = None
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") == "video":
+            width, height = stream.get("width"), stream.get("height")
+            rotation = str((stream.get("tags") or {}).get("rotate", ""))
+            for side in stream.get("side_data_list", []) or []:
+                if "rotation" in side:
+                    rotation = str(side["rotation"])
+            if rotation.lstrip("-") in ("90", "270") and width and height:
+                width, height = height, width
+            break
+    try:
+        duration = float(data.get("format", {}).get("duration"))
+    except (TypeError, ValueError):
+        duration = None
+    return taken, width, height, duration
+
+
+# ---------------------------------------------------------------------------
+# Index
+# ---------------------------------------------------------------------------
+
+class Index:
+    def __init__(self, path):
+        self.path = path
+        self.local = threading.local()
+        self.write_lock = threading.Lock()
+        db = self.db()
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS media (
+                path TEXT PRIMARY KEY, folder TEXT, name TEXT, kind TEXT, size INTEGER, mtime REAL,
+                taken REAL, width INTEGER, height INTEGER, duration REAL, seen INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS media_taken ON media (taken DESC);
+            CREATE INDEX IF NOT EXISTS media_folder ON media (folder);
+            CREATE TABLE IF NOT EXISTS favorites (path TEXT PRIMARY KEY, added REAL);
+            """
+        )
+        db.commit()
+        self.scanning = False
+        self.last_scan = None
+
+    def db(self):
+        conn = getattr(self.local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, timeout=30)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            self.local.conn = conn
+        return conn
+
+    def scan(self):
+        if self.scanning:
+            return
+        self.scanning = True
+        started = time.time()
+        stamp = int(started)
+        db = self.db()
+        known = {row["path"]: (row["size"], row["mtime"]) for row in db.execute("SELECT path, size, mtime FROM media")}
+        added = 0
+        batch = []
+        try:
+            for directory, folders, files in os.walk(ROOT):
+                folders[:] = [f for f in folders if visible(f)]
+                for name in files:
+                    if not visible(name):
+                        continue
+                    kind = kind_of(name)
+                    if kind is None:
+                        continue
+                    full = os.path.join(directory, name)
+                    try:
+                        stat = os.stat(full)
+                    except OSError:
+                        continue
+                    path = rel(full)
+                    if known.get(path) == (stat.st_size, stat.st_mtime):
+                        batch.append(("touch", path, stamp))
+                    else:
+                        if kind == "image":
+                            taken, width, height = image_info(full)
+                            duration = None
+                        else:
+                            taken, width, height, duration = video_info(full)
+                        folder = rel(directory)
+                        batch.append(("upsert", (path, folder, name, kind, stat.st_size, stat.st_mtime,
+                                                 taken or stat.st_mtime, width, height, duration, stamp)))
+                        added += 1
+                    if len(batch) >= 500:
+                        self.flush(batch)
+                        batch = []
+            self.flush(batch)
+            with self.write_lock:
+                gone = db.execute("DELETE FROM media WHERE seen < ?", (stamp,)).rowcount
+                db.commit()
+            self.last_scan = time.time()
+            total = db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+            log.info("Scan finished in %.0fs: %d items, %d new or changed, %d removed",
+                     time.time() - started, total, added, gone)
+        except Exception as error:
+            log.error("Scan failed: %s", error)
+        finally:
+            self.scanning = False
+
+    def flush(self, batch):
+        if not batch:
+            return
+        db = self.db()
+        with self.write_lock:
+            for entry in batch:
+                if entry[0] == "touch":
+                    db.execute("UPDATE media SET seen = ? WHERE path = ?", (entry[2], entry[1]))
+                else:
+                    db.execute("INSERT OR REPLACE INTO media VALUES (?,?,?,?,?,?,?,?,?,?,?)", entry[1])
+            db.commit()
+
+    def favorites(self):
+        return {row["path"] for row in self.db().execute("SELECT path FROM favorites")}
+
+    def set_favorite(self, path, on):
+        db = self.db()
+        with self.write_lock:
+            if on:
+                db.execute("INSERT OR REPLACE INTO favorites VALUES (?, ?)", (path, time.time()))
+            else:
+                db.execute("DELETE FROM favorites WHERE path = ?", (path,))
+            db.commit()
+
+    def lookup(self, path):
+        row = self.db().execute("SELECT * FROM media WHERE path = ?", (path,)).fetchone()
+        return row
+
+
+index = None
+
+
+def item_json(row, favorites):
+    return {
+        "path": row["path"],
+        "name": row["name"],
+        "folder": row["folder"],
+        "kind": row["kind"],
+        "size": row["size"],
+        "taken": row["taken"],
+        "width": row["width"],
+        "height": row["height"],
+        "duration": row["duration"],
+        "favorite": row["path"] in favorites,
+    }
+
+
+def file_item(full, favorites):
+    """An item for a file the index hasn't reached yet."""
+    stat = os.stat(full)
+    path = rel(full)
+    return {
+        "path": path, "name": os.path.basename(full), "folder": rel(os.path.dirname(full)),
+        "kind": kind_of(full), "size": stat.st_size, "taken": stat.st_mtime,
+        "width": None, "height": None, "duration": None, "favorite": path in favorites,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Thumbnails
+# ---------------------------------------------------------------------------
+
+def thumbnail(full, size_key):
+    stat = os.stat(full)
+    edge = THUMB_SIZES[size_key]
+    key = hashlib.sha1(("%s|%d|%f|%s" % (full, stat.st_size, stat.st_mtime, size_key)).encode()).hexdigest()
+    target = os.path.join(CACHE, "thumbs", key[:2], key + ".jpg")
+    if os.path.exists(target):
+        return target
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    temp = target + ".%d.tmp" % threading.get_ident()
+    with thumb_slots:
+        if os.path.exists(target):
+            return target
+        if kind_of(full) == "video":
+            for offset in ("1", "0"):
+                subprocess.run(
+                    ["ffmpeg", "-v", "error", "-y", "-ss", offset, "-i", full, "-frames:v", "1",
+                     "-vf", "scale='min(%d,iw)':-2" % edge, "-q:v", "4", "-f", "image2", temp],
+                    capture_output=True, timeout=60,
+                )
+                if os.path.exists(temp) and os.path.getsize(temp) > 0:
+                    break
+            if not os.path.exists(temp):
+                raise ValueError("ffmpeg couldn't read this video")
+        else:
+            with Image.open(full) as image:
+                image.draft("RGB", (edge, edge))
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((edge, edge), Image.LANCZOS)
+                if image.mode not in ("RGB", "L"):
+                    background = Image.new("RGB", image.size, (9, 5, 7))
+                    converted = image.convert("RGBA")
+                    background.paste(converted, mask=converted.split()[-1])
+                    image = background
+                image.convert("RGB").save(temp, "JPEG", quality=82, optimize=True, progressive=True)
+        os.replace(temp, target)
+    return target
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+
+def folder_summary(full, favorites):
+    """Name, item count (this folder only) and a cover picture for a folder."""
+    path = rel(full)
+    row = index.db().execute(
+        "SELECT COUNT(*) AS n, MAX(taken) AS latest FROM media WHERE folder = ? OR folder LIKE ?",
+        (path, path + "/%"),
+    ).fetchone()
+    cover = index.db().execute(
+        "SELECT path FROM media WHERE (folder = ? OR folder LIKE ?) AND kind = 'image' ORDER BY taken DESC LIMIT 1",
+        (path, path + "/%"),
+    ).fetchone()
+    if cover is None:
+        cover = index.db().execute(
+            "SELECT path FROM media WHERE folder = ? OR folder LIKE ? ORDER BY taken DESC LIMIT 1",
+            (path, path + "/%"),
+        ).fetchone()
+    return {
+        "name": os.path.basename(full),
+        "path": path,
+        "count": row["n"] if row else 0,
+        "latest": row["latest"] if row else None,
+        "cover": cover["path"] if cover else None,
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "Reliquary/1.0"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args):
+        pass
+
+    def send_json(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def authorized(self, query):
+        header = self.headers.get("Authorization", "")
+        supplied = header[7:] if header.startswith("Bearer ") else query.get("token", [""])[0]
+        return bool(TOKEN) and supplied == TOKEN
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        route = parsed.path.rstrip("/") or "/"
+        if route == "/api/health":
+            self.send_json(200, {"ok": True, "name": "Reliquary"})
+            return
+        if not self.authorized(query):
+            self.send_json(401, {"error": "wrong token"})
+            return
+        try:
+            handler = {
+                "/api/status": self.status,
+                "/api/list": self.listing,
+                "/api/timeline": self.timeline,
+                "/api/favorites": self.favorites,
+                "/api/search": self.search,
+                "/thumb": self.thumb,
+                "/file": self.file,
+            }.get(route)
+            if handler is None:
+                self.send_json(404, {"error": "not found"})
+            else:
+                handler(query)
+        except PermissionError:
+            self.send_json(403, {"error": "outside the gallery"})
+        except FileNotFoundError:
+            self.send_json(404, {"error": "not found"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as error:
+            log.warning("%s failed: %s", route, error)
+            try:
+                self.send_json(500, {"error": str(error)})
+            except Exception:
+                pass
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length else b""
+        if not self.authorized(query):
+            self.send_json(401, {"error": "wrong token"})
+            return
+        route = parsed.path.rstrip("/")
+        try:
+            data = json.loads(body or b"{}")
+        except ValueError:
+            self.send_json(400, {"error": "invalid JSON"})
+            return
+        if route == "/api/favorite":
+            path = rel(resolve(data.get("path", "")))
+            index.set_favorite(path, bool(data.get("favorite", True)))
+            self.send_json(200, {"ok": True})
+        elif route == "/api/rescan":
+            threading.Thread(target=index.scan, daemon=True).start()
+            self.send_json(200, {"ok": True})
+        else:
+            self.send_json(404, {"error": "not found"})
+
+    # -- routes --
+
+    def status(self, query):
+        db = index.db()
+        counts = {row["kind"]: row["n"] for row in db.execute("SELECT kind, COUNT(*) AS n FROM media GROUP BY kind")}
+        self.send_json(200, {
+            "images": counts.get("image", 0),
+            "videos": counts.get("video", 0),
+            "favorites": db.execute("SELECT COUNT(*) FROM favorites").fetchone()[0],
+            "scanning": index.scanning,
+            "last_scan": index.last_scan,
+            "root": os.path.basename(ROOT) or ROOT,
+        })
+
+    def listing(self, query):
+        full = resolve(query.get("path", [""])[0])
+        if not os.path.isdir(full):
+            raise FileNotFoundError(full)
+        favorites = index.favorites()
+        folders, items = [], []
+        with os.scandir(full) as entries:
+            for entry in entries:
+                if not visible(entry.name):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    folders.append(folder_summary(entry.path, favorites))
+                elif entry.is_file() and kind_of(entry.name):
+                    row = index.lookup(rel(entry.path))
+                    items.append(item_json(row, favorites) if row else file_item(entry.path, favorites))
+        folders.sort(key=lambda f: f["name"].lower())
+        items.sort(key=lambda i: i["taken"] or 0, reverse=True)
+        self.send_json(200, {"path": rel(full), "name": os.path.basename(full) if full != ROOT else "", "folders": folders, "items": items})
+
+    def timeline(self, query):
+        offset = int(query.get("offset", ["0"])[0])
+        limit = min(500, int(query.get("limit", ["300"])[0]))
+        kind = query.get("kind", [""])[0]
+        favorites = index.favorites()
+        sql = "SELECT * FROM media"
+        args = []
+        if kind in ("image", "video"):
+            sql += " WHERE kind = ?"
+            args.append(kind)
+        sql += " ORDER BY taken DESC, path LIMIT ? OFFSET ?"
+        rows = index.db().execute(sql, args + [limit, offset]).fetchall()
+        self.send_json(200, {"items": [item_json(r, favorites) for r in rows], "offset": offset, "done": len(rows) < limit})
+
+    def favorites(self, query):
+        favorites = index.favorites()
+        rows = index.db().execute(
+            "SELECT media.* FROM media JOIN favorites ON favorites.path = media.path ORDER BY favorites.added DESC"
+        ).fetchall()
+        self.send_json(200, {"items": [item_json(r, favorites) for r in rows]})
+
+    def search(self, query):
+        text = query.get("q", [""])[0].strip()
+        if not text:
+            self.send_json(200, {"items": []})
+            return
+        favorites = index.favorites()
+        like = "%" + text.replace("%", "").replace("_", "") + "%"
+        rows = index.db().execute(
+            "SELECT * FROM media WHERE path LIKE ? ORDER BY taken DESC LIMIT 500", (like,)
+        ).fetchall()
+        self.send_json(200, {"items": [item_json(r, favorites) for r in rows]})
+
+    def thumb(self, query):
+        full = resolve(query.get("path", [""])[0])
+        size_key = query.get("size", ["s"])[0]
+        if size_key not in THUMB_SIZES:
+            size_key = "s"
+        if not os.path.isfile(full) or not kind_of(full):
+            raise FileNotFoundError(full)
+        target = thumbnail(full, size_key)
+        with open(target, "rb") as handle:
+            data = handle.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def file(self, query):
+        full = resolve(query.get("path", [""])[0])
+        if not os.path.isfile(full):
+            raise FileNotFoundError(full)
+        size = os.path.getsize(full)
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        if full.lower().endswith((".heic", ".heif")):
+            ctype = "image/heic"
+        start, end = 0, size - 1
+        header = self.headers.get("Range")
+        partial = False
+        if header:
+            match = re.match(r"bytes=(\d*)-(\d*)", header)
+            if match:
+                if match.group(1):
+                    start = int(match.group(1))
+                    if match.group(2):
+                        end = min(int(match.group(2)), size - 1)
+                elif match.group(2):
+                    start = max(0, size - int(match.group(2)))
+                partial = True
+        if start > end or start >= size:
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */%d" % size)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        length = end - start + 1
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if partial:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        if query.get("download", [""])[0]:
+            name = urllib.parse.quote(os.path.basename(full))
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + name)
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        with open(full, "rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+
+def rescan_loop():
+    while True:
+        index.scan()
+        time.sleep(max(5, RESCAN_MINUTES) * 60)
+
+
+def main():
+    global index
+    if not TOKEN or TOKEN.startswith("CHANGE-ME"):
+        log.error("Set GALLERY_TOKEN in the app's YAML to a long random password, then restart.")
+        sys.exit(1)
+    if not os.path.isdir(ROOT):
+        log.error("%s isn't there. Check the volume line that mounts your IDrive-Sync folder.", ROOT)
+        sys.exit(1)
+    index = Index(os.path.join(CACHE, "index.sqlite"))
+    log.info("Gallery folder: %s (HEIC %s)", ROOT, "on" if pillow_heif else "off")
+    threading.Thread(target=rescan_loop, daemon=True).start()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server.daemon_threads = True
+    log.info("Reliquary listening on port %d", PORT)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
