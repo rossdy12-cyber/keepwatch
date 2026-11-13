@@ -1,0 +1,57 @@
+name: Build Hoard IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "hoard/**"
+      - "shared/GothicKit/**"
+      - ".github/workflows/build-hoard-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Hoard Xcode project
+        working-directory: hoard
+        run: xcodegen generate
+
+      - name: Build unsigned Hoard app
+        working-directory: hoard
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Hoard.xcodeproj \
+            -target Hoard \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        working-directory: hoard
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Release-iphoneos/Hoard.app out/Payload/
+          cd out
+          zip -qry Hoard.ipa Payload
+          ls -lh Hoard.ipa
+
+      - name: Upload Hoard IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hoard-ipa
+          path: hoard/out/Hoard.ipa
+          retention-days: 30
