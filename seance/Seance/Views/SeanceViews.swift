@@ -419,7 +419,7 @@ struct NewChatSheet: View {
                 Task {
                     working = true
                     defer { working = false }
-                    let digits = "+" + number.filter(\.isNumber)
+                    let digits = whatsappNumber(number)
                     let before = Set(matrix.rooms.keys)
                     do {
                         let replies = try await matrix.ask("whatsapp", "start-chat \(digits)", wait: 10)
@@ -465,6 +465,10 @@ struct LinkWhatsAppView: View {
                     switch stage {
                     case .enterNumber:
                         InscribedField(label: "Your WhatsApp number", text: $number, prompt: "+44 7700 900123", keyboard: .phonePad)
+                        if number.filter(\.isNumber).count >= 7 {
+                            Text("Will link \(whatsappNumber(number)). Check this is your number in full international form.")
+                                .font(Theme.serifItalic(13)).foregroundStyle(Theme.ash)
+                        }
                         Button {
                             Task { await requestCode() }
                         } label: {
@@ -531,7 +535,7 @@ struct LinkWhatsAppView: View {
             _ = try await matrix.ask("whatsapp", "cancel", wait: 2)
             let prompt = try await matrix.ask("whatsapp", "login phone", wait: 6)
             log += prompt.map(\.body)
-            let replies = try await matrix.ask("whatsapp", "+" + number.filter(\.isNumber), wait: 15)
+            let replies = try await matrix.ask("whatsapp", whatsappNumber(number), wait: 15)
             log += replies.map(\.body)
             code = findCode(replies.map(\.body).joined(separator: "\n"))
             stage = .waitingForCode
@@ -653,4 +657,22 @@ struct BridgeConsole: View {
         }
         .task { roomID = try? await matrix.managementRoom(for: "whatsapp") }
     }
+}
+
+/// Turns what people type into the international form WhatsApp expects:
+/// "07700 900123" and "+44 07700 900123" both become "+447700900123", and "0044…" becomes "+44…".
+func whatsappNumber(_ raw: String) -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespaces)
+    var digits = trimmed.filter(\.isNumber)
+    if trimmed.hasPrefix("+") {
+        // A trunk "0" after the country code is a common mistake (e.g. +44 07…).
+        if digits.hasPrefix("440") { digits = "44" + digits.dropFirst(3) }
+    } else if digits.hasPrefix("00") {
+        digits = String(digits.dropFirst(2))
+        if digits.hasPrefix("440") { digits = "44" + digits.dropFirst(3) }
+    } else if digits.hasPrefix("0") {
+        // A UK number written the local way.
+        digits = "44" + digits.dropFirst()
+    }
+    return "+" + digits
 }
